@@ -64,7 +64,7 @@ class QASlot:
     id: str
     question_text: str
     answer_locator: AnswerLocator
-    answer_type: str = "text"  # text | checkbox | multi-select | date | number
+    answer_type: str = "text"  # text | multiple_choice | file | table | checkbox | multi-select | date | number
     confidence: float = 0.5
     meta: Dict[str, Any] = None
 
@@ -294,6 +294,72 @@ def _render_rich_excerpt(blocks: List[Union[Paragraph, Table]]) -> Tuple[str, Di
     excerpt = "\n".join(lines)
     return excerpt, table_idx_map
 
+# ─────────────────── answer-type heuristics ───────────────────
+
+_FILE_KWS = (
+    "attach",
+    "attachment",
+    "upload",
+    "enclose",
+    "file",
+    "document",
+)
+_TABLE_KWS = (
+    "table",
+    "spreadsheet",
+    "complete the table",
+    "fill in the table",
+    "table below",
+)
+_MC_KWS = (
+    "select",
+    "choose",
+    "check the box",
+    "checkbox",
+    "tick",
+    "multiple choice",
+    "which of the following",
+)
+_CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
+
+
+def infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]], q_block: int) -> str:
+    """Guess the expected answer format for a question.
+
+    The heuristic uses keywords in the question text and looks ahead a few
+    blocks to inspect formatting cues such as checkboxes or tables.
+    """
+
+    t = (question_text or "").strip().lower()
+    # Keyword-based checks first
+    if any(kw in t for kw in _FILE_KWS):
+        return "file"
+    if any(kw in t for kw in _TABLE_KWS):
+        return "table"
+    if any(kw in t for kw in _MC_KWS):
+        return "multiple_choice"
+
+    # Look ahead at subsequent blocks for visual cues
+    for nb in blocks[q_block + 1 : q_block + 6]:
+        if isinstance(nb, Table):
+            try:
+                if len(nb.rows) > 1 and len(nb.columns) > 1:
+                    return "table"
+            except Exception:
+                pass
+        if isinstance(nb, Paragraph):
+            txt = (nb.text or "").strip()
+            low = txt.lower()
+            if any(ch in txt for ch in _CHECKBOX_CHARS):
+                return "multiple_choice"
+            if re.search(r"\[[x ]\]|\([x ]\)", txt):
+                return "multiple_choice"
+            if re.match(_ENUM_PREFIX_RE, txt) and not _looks_like_question(txt):
+                return "multiple_choice"
+            if "yes" in low and "no" in low and len(low.split()) <= 4:
+                return "multiple_choice"
+    return "text"
+
 # ─────────────────── rule-based detectors ───────────────────
 
 def detect_para_question_with_blank(blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
@@ -325,6 +391,7 @@ def detect_para_question_with_blank(blocks: List[Union[Paragraph, Table]]) -> Li
                         id=f"slot_{uuid.uuid4().hex[:8]}",
                         question_text=text,
                         answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
+                        answer_type=infer_answer_type(text, blocks, i),
                         confidence=min(0.95, conf_base + 0.2),
                         meta={
                             "detector": "para_blank_after",
@@ -352,6 +419,7 @@ def detect_para_question_with_blank(blocks: List[Union[Paragraph, Table]]) -> Li
                                     answer_locator=AnswerLocator(
                                         type="table_cell", table_index=t_idx, row=0, col=0
                                     ),
+                                    answer_type=infer_answer_type(text, blocks, i),
                                     confidence=min(0.9, conf_base + 0.15),
                                     meta={
                                         "detector": "para_then_empty_1x1_table",
@@ -378,7 +446,7 @@ def _running_table_index(blocks: List[Union[Paragraph, Table]], upto: int) -> in
 def detect_two_col_table_q_blank(blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
     slots: List[QASlot] = []
     table_counter = -1
-    for b in blocks:
+    for i, b in enumerate(blocks):
         if isinstance(b, Table):
             table_counter += 1
             if len(b.columns) != 2:
@@ -401,6 +469,7 @@ def detect_two_col_table_q_blank(blocks: List[Union[Paragraph, Table]]) -> List[
                         id=f"slot_{uuid.uuid4().hex[:8]}",
                         question_text=left.strip(),
                         answer_locator=AnswerLocator(type="table_cell", table_index=table_counter, row=r, col=1),
+                        answer_type=infer_answer_type(left, blocks, i),
                         confidence=conf,
                         meta={"detector": "table_2col_q_left_blank_right", "has_header": has_header}
                     ))
@@ -441,6 +510,7 @@ def detect_response_label_then_blank(blocks: List[Union[Paragraph, Table]]) -> L
                                 id=f"slot_{uuid.uuid4().hex[:8]}",
                                 question_text=q_text,
                                 answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
+                                answer_type=infer_answer_type(q_text, blocks, i - k),
                                 confidence=0.75,
                                 meta={
                                     "detector": "response_label_then_blank",
@@ -581,6 +651,7 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = "gpt-5-n
                     id=f"slot_{uuid.uuid4().hex[:8]}",
                     question_text=q_text,
                     answer_locator=AnswerLocator(type="paragraph_after", paragraph_index=q_block, offset=offset),
+                    answer_type=infer_answer_type(q_text, blocks, q_block),
                     confidence=0.6,
                     meta={"detector": "llm_rich", "block": q_block, "offset": offset}
                 ))
@@ -609,6 +680,7 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = "gpt-5-n
                     id=f"slot_{uuid.uuid4().hex[:8]}",
                     question_text=q_text,
                     answer_locator=AnswerLocator(type="table_cell", table_index=t_index, row=ar, col=ac),
+                    answer_type=infer_answer_type(q_text, blocks, q_block),
                     confidence=0.65,
                     meta={"detector": "llm_rich", "q_block": q_block, "answer_block": ab, "row": ar, "col": ac}
                 ))
@@ -790,6 +862,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                     id=f"slot_{uuid.uuid4().hex[:8]}",
                     question_text=q_text,
                     answer_locator=loc,
+                    answer_type=infer_answer_type(q_text, blocks, qb),
                     confidence=0.6,
                     meta={"detector": "two_stage", "q_block": qb}
                 )
