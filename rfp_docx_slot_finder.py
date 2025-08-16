@@ -162,20 +162,27 @@ def _looks_like_question(text: str) -> bool:
     if not t_raw:
         return False
 
-    if t_raw.endswith("?"):
+    # Presence of a question mark anywhere is a strong signal
+    if "?" in t_raw:
         return True
 
     # Remove enumeration prefix (e.g. '1.1 ', '(a) ') before heuristic checks
     t = strip_enum_prefix(t_raw).strip()
+    t_lower = t.lower()
 
-    if any(t.lower().startswith(phrase) for phrase in QUESTION_PHRASES):
+    # Question/request cues at the start of the text
+    if any(t_lower.startswith(phrase) for phrase in QUESTION_PHRASES):
+        return True
+
+    # Question/request cues appearing anywhere in the text
+    if any(phrase in t_lower for phrase in QUESTION_PHRASES):
         return True
 
     if t_raw.lower().startswith(("question:", "prompt:", "rfp question:")):
         return True
 
     # If original had an enumeration token and contains a cue anywhere
-    if _ENUM_PREFIX_RE.match(t_raw) and any(phrase in t.lower() for phrase in QUESTION_PHRASES):
+    if _ENUM_PREFIX_RE.match(t_raw) and any(phrase in t_lower for phrase in QUESTION_PHRASES):
         return True
 
     return False
@@ -620,8 +627,10 @@ def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = "gp
     excerpt, _ = _render_rich_excerpt(blocks)
     prompt = (
         "Below is a format‑aware listing of a DOCX document. "
-        "List the block indices that are QUESTIONS. A question is usually a paragraph ending with a '?' or a prompt word.\n\n" +
-        excerpt + "\n\nReturn STRICT JSON like {\"questions\": [0, 5, 12]} (empty list if none)."
+        "Identify every block that asks a question or requests information."
+        "This includes sub‑questions, prompts without a question mark, and items that begin after tabs or numbering.\n\n"
+        + excerpt
+        + "\n\nReturn STRICT JSON like {\"questions\": [0, 5, 12]} (empty list if none)."
     )
     if SHOW_TEXT:
         print("\n--- PROMPT (detect_questions) ---\n" + prompt + "\n--- END PROMPT ---\n")
@@ -705,6 +714,40 @@ def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, windo
         dbg(f"Error parsing locate_answer for q_block {q_block}: {e}")
         return None
 
+
+def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = "gpt-4o") -> bool:
+    """Return True if the question likely depends on previous context."""
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    except Exception:
+        return False
+
+    start = max(0, q_block - 2)
+    end = min(len(blocks), q_block + 1)
+    local_blocks = blocks[start:end]
+    excerpt, _ = _render_rich_excerpt(local_blocks)
+    prompt = (
+        f"The following excerpt comes from a DOCX document. The candidate question is at local block index {q_block - start}. "
+        "Does this question rely on the preceding text (for example, is it a follow-up or sub-question)? "
+        "Return STRICT JSON like {\"needs_context\": true} or {\"needs_context\": false}.\n\n"
+        + excerpt
+    )
+    resp = client.chat.completions.create(
+        model=model,
+        response_format={"type": "json_object"},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    try:
+        _record_usage(model, resp.usage.model_dump())
+    except Exception:
+        pass
+    try:
+        js = json.loads(resp.choices[0].message.content)
+        return bool(js.get("needs_context"))
+    except Exception:
+        return False
+
 # ───────────────────────── pipeline ─────────────────────────
 
 def extract_slots_from_docx(path: str) -> Dict[str, Any]:
@@ -738,6 +781,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
             hint, hint_level = derive_outline_hint_and_level(q_text)
             slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
+            slot_obj.meta["needs_context"] = llm_assess_context(blocks, qb, model=llm_model)
             slots.append(slot_obj)
             dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
         if not slots:  # fallback to legacy single scan
