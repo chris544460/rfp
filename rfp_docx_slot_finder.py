@@ -97,24 +97,87 @@ QUESTION_PHRASES = (
     "can you", "does your", "have you", "who", "when", "where", "why", "which"
 )
 
-def _looks_like_question(text: str) -> bool:
+# ─────────────────── outline / context helpers ───────────────────
+_ENUM_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:\(?\d+(?:\.\d+)*\)?[.)]?)|"     # 1   1.1   2.3.4   (1)   1)
+    r"(?:[A-Za-z][.)])|"                      # a)   A)   a.   A.
+    r"(?:\([A-Za-z0-9]+\))"                 # (a)  (A)  (i)  (1)
+    r")\s+"
+)
+
+def strip_enum_prefix(text: str) -> str:
+    """Remove a single leading enumeration token like '1.1 ', '(a) ', 'A) '."""
+    return _ENUM_PREFIX_RE.sub("", (text or ""), count=1)
+
+def derive_outline_hint_and_level(text: str):
+    """
+    Return (hint, level) derived from visible enumeration.
+    Examples: '1.1'→('1.1',2) ; '3)'→('3',1) ; '(a)'→('a',1)
+    """
     t = (text or "").strip()
-    if not t:
+    m = re.match(r"^\s*(\d+(?:\.\d+)+)[.)]?\s+", t)
+    if m:
+        num = m.group(1)
+        return num, num.count(".") + 1
+    m = re.match(r"^\s*\(?(\d+)\)?[.)]?\s+", t)
+    if m:
+        return m.group(1), 1
+    m = re.match(r"^\s*\(?([A-Za-z])\)?[.)]?\s+", t)
+    if m:
+        return m.group(1), 1
+    return None, None
+
+def paragraph_level_from_numbering(p: Paragraph):
+    """Return Word automatic numbering level (1‑based) if present."""
+    try:
+        numPr = p._p.pPr.numPr
+        if numPr is None:
+            return None
+        ilvl = numPr.ilvl.val if numPr.ilvl is not None else None
+        if ilvl is None:
+            return None
+        return int(ilvl) + 1
+    except Exception:
+        return None
+
+def heading_chain(blocks, upto_block, max_back=80):
+    """Return list of Heading‑style texts (top→nearest) above a block index."""
+    chain = []
+    for bi in range(max(0, upto_block - max_back), upto_block):
+        b = blocks[bi]
+        if isinstance(b, Paragraph):
+            try:
+                style = (b.style.name or "").lower()
+            except Exception:
+                style = ""
+            if style.startswith("heading"):
+                txt = (b.text or "").strip()
+                if txt:
+                    chain.append(txt)
+    return chain
+
+def _looks_like_question(text: str) -> bool:
+    t_raw = (text or "").strip()
+    if not t_raw:
         return False
-    # direct question mark or enumerated form
-    if t.endswith("?"):
+
+    if t_raw.endswith("?"):
         return True
-    # enumerated prompts like "1. Describe ..." or "a) Provide ..."
-    if re.match(r"^(\d+\.|[a-zA-Z]\)|\(\d+\)|\([a-zA-Z]\))\s", t):
-        # and has a question cue
-        if any(phrase in t.lower() for phrase in QUESTION_PHRASES):
-            return True
-    # imperative question-ish prompt
+
+    # Remove enumeration prefix (e.g. '1.1 ', '(a) ') before heuristic checks
+    t = strip_enum_prefix(t_raw).strip()
+
     if any(t.lower().startswith(phrase) for phrase in QUESTION_PHRASES):
         return True
-    # "Question:" prefix
-    if t.lower().startswith(("question:", "prompt:", "rfp question:")):
+
+    if t_raw.lower().startswith(("question:", "prompt:", "rfp question:")):
         return True
+
+    # If original had an enumeration token and contains a cue anywhere
+    if _ENUM_PREFIX_RE.match(t_raw) and any(phrase in t.lower() for phrase in QUESTION_PHRASES):
+        return True
+
     return False
 
 def _para_style_name(p: Paragraph) -> str:
@@ -244,12 +307,21 @@ def detect_para_question_with_blank(blocks: List[Union[Paragraph, Table]]) -> Li
                     break
                 nb = blocks[i + j]
                 if isinstance(nb, Paragraph) and _is_blank_para(nb):
+                    lvl_num = paragraph_level_from_numbering(b)
+                    hint, hint_level = derive_outline_hint_and_level(text)
+                    ctx_level = lvl_num or hint_level
                     slots.append(QASlot(
                         id=f"slot_{uuid.uuid4().hex[:8]}",
                         question_text=text,
                         answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
                         confidence=min(0.95, conf_base + 0.2),
-                        meta={"detector": "para_blank_after", "q_paragraph_index": p_index, "q_style": style}
+                        meta={
+                            "detector": "para_blank_after",
+                            "q_paragraph_index": p_index,
+                            "q_block": i,
+                            "q_style": style,
+                            "outline": {"level": ctx_level, "hint": hint}
+                        }
                     ))
                     break
                 # 2) immediate empty 1x1 table (used as a box to type into)
@@ -260,6 +332,9 @@ def detect_para_question_with_blank(blocks: List[Union[Paragraph, Table]]) -> Li
                             if cell_text == "":
                                 # need the running table index for locator
                                 t_idx = _running_table_index(blocks, i + j)
+                                lvl_num = paragraph_level_from_numbering(b)
+                                hint, hint_level = derive_outline_hint_and_level(text)
+                                ctx_level = lvl_num or hint_level
                                 slots.append(QASlot(
                                     id=f"slot_{uuid.uuid4().hex[:8]}",
                                     question_text=text,
@@ -267,7 +342,12 @@ def detect_para_question_with_blank(blocks: List[Union[Paragraph, Table]]) -> Li
                                         type="table_cell", table_index=t_idx, row=0, col=0
                                     ),
                                     confidence=min(0.9, conf_base + 0.15),
-                                    meta={"detector": "para_then_empty_1x1_table", "q_paragraph_index": p_index}
+                                    meta={
+                                        "detector": "para_then_empty_1x1_table",
+                                        "q_paragraph_index": p_index,
+                                        "q_block": i,
+                                        "outline": {"level": ctx_level, "hint": hint}
+                                    }
                                 ))
                                 break
                     except Exception:
@@ -343,12 +423,20 @@ def detect_response_label_then_blank(blocks: List[Union[Paragraph, Table]]) -> L
                         if i + j >= len(blocks): break
                         nb = blocks[i + j]
                         if isinstance(nb, Paragraph) and _is_blank_para(nb):
+                            lvl_num = paragraph_level_from_numbering(prev) if isinstance(prev, Paragraph) else None
+                            hint, hint_level = derive_outline_hint_and_level(q_text)
+                            ctx_level = lvl_num or hint_level
                             slots.append(QASlot(
                                 id=f"slot_{uuid.uuid4().hex[:8]}",
                                 question_text=q_text,
                                 answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
                                 confidence=0.75,
-                                meta={"detector": "response_label_then_blank", "q_paragraph_index": q_idx}
+                                meta={
+                                    "detector": "response_label_then_blank",
+                                    "q_paragraph_index": q_idx,
+                                    "q_block": (i - k),
+                                    "outline": {"level": ctx_level, "hint": hint}
+                                }
                             ))
                             break
     return slots
@@ -645,6 +733,11 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                 confidence=0.6,
                 meta={"detector": "two_stage", "q_block": qb}
             )
+            # Enrich slot_obj.meta with outline
+            q_par = blocks[qb] if isinstance(blocks[qb], Paragraph) else None
+            lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
+            hint, hint_level = derive_outline_hint_and_level(q_text)
+            slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
             slots.append(slot_obj)
             dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
         if not slots:  # fallback to legacy single scan
@@ -658,6 +751,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             slots.extend(detector(blocks))
         # optional: refine if we still want refinement when LLM disabled (keep off)
     
+    attach_context(slots, blocks)
     dbg(f"Slot count: {len(slots)}")
     dbg(f"Final payload preview: {json.dumps({'doc_type': 'docx', 'file': os.path.basename(path), 'slots': [asdict(s) for s in dedupe_slots(slots)]}, indent=2)[:1000]}")
     payload = {
@@ -666,6 +760,34 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
         "slots": [asdict(s) for s in dedupe_slots(slots)]
     }#
     return payload
+
+# ─────────────────── context attachment ───────────────────
+def attach_context(slots: List[QASlot], blocks):
+    """
+    Populate slot.meta['context'] with: level, heading_chain and optional parent_*.
+    """
+    ordered = sorted(slots, key=lambda s: (s.meta or {}).get("q_block", 0))
+    last_at_level = {}
+    for s in ordered:
+        qb = (s.meta or {}).get("q_block", 0)
+        level = (s.meta or {}).get("outline", {}).get("level") or 1
+        heads = heading_chain(blocks, qb)
+
+        parent = None
+        for l in range(level - 1, 0, -1):
+            if l in last_at_level:
+                parent = last_at_level[l]
+                break
+
+        ctx = {"level": int(level), "heading_chain": heads}
+        if parent:
+            ctx["parent_slot_id"] = parent.id
+            ctx["parent_question_text"] = parent.question_text
+
+        if s.meta is None:
+            s.meta = {}
+        s.meta["context"] = ctx
+        last_at_level[level] = s
 
 def dedupe_slots(slots: List[QASlot]) -> List[QASlot]:
     """Remove obvious duplicates (same question text + same locator)."""
