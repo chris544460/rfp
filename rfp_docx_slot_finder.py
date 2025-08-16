@@ -664,7 +664,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
         "doc_type": "docx",
         "file": os.path.basename(path),
         "slots": [asdict(s) for s in dedupe_slots(slots)]
-    }
+    }#
     return payload
 
 def dedupe_slots(slots: List[QASlot]) -> List[QASlot]:
