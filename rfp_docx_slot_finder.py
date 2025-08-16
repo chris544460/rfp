@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-# Requires: export OPENAI_API_KEY=...  (and optionally OPENAI_MODEL=gpt-4o)
+# Requires: export OPENAI_API_KEY=...  (and optionally OPENAI_MODEL=gpt-5-nano)
 # rfp_docx_slot_finder.py
 
 DEBUG = False
@@ -12,7 +12,10 @@ TOTAL_OUTPUT_TOKENS = 0
 TOTAL_COST_USD = 0.0
 
 # very approximate per‑1K‑token costs in USD (Aug 2025 public pricing)
+# GPT-5 nano: the fastest, cheapest version of GPT-5—great for summarization and classification tasks
 MODEL_PRICING = {
+    # $0.05 input / $0.005 cached input / $0.40 output per million tokens
+    "gpt-5-nano": {"in": 0.00005, "out": 0.0004, "cached_in": 0.000005},
     "gpt-4o": {"in": 0.005, "out": 0.015},          # $5 / $15 per million
     "gpt-4o-mini": {"in": 0.003, "out": 0.009},     # hypothetical mini tier
     "gpt-4o-max": {"in": 0.007, "out": 0.021},      # hypothetical tier
@@ -25,7 +28,7 @@ def _record_usage(model: str, usage: Dict[str, int]):
     compl_toks = usage.get("completion_tokens", 0)
     TOTAL_INPUT_TOKENS += prompt_toks
     TOTAL_OUTPUT_TOKENS += compl_toks
-    price = MODEL_PRICING.get(model, MODEL_PRICING.get("gpt-4o"))
+    price = MODEL_PRICING.get(model, MODEL_PRICING.get("gpt-5-nano"))
     cost = (prompt_toks / 1000) * price["in"] + (compl_toks / 1000) * price["out"]
     TOTAL_COST_USD += cost
     if DEBUG:
@@ -481,7 +484,7 @@ def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
         # Minimal example using chat.completions (works widely)
         try:
             resp = client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                model=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
                 response_format={"type": "json_object"},
                 messages=[{"role":"user","content":prompt}]
             )
@@ -492,7 +495,7 @@ def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
                 print(resp.choices[0].message.content)
                 print("--- END COMPLETION ---\n")
             try:
-                _record_usage(os.getenv("OPENAI_MODEL", "gpt-4o-mini"), resp.usage.model_dump())
+                _record_usage(os.getenv("OPENAI_MODEL", "gpt-5-nano"), resp.usage.model_dump())
             except Exception:
                 pass
             js = json.loads(resp.choices[0].message.content)
@@ -506,7 +509,7 @@ def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
 
 # ─────────────────── LLM paragraph‑scan fallback ───────────────────
 
-def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = "gpt-4o") -> List[QASlot]:
+def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = "gpt-5-nano") -> List[QASlot]:
     """If rule‑based detectors find nothing, let an LLM propose Q→A blanks."""
     try:
         from openai import OpenAI
@@ -616,7 +619,7 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = "gpt-4o"
 
 # ─────────────────── 2‑stage LLM helpers ───────────────────
 
-def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = "gpt-4o") -> List[int]:
+def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = "gpt-5-nano") -> List[int]:
     """Return global block indices that look like questions."""
     try:
         from openai import OpenAI
@@ -656,7 +659,7 @@ def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = "gp
         return []
 
 
-def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = "gpt-4o") -> Optional[AnswerLocator]:
+def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = "gpt-5-nano") -> Optional[AnswerLocator]:
     """Given a question block index, ask the LLM to pick best answer location within ±window."""
     try:
         from openai import OpenAI
@@ -715,7 +718,7 @@ def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, windo
         return None
 
 
-def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = "gpt-4o") -> bool:
+def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = "gpt-5-nano") -> bool:
     """Return True if the question likely depends on previous context."""
     try:
         from openai import OpenAI
@@ -761,7 +764,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
     if USE_LLM:
         if not os.getenv("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY not set; cannot run in pure AI mode.")
-        llm_model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        llm_model = os.getenv("OPENAI_MODEL", "gpt-5-nano")
         q_indices = llm_detect_questions(blocks, model=llm_model)
         slots: List[QASlot] = []
         for qb in q_indices:
