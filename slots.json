@@ -1,0 +1,24 @@
+{
+  "doc_type": "docx",
+  "file": "What.docx",
+  "slots": [
+    {
+      "id": "slot_8e25d98d",
+      "question_text": "What’s 1+1?",
+      "answer_locator": {
+        "type": "paragraph_after",
+        "paragraph_index": 0,
+        "offset": 1,
+        "table_index": null,
+        "row": null,
+        "col": null
+      },
+      "answer_type": "text",
+      "confidence": 0.6,
+      "meta": {
+        "detector": "two_stage",
+        "q_block": 0
+      }
+    }
+  ]
+}

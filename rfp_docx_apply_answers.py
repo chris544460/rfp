@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+# rfp_docx_apply_answers.py
+# Apply answers into a DOCX according to slots.json produced by rfp_docx_slot_finder.py
+
+import argparse, json, os, sys, re
+import importlib
+from types import ModuleType
+from typing import List, Union, Optional, Dict, Tuple, Callable
+
+import docx
+from docx.text.paragraph import Paragraph
+from docx.table import Table
+from docx.oxml import OxmlElement
+
+# ---------------------------- Debug helpers ----------------------------
+
+DEBUG = False
+
+def dbg(msg: str):
+    if DEBUG:
+        print(f"[APPLY-DEBUG] {msg}")
+
+# ---------------------------- DOC iteration ----------------------------
+
+def iter_block_items(doc: docx.document.Document) -> List[Union[Paragraph, Table]]:
+    """
+    Return a list of blocks (Paragraph or Table) in document flow order.
+    Matches the approach used in the detector (paragraphs and tables interleaved).
+    """
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    blocks: List[Union[Paragraph, Table]] = []
+    parent = doc.element.body
+    for child in parent.iterchildren():
+        if isinstance(child, CT_P):
+            blocks.append(Paragraph(child, doc))
+        elif isinstance(child, CT_Tbl):
+            blocks.append(Table(child, doc))
+    return blocks
+
+def build_indexes(doc: docx.document.Document) -> Tuple[
+    List[Union[Paragraph, Table]],           # blocks
+    List[Paragraph],                          # paragraphs_only
+    Dict[int, int],                           # block_index -> paragraph_index (if block is paragraph)
+    Dict[int, int]                            # block_index -> table_index (if block is table)
+]:
+    """
+    Build convenient indexes over the doc content.
+    """
+    blocks = iter_block_items(doc)
+    paragraphs: List[Paragraph] = []
+    block_to_para: Dict[int, int] = {}
+    block_to_table: Dict[int, int] = {}
+    running_table_index = 0
+    for bi, b in enumerate(blocks):
+        if isinstance(b, Paragraph):
+            block_to_para[bi] = len(paragraphs)
+            paragraphs.append(b)
+        elif isinstance(b, Table):
+            block_to_table[bi] = running_table_index
+            running_table_index += 1
+    return blocks, paragraphs, block_to_para, block_to_table
+
+# ---------------------------- Utilities ----------------------------
+
+_BLANK_RE = re.compile(r"_+\s*$")
+
+def is_blank_para(p: Paragraph) -> bool:
+    """
+    Heuristic 'blank' detection similar to detector:
+    empty, underscores, or brackets placeholders.
+    """
+    t = (p.text or "").strip()
+    if t == "":
+        return True
+    if _BLANK_RE.match(t):
+        return True
+    if re.fullmatch(r"\[(?:insert|enter|provide)[^\]]*\]", t.lower()):
+        return True
+    # if any run is underlined with no visible text
+    try:
+        if any(r.text and r.underline for r in p.runs) and len(t.replace("_","").strip()) == 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
+    """
+    Insert a new paragraph XML immediately after the given paragraph.
+    Returns a python-docx Paragraph wrapper for the new element.
+    """
+    new_p_elm = OxmlElement("w:p")
+    paragraph._element.addnext(new_p_elm)
+    new_p = Paragraph(new_p_elm, paragraph._parent)
+    if text:
+        new_p.add_run(text)
+    return new_p
+
+def normalize_question(q: str) -> str:
+    return " ".join((q or "").strip().lower().split())
+
+# ---------------------------- Answers loader ----------------------------
+
+def load_answers(answers_path: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Load answers from JSON.
+
+    Accepted formats:
+    1) Dict with explicit sections:
+       {
+         "by_id": {"slot_abc": "answer", ...},
+         "by_question": {"what’s 1+1?": "2", ...}
+       }
+
+    2) List of objects:
+       [{"slot_id":"slot_abc","answer":"..."}, {"question_text":"...","answer":"..."}]
+
+    3) Flat dict:
+       Keys matching slot IDs go to by_id; others are treated as question_text.
+    """
+    with open(answers_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    by_id: Dict[str, str] = {}
+    by_q: Dict[str, str] = {}
+
+    if isinstance(data, dict):
+        if "by_id" in data or "by_question" in data:
+            for k, v in (data.get("by_id") or {}).items():
+                by_id[str(k)] = str(v)
+            for k, v in (data.get("by_question") or {}).items():
+                by_q[normalize_question(k)] = str(v)
+        else:
+            # flat dict
+            for k, v in data.items():
+                kstr = str(k)
+                if kstr.startswith("slot_"):
+                    by_id[kstr] = str(v)
+                else:
+                    by_q[normalize_question(kstr)] = str(v)
+    elif isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if "slot_id" in item:
+                by_id[str(item["slot_id"])] = str(item.get("answer", ""))
+            elif "question_text" in item:
+                by_q[normalize_question(str(item["question_text"]))] = str(item.get("answer", ""))
+    else:
+        raise ValueError("Unsupported answers JSON structure.")
+
+    return by_id, by_q
+
+# ---------------------------- Locator resolution ----------------------------
+
+def resolve_anchor_paragraph(
+    doc: docx.document.Document,
+    blocks: List[Union[Paragraph, Table]],
+    paragraphs: List[Paragraph],
+    block_to_para: Dict[int, int],
+    locator: Dict[str, object],
+    meta: Optional[Dict[str, object]]
+) -> Optional[Paragraph]:
+    """
+    Resolve the anchor paragraph for a locator that references a question area.
+
+    Supports two common cases for locator['type'] in slots.json:
+      - 'paragraph_after'  (anchor = question paragraph)
+      - 'paragraph'        (anchor = the answer paragraph itself; caller can use it directly)
+    """
+    ltype = str(locator.get("type", ""))
+    p_idx = locator.get("paragraph_index")
+    p_idx = int(p_idx) if p_idx is not None else None
+
+    # For 'paragraph' locators, 'paragraph_index' is already a paragraph-only index (legacy heuristics path).
+    if ltype == "paragraph":
+        if p_idx is None:
+            return None
+        if 0 <= p_idx < len(paragraphs):
+            return paragraphs[p_idx]
+        return None
+
+    # For 'paragraph_after', interpret paragraph_index as:
+    #   (a) Global block index of the question (two_stage / llm_rich),
+    #   (b) Or paragraph-only index (legacy).
+    if ltype == "paragraph_after":
+        # Prefer explicit q_block from meta when present
+        qb = None
+        if isinstance(meta, dict) and "q_block" in meta:
+            try:
+                qb = int(meta["q_block"])
+            except Exception:
+                qb = None
+
+        # Option 1: meta.q_block is a valid global block index
+        if qb is not None and 0 <= qb < len(blocks) and isinstance(blocks[qb], Paragraph):
+            return blocks[qb]  # type: ignore
+
+        # Option 2: paragraph_index is a global block index pointing at a Paragraph
+        if p_idx is not None and 0 <= p_idx < len(blocks) and isinstance(blocks[p_idx], Paragraph):
+            return blocks[p_idx]  # type: ignore
+
+        # Option 3: paragraph_index is already a paragraph-only index
+        if p_idx is not None and 0 <= p_idx < len(paragraphs):
+            return paragraphs[p_idx]
+
+    return None
+
+def get_target_paragraph_after_anchor(
+    blocks: List[Union[Paragraph, Table]],
+    block_to_para: Dict[int, int],
+    paragraphs: List[Paragraph],
+    anchor_para: Paragraph,
+    offset: int
+) -> Paragraph:
+    """
+    Find the paragraph that is the N-th paragraph AFTER the anchor, scanning through blocks.
+    If there aren't enough following paragraphs, insert new paragraphs directly after the anchor
+    until we reach the desired offset.
+    """
+    # Locate anchor in blocks & paragraph index
+    anchor_para_index = None
+    anchor_block_index = None
+    for bi, b in enumerate(blocks):
+        if isinstance(b, Paragraph) and b is anchor_para:
+            anchor_block_index = bi
+            anchor_para_index = block_to_para[bi]
+            break
+    if anchor_block_index is None or anchor_para_index is None:
+        # Fallback: use linear paragraph list
+        anchor_para_index = paragraphs.index(anchor_para)
+
+    # Collect existing subsequent paragraphs in flow order
+    subsequent_paras: List[Paragraph] = []
+    if anchor_block_index is not None:
+        for b in blocks[anchor_block_index + 1:]:
+            if isinstance(b, Paragraph):
+                subsequent_paras.append(b)
+            # Note: tables are ignored when counting "paragraph_after" offset
+    else:
+        # No block index found; use paragraph list instead
+        subsequent_paras = paragraphs[anchor_para_index + 1:]
+
+    # If we already have enough paragraphs ahead, return the offset-th
+    if len(subsequent_paras) >= offset:
+        return subsequent_paras[offset - 1]
+
+    # Else, insert new paragraphs after the anchor (or last found), enough to meet the offset
+    needed = offset - len(subsequent_paras)
+    dbg(f"Not enough following paragraphs: need to insert {needed} after anchor")
+    last = anchor_para if not subsequent_paras else subsequent_paras[-1]
+    created: Paragraph = last
+    for _ in range(needed):
+        created = insert_paragraph_after(created, "")
+    return created
+
+# ---------------------------- Apply operations ----------------------------
+
+def apply_to_paragraph(
+    target: Paragraph,
+    answer_text: str,
+    mode: str = "fill"
+) -> None:
+    """
+    Write text into a paragraph according to mode:
+      - replace: always replace existing content.
+      - append:  always append (with newline if needed).
+      - fill:    replace if blank/placeholder; otherwise append a new paragraph immediately below.
+    """
+    existing = (target.text or "")
+    if mode == "replace":
+        target.text = answer_text
+        return
+    if mode == "append":
+        if existing:
+            target.add_run("\n" + answer_text)
+        else:
+            target.text = answer_text
+        return
+    # fill (default)
+    if is_blank_para(target) or not existing.strip():
+        target.text = answer_text
+    else:
+        # append below to avoid stomping content
+        new_p = insert_paragraph_after(target, answer_text)
+        dbg("Target paragraph not blank; appended answer in a new paragraph below.")
+
+def apply_to_table_cell(tbl: Table, row: int, col: int, answer_text: str, mode: str = "fill") -> None:
+    """
+    Write into a table cell. For simplicity:
+      - replace: cell.text = answer
+      - append/fill: append with newline if cell already has text; else set
+    """
+    try:
+        cell = tbl.cell(row, col)
+    except Exception:
+        return
+    current = (cell.text or "")
+    if mode == "replace":
+        cell.text = answer_text
+        return
+    # append or fill
+    if current.strip():
+        cell.text = current + "\n" + answer_text
+    else:
+        cell.text = answer_text
+
+# ---------------------------- Main application flow ----------------------------
+
+def apply_answers_to_docx(
+    docx_path: str,
+    slots_json_path: str,
+    answers_json_path: str,
+    out_path: str,
+    mode: str = "fill",
+    generator: Optional[Callable[[str], str]] = None,
+    gen_name: str = ""
+) -> Dict[str, int]:
+    """
+    Apply answers into the DOCX and save to out_path.
+    Returns a small summary dict with counts.
+    """
+    # Load inputs
+    with open(slots_json_path, "r", encoding="utf-8") as f:
+        slots_payload = json.load(f)
+
+    by_id, by_q = ({}, {})
+    if answers_json_path and answers_json_path != "-" and os.path.isfile(answers_json_path):
+        by_id, by_q = load_answers(answers_json_path)
+        dbg(f"Answers loaded: by_id={len(by_id)}, by_question={len(by_q)}")
+    else:
+        dbg("No answers file provided; relying solely on generator (if any)")
+
+    doc = docx.Document(docx_path)
+    blocks, paragraphs, block_to_para, block_to_table = build_indexes(doc)
+
+    applied = 0
+    skipped_no_answer = 0
+    skipped_bad_locator = 0
+    skipped_table_oob = 0
+    generated = 0
+
+    slots = (slots_payload or {}).get("slots", [])
+    for s in slots:
+        sid = s.get("id", "")
+        question_text = (s.get("question_text") or "").strip()
+        locator = s.get("answer_locator") or {}
+        ltype = str(locator.get("type", ""))
+        meta = s.get("meta") or {}
+        # Find answer by id, else by normalized question
+        answer = None
+        if sid in by_id:
+            answer = by_id[sid]
+        else:
+            key = normalize_question(question_text)
+            if key in by_q:
+                answer = by_q[key]
+
+        # If still None and generator provided, call it
+        if answer is None and generator is not None:
+            try:
+                answer = generator(question_text)
+                dbg(f"Generated answer via {gen_name} for slot {sid}: {answer}")
+                generated += 1
+            except Exception as e:
+                dbg(f"Generator error for question '{question_text}': {e}")
+                answer = None
+
+        if answer is None:
+            dbg(f"NO ANSWER for slot {sid!r} / question '{question_text}' — skipping")
+            skipped_no_answer += 1
+            continue
+
+        dbg(f"Applying answer for slot {sid} (type={ltype})")
+
+        try:
+            if ltype == "table_cell":
+                t_index = locator.get("table_index")
+                row = locator.get("row", 0)
+                col = locator.get("col", 0)
+                if t_index is None:
+                    dbg("  -> bad locator: missing table_index")
+                    skipped_bad_locator += 1
+                    continue
+                t_index = int(t_index)
+                row = int(row)
+                col = int(col)
+                # Find the table by overall order
+                if 0 <= t_index < len(doc.tables):
+                    tbl = doc.tables[t_index]
+                    apply_to_table_cell(tbl, row, col, answer, mode=mode)
+                    applied += 1
+                    dbg(f"  -> wrote into table[{t_index}] cell({row},{col})")
+                else:
+                    dbg(f"  -> table_index {t_index} out of bounds; have {len(doc.tables)} tables")
+                    skipped_table_oob += 1
+
+            elif ltype in ("paragraph_after", "paragraph"):
+                # Resolve anchor (question paragraph) or direct target paragraph
+                anchor = resolve_anchor_paragraph(doc, blocks, paragraphs, block_to_para, locator, meta)
+                if anchor is None:
+                    dbg("  -> could not resolve anchor/target paragraph")
+                    skipped_bad_locator += 1
+                    continue
+
+                if ltype == "paragraph_after":
+                    offset = int(locator.get("offset", 1) or 1)
+                    target = get_target_paragraph_after_anchor(blocks, block_to_para, paragraphs, anchor, offset)
+                else:
+                    # 'paragraph' locators already resolved to the paragraph itself
+                    target = anchor
+
+                apply_to_paragraph(target, answer, mode=mode)
+                applied += 1
+                dbg("  -> wrote into paragraph")
+
+            else:
+                dbg(f"  -> unsupported locator type: {ltype}")
+                skipped_bad_locator += 1
+
+        except Exception as e:
+            dbg(f"  -> error while applying slot {sid}: {e}")
+            # treat as bad locator for summary
+            skipped_bad_locator += 1
+
+    # Save document
+    doc.save(out_path)
+    print(f"Wrote {out_path}")
+
+    return {
+        "applied": applied,
+        "skipped_no_answer": skipped_no_answer,
+        "skipped_bad_locator": skipped_bad_locator,
+        "skipped_table_oob": skipped_table_oob,
+        "total_slots": len(slots),
+        "generated": generated,
+    }
+
+# ---------------------------- CLI ----------------------------
+
+def main():
+    ap = argparse.ArgumentParser(description="Apply answers into a DOCX using slots.json")
+    ap.add_argument("docx_path", help="Path to the original .docx")
+    ap.add_argument("slots_json", help="Path to slots.json produced by the detector")
+    ap.add_argument("answers_json", nargs="?", default="", help="Path to answers.json (optional if using --generate)")
+    ap.add_argument("-o", "--out", required=True, help="Path to write updated .docx")
+    ap.add_argument("--mode", choices=["replace", "append", "fill"], default="fill",
+                    help="Write mode for paragraphs/cells (default: fill)")
+    ap.add_argument("--debug", action="store_true", help="Verbose debug logging")
+    ap.add_argument("--generate", metavar="MODULE:FUNC", help="Dynamically generate answers by calling given function for each question (e.g. ai_gen:make_answer)")
+    args = ap.parse_args()
+
+    global DEBUG
+    DEBUG = args.debug
+    if DEBUG:
+        print("### APPLY DEBUG MODE ON ###")
+
+    # Validate inputs
+    required_paths = [args.docx_path, args.slots_json]
+    for p in required_paths:
+        if not os.path.isfile(p):
+            print(f"Error: '{p}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+    if args.answers_json and args.answers_json != "-" and not os.path.isfile(args.answers_json):
+        if not args.generate:
+            print(f"Error: answers file '{args.answers_json}' does not exist and no --generate specified.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            if DEBUG:
+                print(f"Warning: answers file '{args.answers_json}' not found; proceeding with generator only.")
+
+    gen_callable = None
+    gen_name = ""
+    if args.generate:
+        if ":" not in args.generate:
+            print("Error: --generate requires MODULE:FUNC", file=sys.stderr)
+            sys.exit(1)
+        mod_name, func_name = args.generate.split(":", 1)
+        try:
+            module: ModuleType = importlib.import_module(mod_name)
+            gen_callable = getattr(module, func_name)
+            if not callable(gen_callable):
+                raise AttributeError
+            gen_name = args.generate
+            if DEBUG:
+                print(f"Loaded generator function {gen_name}")
+        except Exception as e:
+            print(f"Error: failed to load generator function {args.generate}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        summary = apply_answers_to_docx(
+            args.docx_path,
+            args.slots_json,
+            args.answers_json,
+            args.out,
+            mode=args.mode,
+            generator=gen_callable,
+            gen_name=gen_name
+        )
+    except Exception as e:
+        print(f"Error: failed to apply answers: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if DEBUG:
+        print("--- APPLY SUMMARY ---")
+        for k, v in summary.items():
+            print(f"{k}: {v}")
+
+if __name__ == "__main__":
+    main()
