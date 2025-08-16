@@ -40,6 +40,7 @@ def dbg(msg: str):
 import os, re, json, uuid, argparse
 import sys
 import math
+import asyncio
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Any, Tuple, Union
 
@@ -659,11 +660,11 @@ def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = "gp
         return []
 
 
-def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = "gpt-5-nano") -> Optional[AnswerLocator]:
+async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = "gpt-5-nano") -> Optional[AnswerLocator]:
     """Given a question block index, ask the LLM to pick best answer location within ±window."""
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     except Exception:
         return None
 
@@ -683,17 +684,25 @@ def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, windo
     )
     if SHOW_TEXT:
         print(f"\n--- PROMPT (locate_answer q_block={q_block}) ---\n" + prompt + "\n--- END PROMPT ---\n")
-    resp = client.chat.completions.create(
-        model=model,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        dbg(f"OpenAI error (locate_answer q_block={q_block}): {e}")
+        return None
     try:
         _record_usage(model, resp.usage.model_dump())
     except Exception:
         pass
     if SHOW_TEXT:
-        print(f"\n--- COMPLETION (locate_answer q_block={q_block}) ---\n" + resp.choices[0].message.content + "\n--- END COMPLETION ---\n")
+        print(
+            f"\n--- COMPLETION (locate_answer q_block={q_block}) ---\n"
+            + resp.choices[0].message.content
+            + "\n--- END COMPLETION ---\n"
+        )
     try:
         js = json.loads(resp.choices[0].message.content)
         dbg(f"Model returned JSON (locate_answer q_block={q_block}): {js}")
@@ -718,11 +727,11 @@ def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, windo
         return None
 
 
-def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = "gpt-5-nano") -> bool:
+async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = "gpt-5-nano") -> bool:
     """Return True if the question likely depends on previous context."""
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     except Exception:
         return False
 
@@ -736,11 +745,15 @@ def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, mode
         "Return STRICT JSON like {\"needs_context\": true} or {\"needs_context\": false}.\n\n"
         + excerpt
     )
-    resp = client.chat.completions.create(
-        model=model,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        dbg(f"OpenAI error (assess_context q_block={q_block}): {e}")
+        return False
     try:
         _record_usage(model, resp.usage.model_dump())
     except Exception:
@@ -766,27 +779,37 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             raise RuntimeError("OPENAI_API_KEY not set; cannot run in pure AI mode.")
         llm_model = os.getenv("OPENAI_MODEL", "gpt-5-nano")
         q_indices = llm_detect_questions(blocks, model=llm_model)
-        slots: List[QASlot] = []
-        for qb in q_indices:
-            loc = llm_locate_answer(blocks, qb, window=3, model=llm_model)
-            if loc is None:
-                continue
-            q_text = (blocks[qb].text if isinstance(blocks[qb], Paragraph) else "").strip()
-            slot_obj = QASlot(
-                id=f"slot_{uuid.uuid4().hex[:8]}",
-                question_text=q_text,
-                answer_locator=loc,
-                confidence=0.6,
-                meta={"detector": "two_stage", "q_block": qb}
-            )
-            # Enrich slot_obj.meta with outline
-            q_par = blocks[qb] if isinstance(blocks[qb], Paragraph) else None
-            lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
-            hint, hint_level = derive_outline_hint_and_level(q_text)
-            slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
-            slot_obj.meta["needs_context"] = llm_assess_context(blocks, qb, model=llm_model)
-            slots.append(slot_obj)
-            dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
+
+        async def process_q_block(qb: int) -> Optional[QASlot]:
+            try:
+                loc = await llm_locate_answer(blocks, qb, window=3, model=llm_model)
+                if loc is None:
+                    return None
+                q_text = (blocks[qb].text if isinstance(blocks[qb], Paragraph) else "").strip()
+                slot_obj = QASlot(
+                    id=f"slot_{uuid.uuid4().hex[:8]}",
+                    question_text=q_text,
+                    answer_locator=loc,
+                    confidence=0.6,
+                    meta={"detector": "two_stage", "q_block": qb}
+                )
+                # Enrich slot_obj.meta with outline
+                q_par = blocks[qb] if isinstance(blocks[qb], Paragraph) else None
+                lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
+                hint, hint_level = derive_outline_hint_and_level(q_text)
+                slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
+                slot_obj.meta["needs_context"] = await llm_assess_context(blocks, qb, model=llm_model)
+                dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
+                return slot_obj
+            except Exception as e:
+                dbg(f"Error processing q_block {qb}: {e}")
+                return None
+
+        async def gather_slots() -> List[Optional[QASlot]]:
+            tasks = [asyncio.create_task(process_q_block(qb)) for qb in q_indices]
+            return await asyncio.gather(*tasks)
+
+        slots = [s for s in asyncio.run(gather_slots()) if s]
         if not slots:  # fallback to legacy single scan
             slots = llm_scan_blocks(blocks, model=llm_model)
     else:
