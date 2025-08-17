@@ -47,6 +47,10 @@ import math
 import asyncio
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Any, Tuple, Union
+from dotenv import load_dotenv
+
+# Load environment variables from a .env file if present
+load_dotenv(override=True)
 
 import docx
 from docx.text.paragraph import Paragraph
