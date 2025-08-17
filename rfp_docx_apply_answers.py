@@ -12,6 +12,7 @@ from docx.text.paragraph import Paragraph
 from docx.table import Table
 from docx.oxml import OxmlElement
 from docx.enum.text import WD_COLOR_INDEX
+from rfp_utils.word_comments import add_comment_to_run
 
 # ---------------------------- Debug helpers ----------------------------
 
@@ -155,7 +156,7 @@ def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[ob
             run = paragraph.add_run(match.group(0))
             snippet = citations.get(num) or citations.get(str(num))
             if snippet:
-                doc.add_comment(run, str(snippet))
+                add_comment_to_run(doc, run, str(snippet))
             pos = match.end()
         if pos < len(line):
             paragraph.add_run(line[pos:])
