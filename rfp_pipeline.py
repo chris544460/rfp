@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Convenience script to run slot detection and answer application in one step."""
+"""Convenience script to run slot detection and answer application.
+
+Previously this pipeline only supported DOCX files.  It has been
+refactored to look up concrete handler implementations based on the
+source file's extension so that other document types can be supported in
+future without altering this script.
+"""
+
 import argparse
 import json
 import os
@@ -8,23 +15,28 @@ import tempfile
 import importlib
 from typing import Callable
 
-from rfp_docx_slot_finder import extract_slots_from_docx
-from rfp_docx_apply_answers import apply_answers_to_docx
+from rfp_handlers import get_handlers
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Run slot finder then apply answers; answers JSON optional if using --generate"
+        description=(
+            "Run slot detection then apply answers.  The handler is selected "
+            "based on the source file's extension; answers JSON optional if "
+            "using --generate"
+        ),
     )
-    ap.add_argument("docx_path", help="Path to the source .docx file")
+    ap.add_argument("source_path", help="Path to the source document")
     ap.add_argument(
         "answers_json",
         nargs="?",
         help="Path to answers JSON; omit when using --generate",
     )
-    ap.add_argument("-o", "--out", default="Answered.docx", help="Output .docx file")
+    ap.add_argument("-o", "--out", help="Output file (defaults to Answered<ext>)")
     ap.add_argument("--slots", help="Optional path to write detected slots JSON")
-    ap.add_argument("--mode", choices=["replace", "append", "fill"], default="fill", help="Answer write mode")
+    ap.add_argument(
+        "--mode", choices=["replace", "append", "fill"], default="fill", help="Answer write mode"
+    )
     ap.add_argument(
         "--generate",
         metavar="MODULE:FUNC",
@@ -36,18 +48,24 @@ def main():
         sys.exit(1)
     args = ap.parse_args()
 
-    # Validate input docx
-    if not os.path.isfile(args.docx_path):
-        print(f"Error: '{args.docx_path}' does not exist.", file=sys.stderr)
+    # Determine file handlers based on extension
+    if not os.path.isfile(args.source_path):
+        print(f"Error: '{args.source_path}' does not exist.", file=sys.stderr)
         sys.exit(1)
-    if not args.docx_path.lower().endswith(".docx"):
-        print(f"Error: '{args.docx_path}' is not a .docx file.", file=sys.stderr)
+    ext = os.path.splitext(args.source_path)[1].lower()
+    try:
+        extract_slots, apply_answers = get_handlers(ext)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # Default output path
+    out_path = args.out or f"Answered{ext}"
 
     # Step 1: detect slots
     try:
-        slots_payload = extract_slots_from_docx(args.docx_path)
-    except Exception as e:
+        slots_payload = extract_slots(args.source_path)
+    except Exception as e:  # pragma: no cover - defensive
         print(f"Error: failed to extract slots: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -84,7 +102,7 @@ def main():
             if not callable(gen_callable):
                 raise AttributeError
             gen_name = args.generate
-        except Exception as e:
+        except Exception as e:  # pragma: no cover - defensive
             print(f"Error: failed to load generator {args.generate}: {e}", file=sys.stderr)
             if not args.slots:
                 os.unlink(slots_path)
@@ -92,16 +110,16 @@ def main():
 
     # Step 2: apply answers
     try:
-        summary = apply_answers_to_docx(
-            args.docx_path,
+        summary = apply_answers(
+            args.source_path,
             slots_path,
             args.answers_json or "",
-            args.out,
+            out_path,
             mode=args.mode,
             generator=gen_callable,
             gen_name=gen_name,
         )
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - defensive
         print(f"Error: failed to apply answers: {e}", file=sys.stderr)
         if not args.slots:
             os.unlink(slots_path)
@@ -111,7 +129,7 @@ def main():
         for k, v in summary.items():
             print(f"{k}: {v}")
     else:
-        print(f"Wrote {args.out}")
+        print(f"Wrote {out_path}")
 
     if not args.slots:
         os.unlink(slots_path)
