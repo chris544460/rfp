@@ -937,6 +937,9 @@ def main():
         default=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
         help="Model name for the chosen framework",
     )
+    if len(sys.argv) == 1:
+        ap.print_help()
+        sys.exit(1)
     args = ap.parse_args()
 
     # Set debug global
