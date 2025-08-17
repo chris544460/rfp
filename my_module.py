@@ -1,6 +1,6 @@
 # my_module.py
 import os, re
-from typing import Optional
+from typing import Optional, List, Dict
 from answer.answer_composer import CompletionsClient
 from cli_app import answer_question  # you already import this in the notebook
 
@@ -25,8 +25,24 @@ def _format_with_or_without_comments(ans: str, cmts) -> str:
     # strip bracket markers like [1] if comments are off
     return re.sub(r"\[\d+\]", "", ans)
 
-def gen_answer(question: str) -> str:
-    """Generate an answer using the same RAG path as the Streamlit app."""
+def gen_answer(question: str, choices: Optional[List[str]] = None, choice_meta: Optional[List[Dict[str, object]]] = None):
+    """Generate an answer. Handles both open and multiple-choice questions."""
+    if choices:
+        opt_list = "\n".join(f"- {c}" for c in choices)
+        select_prompt = f"{question}\nOptions:\n{opt_list}\nSelect the best option and reply with its text only."
+        selection, _ = _llm_client.get_completion(select_prompt)
+        idx = next((i for i, c in enumerate(choices) if c.strip() == selection.strip()), 0)
+        style = "auto"
+        if choice_meta:
+            markers = "\n".join(f"{i}: {m.get('prefix', '')}" for i, m in enumerate(choice_meta))
+            style_prompt = (
+                f"You chose '{selection.strip()}'. Option markers:\n{markers}\n"
+                "Which marking style fits best? Reply with one word: checkbox, fill, highlight, or auto."
+            )
+            style_resp, _ = _llm_client.get_completion(style_prompt)
+            style = style_resp.strip().lower() or "auto"
+        return {"choice_index": idx, "style": style}
+
     approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
     length = None if approx_words is not None else LENGTH_PRESET
 
@@ -40,5 +56,4 @@ def gen_answer(question: str) -> str:
         MIN_CONFIDENCE,
         _llm_client,
     )
-    # The DOCX applier writes plain text; keep Markdown if you like, or strip markers here.
     return _format_with_or_without_comments(ans, cmts)
