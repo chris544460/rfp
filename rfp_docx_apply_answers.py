@@ -2,7 +2,7 @@
 # rfp_docx_apply_answers.py
 # Apply answers into a DOCX according to slots.json produced by rfp_docx_slot_finder.py
 
-import argparse, json, os, sys, re
+import argparse, json, os, sys, re, asyncio
 import importlib
 from types import ModuleType
 from typing import List, Union, Optional, Dict, Tuple, Callable
@@ -379,13 +379,14 @@ def apply_answers_to_docx(
     generated = 0
 
     slots = (slots_payload or {}).get("slots", [])
+
+    # First pass: resolve answers from file or schedule generation
+    answers: Dict[str, object | None] = {}
+    to_generate: List[Tuple[str, str, dict]] = []
     for s in slots:
         sid = s.get("id", "")
         question_text = (s.get("question_text") or "").strip()
-        locator = s.get("answer_locator") or {}
-        ltype = str(locator.get("type", ""))
         meta = s.get("meta") or {}
-        # Find answer by id, else by normalized question
         answer = None
         if sid in by_id:
             answer = by_id[sid]
@@ -393,22 +394,43 @@ def apply_answers_to_docx(
             key = normalize_question(question_text)
             if key in by_q:
                 answer = by_q[key]
-
-        # If still None and generator provided, call it
         if answer is None and generator is not None:
-            try:
-                kwargs = {}
-                if s.get("answer_type") == "multiple_choice":
-                    choice_meta = meta.get("choices", [])
-                    kwargs["choices"] = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
-                    kwargs["choice_meta"] = choice_meta
-                answer = generator(question_text, **kwargs)
-                dbg(f"Generated answer via {gen_name} for slot {sid}: {answer}")
-                generated += 1
-            except Exception as e:
-                dbg(f"Generator error for question '{question_text}': {e}")
-                answer = None
+            kwargs = {}
+            if s.get("answer_type") == "multiple_choice":
+                choice_meta = meta.get("choices", [])
+                kwargs["choices"] = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
+                kwargs["choice_meta"] = choice_meta
+            to_generate.append((sid, question_text, kwargs))
+        answers[sid] = answer
 
+    # Run generator concurrently for all missing answers
+    if to_generate:
+        async def run_all() -> List[Tuple[str, object | None]]:
+            async def worker(sid: str, q: str, kwargs: dict):
+                try:
+                    ans = await asyncio.to_thread(generator, q, **kwargs)
+                    dbg(f"Generated answer via {gen_name} for slot {sid}: {ans}")
+                    return sid, ans
+                except Exception as e:
+                    dbg(f"Generator error for question '{q}': {e}")
+                    return sid, None
+            tasks = [asyncio.create_task(worker(sid, q, kw)) for sid, q, kw in to_generate]
+            return await asyncio.gather(*tasks)
+
+        for sid, ans in asyncio.run(run_all()):
+            if ans is not None:
+                answers[sid] = ans
+                generated += 1
+
+    # Second pass: apply answers
+    for s in slots:
+        sid = s.get("id", "")
+        question_text = (s.get("question_text") or "").strip()
+        locator = s.get("answer_locator") or {}
+        ltype = str(locator.get("type", ""))
+        meta = s.get("meta") or {}
+
+        answer = answers.get(sid)
         if answer is None:
             dbg(f"NO ANSWER for slot {sid!r} / question '{question_text}' — skipping")
             skipped_no_answer += 1
