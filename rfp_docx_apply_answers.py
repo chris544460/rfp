@@ -12,7 +12,7 @@ from docx.text.paragraph import Paragraph
 from docx.table import Table
 from docx.oxml import OxmlElement
 from docx.enum.text import WD_COLOR_INDEX
-from rfp_utils.word_comments import add_comment_to_run
+from word_comments import add_comment_to_run
 
 # ---------------------------- Debug helpers ----------------------------
 
