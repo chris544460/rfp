@@ -350,6 +350,51 @@ _MC_KWS = (
 _CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
 
 
+def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
+    """Collect multiple choice options appearing after the question block.
+
+    Each choice is returned as a dict with:
+      - text:       cleaned option text
+      - prefix:     leading marker/prefix (checkbox, enumeration, etc.)
+      - block_index:index of the paragraph containing the option
+    """
+    choices: List[Dict[str, object]] = []
+    for offset, nb in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
+        if not isinstance(nb, Paragraph):
+            break
+        txt = (nb.text or "").strip()
+        if not txt:
+            continue
+        prefix = ""
+        cleaned = txt
+        if any(ch in txt for ch in _CHECKBOX_CHARS):
+            m = re.match(rf"^[{_CHECKBOX_CHARS}]\s*", txt)
+            if m:
+                prefix = m.group(0)
+                cleaned = txt[m.end():].strip()
+        elif re.match(r"^\(\s*\)\s*", txt):
+            m = re.match(r"^\(\s*\)\s*", txt)
+            prefix = m.group(0)
+            cleaned = txt[m.end():].strip()
+        elif re.match(r"^\[\s*\]\s*", txt):
+            m = re.match(r"^\[\s*\]\s*", txt)
+            prefix = m.group(0)
+            cleaned = txt[m.end():].strip()
+        elif re.match(_ENUM_PREFIX_RE, txt):
+            m = _ENUM_PREFIX_RE.match(txt)
+            if m:
+                prefix = m.group(0)
+                cleaned = txt[m.end():].strip()
+        else:
+            break
+        choices.append({
+            "text": cleaned,
+            "prefix": prefix,
+            "block_index": q_block + offset,
+        })
+    return choices
+
+
 def infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]], q_block: int) -> str:
     """Guess the expected answer format for a question.
 
@@ -862,6 +907,16 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             slots.extend(detector(blocks))
         # optional: refine if we still want refinement when LLM disabled (keep off)
     
+    for s in slots:
+        if s.answer_type == "multiple_choice":
+            qb = (s.meta or {}).get("q_block")
+            if qb is not None:
+                choices = extract_mc_choices(blocks, qb)
+                if choices:
+                    if s.meta is None:
+                        s.meta = {}
+                    s.meta["choices"] = choices
+
     attach_context(slots, blocks)
     dbg(f"Slot count: {len(slots)}")
     dbg(f"Final payload preview: {json.dumps({'doc_type': 'docx', 'file': os.path.basename(path), 'slots': [asdict(s) for s in dedupe_slots(slots)]}, indent=2)[:1000]}")
