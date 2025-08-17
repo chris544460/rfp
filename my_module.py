@@ -12,14 +12,14 @@ FUND_TAG         = os.getenv("RFP_FUND_TAG") or None
 MIN_CONFIDENCE   = float(os.getenv("RFP_MIN_CONFIDENCE", "0.0"))
 LENGTH_PRESET    = os.getenv("RFP_LENGTH") or "medium"       # "short"|"medium"|"long"
 APPROX_WORDS_ENV = os.getenv("RFP_APPROX_WORDS")             # if set, overrides LENGTH
-INCLUDE_COMMENTS = os.getenv("RFP_INCLUDE_COMMENTS", "0") == "1"
+INCLUDE_COMMENTS = os.getenv("RFP_INCLUDE_COMMENTS", "1") == "1"  # set to "0" to disable
 
 _llm_client = CompletionsClient(model=MODEL)
 
 def _format_with_or_without_comments(ans: str, cmts):
     """Return answer text plus optional citation metadata.
 
-    When ``INCLUDE_COMMENTS`` is set, we keep the bracketed citation markers in
+    When ``INCLUDE_COMMENTS`` is enabled (the default), we keep the bracketed citation markers in
     ``ans`` and return a structure containing the text along with a mapping of
     citation numbers to their original snippets. These snippets are later used
     to attach Word comments in the output document. If comments are disabled we
