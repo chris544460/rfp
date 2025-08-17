@@ -449,6 +449,9 @@ def main():
                     help="Write mode for paragraphs/cells (default: fill)")
     ap.add_argument("--debug", action="store_true", help="Verbose debug logging")
     ap.add_argument("--generate", metavar="MODULE:FUNC", help="Dynamically generate answers by calling given function for each question (e.g. ai_gen:make_answer)")
+    if len(sys.argv) == 1:
+        ap.print_help()
+        sys.exit(1)
     args = ap.parse_args()
 
     global DEBUG
