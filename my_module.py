@@ -16,12 +16,18 @@ INCLUDE_COMMENTS = os.getenv("RFP_INCLUDE_COMMENTS", "0") == "1"
 
 _llm_client = CompletionsClient(model=MODEL)
 
-def _format_with_or_without_comments(ans: str, cmts) -> str:
+def _format_with_or_without_comments(ans: str, cmts):
+    """Return answer text plus optional citation metadata.
+
+    When ``INCLUDE_COMMENTS`` is set, we keep the bracketed citation markers in
+    ``ans`` and return a structure containing the text along with a mapping of
+    citation numbers to their original snippets. These snippets are later used
+    to attach Word comments in the output document. If comments are disabled we
+    simply strip the ``[n]`` markers and return the plain string.
+    """
     if INCLUDE_COMMENTS:
-        lines = [ans, "", "Sources:"]
-        for i, (lbl, src, snippet, score, date_str) in enumerate(cmts):
-            lines.append(f"[{i+1}] {lbl} — {src} ({date_str}, score {score:.3f})")
-        return "\n".join(lines)
+        citations = {i + 1: snippet for i, (_, _, snippet, _, _) in enumerate(cmts)}
+        return {"text": ans, "citations": citations}
     # strip bracket markers like [1] if comments are off
     return re.sub(r"\[\d+\]", "", ans)
 
