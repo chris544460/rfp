@@ -13,7 +13,7 @@ import os
 import sys
 import tempfile
 import importlib
-from typing import Callable
+from typing import Callable, Optional
 
 from rfp_handlers import get_handlers
 
@@ -87,7 +87,7 @@ def main() -> None:
         return
 
     # Optional answer generator
-    gen_callable: Callable[[str], str] | None = None
+    gen_callable: Optional[Callable[[str], str]] = None
     gen_name = ""
     if args.generate:
         if ":" not in args.generate:

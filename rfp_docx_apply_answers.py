@@ -381,7 +381,7 @@ def apply_answers_to_docx(
     slots = (slots_payload or {}).get("slots", [])
 
     # First pass: resolve answers from file or schedule generation
-    answers: Dict[str, object | None] = {}
+    answers: Dict[str, Optional[object]] = {}
     to_generate: List[Tuple[str, str, dict]] = []
     for s in slots:
         sid = s.get("id", "")
@@ -405,7 +405,7 @@ def apply_answers_to_docx(
 
     # Run generator concurrently for all missing answers
     if to_generate:
-        async def run_all() -> List[Tuple[str, object | None]]:
+        async def run_all() -> List[Tuple[str, Optional[object]]]:
             async def worker(sid: str, q: str, kwargs: dict):
                 try:
                     ans = await asyncio.to_thread(generator, q, **kwargs)
