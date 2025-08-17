@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-# Requires: export OPENAI_API_KEY=...  (and optionally OPENAI_MODEL=gpt-5-nano)
 # rfp_docx_slot_finder.py
+#
+# Requires environment variables for the chosen framework:
+#   • Framework selection: ANSWER_FRAMEWORK=openai|aladdin
+#   • OpenAI: set OPENAI_API_KEY (and optional OPENAI_MODEL)
+#   • Aladdin: set aladdin_studio_api_key, defaultWebServer, aladdin_user, aladdin_passwd
 
 DEBUG = False
 SHOW_TEXT = False  # when True, print full prompt/completion payloads
@@ -47,6 +51,25 @@ from typing import List, Optional, Dict, Any, Tuple, Union
 import docx
 from docx.text.paragraph import Paragraph
 from docx.table import Table
+from answer_composer import CompletionsClient, get_openai_completion
+
+# Framework and model selection
+FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "openai")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+
+
+def _call_llm(prompt: str, json_output: bool = False) -> str:
+    """Call the selected LLM framework and record usage."""
+    if FRAMEWORK == "aladdin":
+        client = CompletionsClient(model=MODEL)
+        content, usage = client.get_completion(prompt, json_output=json_output)
+    else:
+        content, usage = get_openai_completion(prompt, MODEL, json_output=json_output)
+    try:
+        _record_usage(MODEL, usage)
+    except Exception:
+        pass
+    return content
 
 # ───────────────────────── models ─────────────────────────
 
@@ -528,15 +551,10 @@ USE_LLM = True  # default is ON; can be disabled with --no-ai
 
 def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
     """
-    Stub that could call OpenAI to confirm/adjust low-confidence slots.
+    Stub that could call an LLM to confirm/adjust low-confidence slots.
     Keep as no-op unless USE_LLM=True and you implement it.
     """
     if not USE_LLM:
-        return slots
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    except Exception:
         return slots
 
     refined: List[QASlot] = []
@@ -552,26 +570,16 @@ def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
             "'offset': int, 'table_index': int|null, 'row': int|null, 'col': int|null}}.\n\n"
             f"EXCERPT:\n{ctx}"
         )
-        # Minimal example using chat.completions (works widely)
         try:
-            resp = client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
-                response_format={"type": "json_object"},
-                messages=[{"role":"user","content":prompt}]
-            )
+            content = _call_llm(prompt, json_output=True)
             if SHOW_TEXT:
                 print("\n--- PROMPT (llm_refine) ---")
                 print(prompt)
                 print("--- COMPLETION (llm_refine) ---")
-                print(resp.choices[0].message.content)
+                print(content)
                 print("--- END COMPLETION ---\n")
-            try:
-                _record_usage(os.getenv("OPENAI_MODEL", "gpt-5-nano"), resp.usage.model_dump())
-            except Exception:
-                pass
-            js = json.loads(resp.choices[0].message.content)
+            js = json.loads(content)
             if js.get("is_question"):
-                # You could update s.question_text and s.answer_locator with js here
                 s.confidence = max(s.confidence, 0.85)
         except Exception:
             pass
@@ -580,14 +588,8 @@ def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
 
 # ─────────────────── LLM paragraph‑scan fallback ───────────────────
 
-def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = "gpt-5-nano") -> List[QASlot]:
+def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -> List[QASlot]:
     """If rule‑based detectors find nothing, let an LLM propose Q→A blanks."""
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    except Exception:
-        return []
-
     excerpt, table_idx_map = _render_rich_excerpt(blocks)
     dbg(f"llm_scan_blocks (rich): {len(excerpt)} chars, model={model}")
     dbg(f"Sending prompt to LLM (first 400 chars): {excerpt[:400]}...")
@@ -610,23 +612,15 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = "gpt-5-n
         print(instruction + "\n\nDOC:\n" + excerpt)
         print("--- END PROMPT ---\n")
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "You are a precise document analyzer. Only output valid JSON."},
-                {"role": "user", "content": instruction + "\n\nDOC:\n" + excerpt}
-            ],
+        content = _call_llm(
+            instruction + "\n\nDOC:\n" + excerpt,
+            json_output=True,
         )
-        try:
-            _record_usage(model, resp.usage.model_dump())
-        except Exception:
-            pass
-        js = json.loads(resp.choices[0].message.content)
+        js = json.loads(content)
         cand = js.get("slots", []) or []
         if SHOW_TEXT:
             print("\n--- COMPLETION (llm_scan_blocks) ---")
-            print(resp.choices[0].message.content)
+            print(content)
             print("--- END COMPLETION ---\n")
         dbg(f"LLM returned {len(cand)} slot candidates")
         dbg(f"LLM raw slot candidates: {cand}")
@@ -692,14 +686,8 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = "gpt-5-n
 
 # ─────────────────── 2‑stage LLM helpers ───────────────────
 
-def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = "gpt-5-nano") -> List[int]:
+def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -> List[int]:
     """Return global block indices that look like questions."""
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    except Exception:
-        return []
-
     excerpt, _ = _render_rich_excerpt(blocks)
     prompt = (
         "Below is a format‑aware listing of a DOCX document. "
@@ -710,19 +698,11 @@ def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = "gp
     )
     if SHOW_TEXT:
         print("\n--- PROMPT (detect_questions) ---\n" + prompt + "\n--- END PROMPT ---\n")
-    resp = client.chat.completions.create(
-        model=model,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}],
-    )
     try:
-        _record_usage(model, resp.usage.model_dump())
-    except Exception:
-        pass
-    if SHOW_TEXT:
-        print("\n--- COMPLETION (detect_questions) ---\n" + resp.choices[0].message.content + "\n--- END COMPLETION ---\n")
-    try:
-        js = json.loads(resp.choices[0].message.content)
+        content = _call_llm(prompt, json_output=True)
+        if SHOW_TEXT:
+            print("\n--- COMPLETION (detect_questions) ---\n" + content + "\n--- END COMPLETION ---\n")
+        js = json.loads(content)
         questions = [int(i) for i in js.get("questions", [])]
         dbg(f"Model returned JSON (detect_questions): {js}")
         dbg(f"Questions indices extracted: {questions}")
@@ -732,13 +712,8 @@ def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = "gp
         return []
 
 
-async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = "gpt-5-nano") -> Optional[AnswerLocator]:
+async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = MODEL) -> Optional[AnswerLocator]:
     """Given a question block index, ask the LLM to pick best answer location within ±window."""
-    try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    except Exception:
-        return None
 
     # Build context window
     start = max(0, q_block - window)
@@ -757,26 +732,16 @@ async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int,
     if SHOW_TEXT:
         print(f"\n--- PROMPT (locate_answer q_block={q_block}) ---\n" + prompt + "\n--- END PROMPT ---\n")
     try:
-        resp = await client.chat.completions.create(
-            model=model,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt}],
-        )
+        content = await asyncio.to_thread(_call_llm, prompt, True)
     except Exception as e:
-        dbg(f"OpenAI error (locate_answer q_block={q_block}): {e}")
+        dbg(f"LLM error (locate_answer q_block={q_block}): {e}")
         return None
-    try:
-        _record_usage(model, resp.usage.model_dump())
-    except Exception:
-        pass
     if SHOW_TEXT:
         print(
-            f"\n--- COMPLETION (locate_answer q_block={q_block}) ---\n"
-            + resp.choices[0].message.content
-            + "\n--- END COMPLETION ---\n"
+            f"\n--- COMPLETION (locate_answer q_block={q_block}) ---\n" + content + "\n--- END COMPLETION ---\n"
         )
     try:
-        js = json.loads(resp.choices[0].message.content)
+        js = json.loads(content)
         dbg(f"Model returned JSON (locate_answer q_block={q_block}): {js}")
         kind = js.get("kind")
         if kind == "paragraph_after":
@@ -799,13 +764,8 @@ async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int,
         return None
 
 
-async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = "gpt-5-nano") -> bool:
+async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = MODEL) -> bool:
     """Return True if the question likely depends on previous context."""
-    try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    except Exception:
-        return False
 
     start = max(0, q_block - 2)
     end = min(len(blocks), q_block + 1)
@@ -818,20 +778,12 @@ async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int
         + excerpt
     )
     try:
-        resp = await client.chat.completions.create(
-            model=model,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt}],
-        )
+        content = await asyncio.to_thread(_call_llm, prompt, True)
     except Exception as e:
-        dbg(f"OpenAI error (assess_context q_block={q_block}): {e}")
+        dbg(f"LLM error (assess_context q_block={q_block}): {e}")
         return False
     try:
-        _record_usage(model, resp.usage.model_dump())
-    except Exception:
-        pass
-    try:
-        js = json.loads(resp.choices[0].message.content)
+        js = json.loads(content)
         return bool(js.get("needs_context"))
     except Exception:
         return False
@@ -847,9 +799,21 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
 
     # If LLM mode (USE_LLM) is active, skip all rule-based detectors entirely.
     if USE_LLM:
-        if not os.getenv("OPENAI_API_KEY"):
+        if FRAMEWORK == "openai" and not os.getenv("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY not set; cannot run in pure AI mode.")
-        llm_model = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+        if FRAMEWORK == "aladdin":
+            required = [
+                "aladdin_studio_api_key",
+                "defaultWebServer",
+                "aladdin_user",
+                "aladdin_passwd",
+            ]
+            missing = [v for v in required if not os.getenv(v)]
+            if missing:
+                raise RuntimeError(
+                    f"Missing environment variables for aladdin framework: {', '.join(missing)}"
+                )
+        llm_model = MODEL
         q_indices = llm_detect_questions(blocks, model=llm_model)
 
         async def process_q_block(qb: int) -> Optional[QASlot]:
@@ -958,6 +922,17 @@ def main():
     ap.add_argument("--ai", action="store_true", help="(deprecated) AI mode is always on; flag kept for backward compatibility")
     ap.add_argument("--debug", action="store_true", help="Print verbose debug info")
     ap.add_argument("--show-text", action="store_true", help="Dump full prompt and completion text for each API call (verbose)")
+    ap.add_argument(
+        "--framework",
+        choices=["openai", "aladdin"],
+        default=os.getenv("ANSWER_FRAMEWORK", "openai"),
+        help="Which completion framework to use",
+    )
+    ap.add_argument(
+        "--model",
+        default=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
+        help="Model name for the chosen framework",
+    )
     args = ap.parse_args()
 
     # Set debug global
@@ -973,9 +948,22 @@ def main():
     global USE_LLM
     USE_LLM = True  # AI is always on; --ai is optional/legacy
 
-    if not os.getenv("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY is not set (required).", file=sys.stderr)
+    global FRAMEWORK, MODEL
+    FRAMEWORK = args.framework
+    MODEL = args.model
+
+    if FRAMEWORK == "openai" and not os.getenv("OPENAI_API_KEY"):
+        print("Error: OPENAI_API_KEY is not set (required for openai framework).", file=sys.stderr)
         sys.exit(1)
+    if FRAMEWORK == "aladdin":
+        required = ["aladdin_studio_api_key", "defaultWebServer", "aladdin_user", "aladdin_passwd"]
+        missing = [v for v in required if not os.getenv(v)]
+        if missing:
+            print(
+                f"Error: Missing environment variables for aladdin framework: {', '.join(missing)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Validate file existence
     if not os.path.isfile(args.docx_path):
