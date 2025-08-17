@@ -107,6 +107,35 @@ def normalize_question(q: str) -> str:
     return " ".join((q or "").strip().lower().split())
 
 
+def _normalize_citations(raw: object) -> Dict[str, str]:
+    """Return a {citation_number: snippet_text} mapping from ``raw``.
+
+    ``raw`` may already be a mapping or a list of citation objects. Each citation
+    object is expected to contain the snippet text either as the value itself or
+    under a common key like ``text`` or ``snippet``. Unknown structures yield an
+    empty mapping.
+    """
+    if not raw:
+        return {}
+    result: Dict[str, str] = {}
+    if isinstance(raw, dict):
+        items = raw.items()
+    elif isinstance(raw, list):  # allow list of citation objects
+        items = []
+        for i, item in enumerate(raw, 1):
+            key = getattr(item, "get", lambda *_: None)("id") or getattr(item, "get", lambda *_: None)("num") or i
+            items.append((key, item))
+    else:
+        return {}
+    for key, val in items:
+        if isinstance(val, dict):
+            snippet = val.get("text") or val.get("snippet") or val.get("source_text") or val.get("content") or ""
+        else:
+            snippet = str(val)
+        result[str(key)] = str(snippet)
+    return result
+
+
 def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, str]) -> None:
     """Write text into ``paragraph`` adding Word comments for citation markers.
 
@@ -126,7 +155,7 @@ def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[ob
             run = paragraph.add_run(match.group(0))
             snippet = citations.get(num) or citations.get(str(num))
             if snippet:
-                doc.add_comment(run, snippet)
+                doc.add_comment(run, str(snippet))
             pos = match.end()
         if pos < len(line):
             paragraph.add_run(line[pos:])
@@ -300,7 +329,7 @@ def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") ->
     """
     if isinstance(answer, dict):
         answer_text = str(answer.get("text", ""))
-        citations = answer.get("citations", {}) or {}
+        citations = _normalize_citations(answer.get("citations"))
     else:
         answer_text = str(answer)
         citations = {}
@@ -335,7 +364,7 @@ def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: st
 
     if isinstance(answer, dict):
         answer_text = str(answer.get("text", ""))
-        citations = answer.get("citations", {}) or {}
+        citations = _normalize_citations(answer.get("citations"))
     else:
         answer_text = str(answer)
         citations = {}
