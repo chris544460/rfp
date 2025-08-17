@@ -13,13 +13,23 @@ from rfp_docx_apply_answers import apply_answers_to_docx
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run slot finder then apply answers")
+    ap = argparse.ArgumentParser(
+        description="Run slot finder then apply answers; answers JSON optional if using --generate"
+    )
     ap.add_argument("docx_path", help="Path to the source .docx file")
-    ap.add_argument("answers_json", nargs="?", help="Path to answers JSON")
+    ap.add_argument(
+        "answers_json",
+        nargs="?",
+        help="Path to answers JSON; omit when using --generate",
+    )
     ap.add_argument("-o", "--out", default="Answered.docx", help="Output .docx file")
     ap.add_argument("--slots", help="Optional path to write detected slots JSON")
     ap.add_argument("--mode", choices=["replace", "append", "fill"], default="fill", help="Answer write mode")
-    ap.add_argument("--generate", metavar="MODULE:FUNC", help="Optional answer generator to call when an answer is missing")
+    ap.add_argument(
+        "--generate",
+        metavar="MODULE:FUNC",
+        help="Optional answer generator to call when an answer is missing or when no answers JSON is provided",
+    )
     ap.add_argument("--debug", action="store_true", help="Verbose debug output")
     if len(sys.argv) == 1:
         ap.print_help()
@@ -51,8 +61,8 @@ def main():
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(slots_payload, f)
 
-    # If no answers specified, just print slots and exit
-    if not args.answers_json:
+    # If no answers JSON and no generator specified, just print slots and exit
+    if not args.answers_json and not args.generate:
         print(json.dumps(slots_payload, indent=2, ensure_ascii=False))
         if not args.slots:
             os.unlink(slots_path)
@@ -85,7 +95,7 @@ def main():
         summary = apply_answers_to_docx(
             args.docx_path,
             slots_path,
-            args.answers_json,
+            args.answers_json or "",
             args.out,
             mode=args.mode,
             generator=gen_callable,
