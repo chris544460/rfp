@@ -11,6 +11,7 @@ import docx
 from docx.text.paragraph import Paragraph
 from docx.table import Table
 from docx.oxml import OxmlElement
+from docx.enum.text import WD_COLOR_INDEX
 
 # ---------------------------- Debug helpers ----------------------------
 
@@ -64,6 +65,8 @@ def build_indexes(doc: docx.document.Document) -> Tuple[
 # ---------------------------- Utilities ----------------------------
 
 _BLANK_RE = re.compile(r"_+\s*$")
+
+_CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
 
 def is_blank_para(p: Paragraph) -> bool:
     """
@@ -306,6 +309,40 @@ def apply_to_table_cell(tbl: Table, row: int, col: int, answer_text: str, mode: 
     else:
         cell.text = answer_text
 
+def mark_multiple_choice(blocks: List[Union[Paragraph, Table]], choices_meta: List[Dict[str, object]], index: int, style: Optional[str] = None) -> None:
+    """Mark a selected multiple-choice option in-place."""
+    if not isinstance(choices_meta, list):
+        return
+    if index is None or not (0 <= index < len(choices_meta)):
+        return
+    meta = choices_meta[index]
+    b_idx = int(meta.get("block_index", -1))
+    if not (0 <= b_idx < len(blocks)):
+        return
+    para = blocks[b_idx]
+    if not isinstance(para, Paragraph):
+        return
+    prefix = str(meta.get("prefix", ""))
+    text = para.text or ""
+    # auto style detection
+    if style in (None, "", "auto"):
+        if any(ch in prefix for ch in _CHECKBOX_CHARS):
+            style = "checkbox"
+        elif prefix.strip() in ("()", "[]"):
+            style = "fill"
+        else:
+            style = "highlight"
+    if style == "checkbox" and any(ch in prefix for ch in _CHECKBOX_CHARS):
+        para.text = re.sub(rf"[{_CHECKBOX_CHARS}]", "☑", text, count=1)
+    elif style == "fill" and prefix.strip() in ("()", "[]"):
+        mark = prefix[0] + "X" + prefix[1]
+        para.text = text.replace(prefix, mark, 1)
+    elif style == "highlight":
+        for run in para.runs:
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    else:
+        para.text = "X " + text
+
 # ---------------------------- Main application flow ----------------------------
 
 def apply_answers_to_docx(
@@ -314,7 +351,7 @@ def apply_answers_to_docx(
     answers_json_path: str,
     out_path: str,
     mode: str = "fill",
-    generator: Optional[Callable[[str], str]] = None,
+    generator: Optional[Callable[..., object]] = None,
     gen_name: str = ""
 ) -> Dict[str, int]:
     """
@@ -360,7 +397,12 @@ def apply_answers_to_docx(
         # If still None and generator provided, call it
         if answer is None and generator is not None:
             try:
-                answer = generator(question_text)
+                kwargs = {}
+                if s.get("answer_type") == "multiple_choice":
+                    choice_meta = meta.get("choices", [])
+                    kwargs["choices"] = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
+                    kwargs["choice_meta"] = choice_meta
+                answer = generator(question_text, **kwargs)
                 dbg(f"Generated answer via {gen_name} for slot {sid}: {answer}")
                 generated += 1
             except Exception as e:
@@ -370,6 +412,33 @@ def apply_answers_to_docx(
         if answer is None:
             dbg(f"NO ANSWER for slot {sid!r} / question '{question_text}' — skipping")
             skipped_no_answer += 1
+            continue
+
+        # Special handling for multiple-choice selections
+        choice_meta = meta.get("choices", [])
+        if s.get("answer_type") == "multiple_choice" and choice_meta:
+            choice_texts = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
+            idx = None
+            style = None
+            if isinstance(answer, dict):
+                idx = answer.get("choice_index")
+                style = answer.get("style")
+            else:
+                try:
+                    idx = choice_texts.index(str(answer).strip())
+                except ValueError:
+                    idx = None
+            if idx is not None:
+                try:
+                    mark_multiple_choice(blocks, choice_meta, int(idx), style)
+                    applied += 1
+                    dbg("  -> marked choice in-place")
+                except Exception as e:
+                    dbg(f"  -> error marking multiple choice: {e}")
+                    skipped_bad_locator += 1
+            else:
+                dbg("  -> could not resolve selected choice index")
+                skipped_bad_locator += 1
             continue
 
         dbg(f"Applying answer for slot {sid} (type={ltype})")
