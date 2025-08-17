@@ -68,6 +68,9 @@ _BLANK_RE = re.compile(r"_+\s*$")
 
 _CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
 
+# Matches bracketed citation numbers like "[1]" used in answers
+_CITATION_RE = re.compile(r"\[(\d+)\]")
+
 def is_blank_para(p: Paragraph) -> bool:
     """
     Heuristic 'blank' detection similar to detector:
@@ -103,53 +106,83 @@ def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
 def normalize_question(q: str) -> str:
     return " ".join((q or "").strip().lower().split())
 
+
+def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, str]) -> None:
+    """Write text into ``paragraph`` adding Word comments for citation markers.
+
+    ``citations`` is a mapping from citation number to the snippet text that
+    should appear in the comment. Each occurrence of "[n]" in ``text`` results
+    in a comment attached to the run containing that marker when ``n`` is found
+    in ``citations``.
+    """
+    doc = paragraph.part.document
+    parts = text.split("\n")
+    for li, line in enumerate(parts):
+        pos = 0
+        for match in _CITATION_RE.finditer(line):
+            if match.start() > pos:
+                paragraph.add_run(line[pos:match.start()])
+            num = int(match.group(1))
+            run = paragraph.add_run(match.group(0))
+            snippet = citations.get(num) or citations.get(str(num))
+            if snippet:
+                doc.add_comment(run, snippet)
+            pos = match.end()
+        if pos < len(line):
+            paragraph.add_run(line[pos:])
+        if li < len(parts) - 1:
+            paragraph.add_run().add_break()
+
 # ---------------------------- Answers loader ----------------------------
 
-def load_answers(answers_path: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+def load_answers(answers_path: str) -> Tuple[Dict[str, object], Dict[str, object]]:
     """
     Load answers from JSON.
 
     Accepted formats:
     1) Dict with explicit sections:
        {
-         "by_id": {"slot_abc": "answer", ...},
+         "by_id": {"slot_abc": "answer" | {"text": "...", "citations": {...}}, ...},
          "by_question": {"what’s 1+1?": "2", ...}
        }
 
     2) List of objects:
-       [{"slot_id":"slot_abc","answer":"..."}, {"question_text":"...","answer":"..."}]
+       [{"slot_id":"slot_abc","answer":"..."},
+        {"question_text":"...","answer":{"text":"...","citations":{...}}}]
 
     3) Flat dict:
        Keys matching slot IDs go to by_id; others are treated as question_text.
+       Values may be plain strings or objects with ``text``/``citations``.
     """
     with open(answers_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    by_id: Dict[str, str] = {}
-    by_q: Dict[str, str] = {}
+    # answers may be plain strings or dicts containing citation metadata
+    by_id: Dict[str, object] = {}
+    by_q: Dict[str, object] = {}
 
     if isinstance(data, dict):
         if "by_id" in data or "by_question" in data:
             for k, v in (data.get("by_id") or {}).items():
-                by_id[str(k)] = str(v)
+                by_id[str(k)] = v
             for k, v in (data.get("by_question") or {}).items():
-                by_q[normalize_question(k)] = str(v)
+                by_q[normalize_question(k)] = v
         else:
             # flat dict
             for k, v in data.items():
                 kstr = str(k)
                 if kstr.startswith("slot_"):
-                    by_id[kstr] = str(v)
+                    by_id[kstr] = v
                 else:
-                    by_q[normalize_question(kstr)] = str(v)
+                    by_q[normalize_question(kstr)] = v
     elif isinstance(data, list):
         for item in data:
             if not isinstance(item, dict):
                 continue
             if "slot_id" in item:
-                by_id[str(item["slot_id"])] = str(item.get("answer", ""))
+                by_id[str(item["slot_id"])] = item.get("answer", "")
             elif "question_text" in item:
-                by_q[normalize_question(str(item["question_text"]))] = str(item.get("answer", ""))
+                by_q[normalize_question(str(item["question_text"]))] = item.get("answer", "")
     else:
         raise ValueError("Unsupported answers JSON structure.")
 
@@ -260,54 +293,68 @@ def get_target_paragraph_after_anchor(
 
 # ---------------------------- Apply operations ----------------------------
 
-def apply_to_paragraph(
-    target: Paragraph,
-    answer_text: str,
-    mode: str = "fill"
-) -> None:
+def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") -> None:
+    """Write answer into a paragraph, supporting citation comments.
+
+    ``answer`` may be a plain string or a dict with ``text`` and ``citations`` fields.
     """
-    Write text into a paragraph according to mode:
-      - replace: always replace existing content.
-      - append:  always append (with newline if needed).
-      - fill:    replace if blank/placeholder; otherwise append a new paragraph immediately below.
-    """
-    existing = (target.text or "")
+    if isinstance(answer, dict):
+        answer_text = str(answer.get("text", ""))
+        citations = answer.get("citations", {}) or {}
+    else:
+        answer_text = str(answer)
+        citations = {}
+
+    existing = target.text or ""
     if mode == "replace":
-        target.text = answer_text
+        target.text = ""
+        _add_text_with_citations(target, answer_text, citations)
         return
     if mode == "append":
         if existing:
-            target.add_run("\n" + answer_text)
+            target.add_run("\n")
         else:
-            target.text = answer_text
+            target.text = ""
+        _add_text_with_citations(target, answer_text, citations)
         return
     # fill (default)
     if is_blank_para(target) or not existing.strip():
-        target.text = answer_text
+        target.text = ""
+        _add_text_with_citations(target, answer_text, citations)
     else:
-        # append below to avoid stomping content
-        new_p = insert_paragraph_after(target, answer_text)
+        new_p = insert_paragraph_after(target, "")
+        _add_text_with_citations(new_p, answer_text, citations)
         dbg("Target paragraph not blank; appended answer in a new paragraph below.")
 
-def apply_to_table_cell(tbl: Table, row: int, col: int, answer_text: str, mode: str = "fill") -> None:
-    """
-    Write into a table cell. For simplicity:
-      - replace: cell.text = answer
-      - append/fill: append with newline if cell already has text; else set
-    """
+def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: str = "fill") -> None:
+    """Write into a table cell, supporting citation comments."""
     try:
         cell = tbl.cell(row, col)
     except Exception:
         return
-    current = (cell.text or "")
-    if mode == "replace":
-        cell.text = answer_text
-        return
-    # append or fill
-    if current.strip():
-        cell.text = current + "\n" + answer_text
+
+    if isinstance(answer, dict):
+        answer_text = str(answer.get("text", ""))
+        citations = answer.get("citations", {}) or {}
     else:
-        cell.text = answer_text
+        answer_text = str(answer)
+        citations = {}
+
+    current = cell.text or ""
+    if mode == "replace":
+        cell.text = ""
+        p = cell.paragraphs[0]
+        _add_text_with_citations(p, answer_text, citations)
+        return
+
+    if current.strip():
+        p = cell.paragraphs[-1]
+        p.add_run().add_break()
+        _add_text_with_citations(p, answer_text, citations)
+    else:
+        cell.text = ""
+        p = cell.paragraphs[0]
+        _add_text_with_citations(p, answer_text, citations)
 
 def mark_multiple_choice(blocks: List[Union[Paragraph, Table]], choices_meta: List[Dict[str, object]], index: int, style: Optional[str] = None) -> None:
     """Mark a selected multiple-choice option in-place."""
