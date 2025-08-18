@@ -36,20 +36,14 @@ def gen_answer(
     # Multiple-choice: pick and optionally suggest a marking style
     if choices:
         opt_list = "\n".join(f"- {c}" for c in choices)
-        select_template = read_prompt(
-            "mc_select",
-            "{question}\nOptions:\n{options}\nSelect the best option and reply with its text only.",
-        )
+        select_template = read_prompt("mc_select")
         select_prompt = select_template.format(question=question, options=opt_list)
         selection, _ = _llm_client.get_completion(select_prompt)
         idx = next((i for i, c in enumerate(choices) if c.strip() == selection.strip()), 0)
         style = "auto"
         if choice_meta:
             markers = "\n".join(f"{i}: {m.get('prefix', '')}" for i, m in enumerate(choice_meta))
-            style_template = read_prompt(
-                "mc_style",
-                "You chose '{selection}'. Option markers:\n{markers}\nWhich marking style fits best? Reply with one word: checkbox, fill, highlight, or auto.",
-            )
+            style_template = read_prompt("mc_style")
             style_prompt = style_template.format(selection=selection.strip(), markers=markers)
             style_resp, _ = _llm_client.get_completion(style_prompt)
             style = (style_resp or "").strip().lower() or "auto"
