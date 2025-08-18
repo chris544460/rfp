@@ -23,11 +23,21 @@ sys.modules["search.vector_search"] = fake_search
 
 import my_module
 
-def test_gen_answer_returns_text(monkeypatch):
-    my_module.QUESTION_HISTORY.clear()
+
+def test_followup_context_is_appended(monkeypatch):
+    calls = []
+
     def fake_answer_question(q, mode, fund, k, length, approx_words, min_conf, llm):
-        return "A. Option1 is correct [1]", [("1", "src.txt", "snippet", 0.9, "2024-01-01")]
+        calls.append(q)
+        return "ans", []
+
     monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
-    res = my_module.gen_answer("Which option?", ["Option1", "Option2"])
-    assert res["text"].startswith("A. Option1")
-    assert res["citations"] == {1: "snippet"}
+    monkeypatch.setattr(my_module, "_detect_followup", lambda q, h: [1] if h else [])
+
+    my_module.QUESTION_HISTORY.clear()
+    my_module.gen_answer("Do you provide IT support?")
+    my_module.gen_answer("Please provide comments if yes.")
+
+    assert "Do you provide IT support?" in calls[1]
+    assert "Please provide comments if yes." in calls[1]
+    assert len(my_module.QUESTION_HISTORY) == 2
