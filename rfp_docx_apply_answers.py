@@ -14,7 +14,7 @@ from docx.oxml import OxmlElement
 from docx.enum.text import WD_COLOR_INDEX
 
 # NEW: real comment helper
-from rfp_utils.word_comments import add_comment_to_run
+from word_comments import add_comment_to_run
 
 # ---------------------------- Debug helpers ----------------------------
 DEBUG = False
