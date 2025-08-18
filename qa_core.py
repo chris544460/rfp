@@ -113,11 +113,9 @@ def answer_question(
     # 1) Retrieve candidate context snippets
     if DEBUG:
         print("[qa_core] searching for context snippets")
-    if mode == "both":
-        # Back-compat: treat "both" as blend + dual
-        hits = search(q, kk=k, mode="blend", fund_filter=fund) + search(q, kk=k, mode="dual", fund_filter=fund)
-    else:
-        hits = search(q, kk=k, mode=mode, fund_filter=fund)
+        # enter mode
+        print(f"[qa_core] search mode: {mode}, fund: {fund}, k: {k}, approx_words: {approx_words}, min_confidence: {min_confidence}")
+        hits = search(q, k=k, mode=mode, fund_filter=fund)
     if DEBUG:
         print(f"[qa_core] retrieved {len(hits)} hits")
 
