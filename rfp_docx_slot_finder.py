@@ -1084,13 +1084,16 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             i for i, b in enumerate(blocks)
             if isinstance(b, Paragraph) and b.text and ('?' in b.text or b.text.strip().lower().startswith('please'))
         ]
+        dbg(f"Second-pass: single-priority indices = {single_priority}")
         # Prepare tasks for ThreadPoolExecutor
         tasks = []
         with ThreadPoolExecutor(max_workers=2) as executor:
             # Always run broad scan
+            dbg("Submitting broad scan (chunk_size=10)")
             tasks.append(executor.submit(llm_detect_questions, blocks, llm_model, 10))
             # Only run single-block scan if needed
             if single_priority:
+                dbg("Submitting single-block scan (chunk_size=1)")
                 tasks.append(executor.submit(llm_detect_questions, blocks, llm_model, 1))
             # Wait for both to complete
             for future in tasks:
