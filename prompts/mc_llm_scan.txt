@@ -1,0 +1,7 @@
+Question:
+{question}
+
+Context:
+{context}
+
+List any multiple choice options found in the context as a JSON array of strings. If none are present, return []

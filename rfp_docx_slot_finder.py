@@ -414,6 +414,41 @@ _MC_KWS = (
 _CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
 
 
+def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
+    """Use an LLM to guess multiple-choice options when heuristics fail."""
+    if FRAMEWORK != "openai" or not os.getenv("OPENAI_API_KEY"):
+        return []
+    question = ""
+    if isinstance(blocks[q_block], Paragraph):
+        question = blocks[q_block].text or ""
+    following: List[str] = []
+    for nb in blocks[q_block + 1 : q_block + 10]:
+        if isinstance(nb, Paragraph):
+            following.append(nb.text or "")
+        else:
+            break
+    template = read_prompt("mc_llm_scan")
+    prompt = template.format(question=question, context="\n".join(following))
+    try:
+        resp = _call_llm(prompt, json_output=True)
+        options = json.loads(resp)
+    except Exception:
+        return []
+    if not isinstance(options, list):
+        return []
+    choices: List[Dict[str, object]] = []
+    for opt in options:
+        if not isinstance(opt, str):
+            continue
+        # try to locate paragraph containing this option text
+        opt_low = opt.lower()
+        for offset, nb in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
+            if isinstance(nb, Paragraph) and opt_low in (nb.text or "").lower():
+                choices.append({"text": opt.strip(), "prefix": "", "block_index": q_block + offset})
+                break
+    return choices
+
+
 def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
     """Collect multiple choice options appearing after the question block.
 
@@ -456,6 +491,8 @@ def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> L
             "prefix": prefix,
             "block_index": q_block + offset,
         })
+    if not choices:
+        choices = llm_extract_mc_choices(blocks, q_block)
     return choices
 
 
