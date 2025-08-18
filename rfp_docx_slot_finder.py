@@ -823,6 +823,29 @@ def llm_detect_questions(
             js = json.loads(content)
             questions = [int(i) for i in js.get("questions", [])]
             dbg(f"Model returned JSON (detect_questions) chunk {start}-{end}: {js}")
+            # --- Begin debug print for each block ---
+            flagged = set(questions)
+            for rel_idx, b in enumerate(blocks[start:end]):
+                gi = start + rel_idx
+                if isinstance(b, Paragraph):
+                    text = b.text or ""
+                elif isinstance(b, Table):
+                    # Combine all cell texts
+                    cell_texts = []
+                    try:
+                        for row in b.rows:
+                            for cell in row.cells:
+                                cell_texts.append(_cell_rich_text(cell))
+                        text = " | ".join(cell_texts)
+                    except Exception:
+                        text = ""
+                else:
+                    text = ""
+                if gi in flagged:
+                    dbg(f"Block {gi}: FLAGGED as question -> {text}")
+                else:
+                    dbg(f"Block {gi}: skipped -> {text}")
+            # --- End debug print for each block ---
             found.extend(questions)
         except Exception as e:
             dbg(f"Error parsing detect_questions response (chunk {start}-{end}): {e}")
