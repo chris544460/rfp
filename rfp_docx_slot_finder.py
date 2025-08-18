@@ -336,6 +336,52 @@ def _render_rich_excerpt(blocks: List[Union[Paragraph, Table]], start_index: int
     excerpt = "\n".join(lines)
     return excerpt, table_idx_map
 
+
+def _render_structured_excerpt(blocks: List[Union[Paragraph, Table]], start_index: int = 0) -> str:
+    """Return JSON string describing blocks for precise LLM inspection."""
+    items: List[Dict[str, Any]] = []
+    for gi, b in enumerate(blocks, start=start_index):
+        if isinstance(b, Paragraph):
+            style = _para_style_name(b)
+            numId, ilvl = _para_num_info(b)
+            left, first = _para_indent_info(b)
+            items.append(
+                {
+                    "index": gi,
+                    "type": "paragraph",
+                    "text": b.text or "",
+                    "style": style,
+                    "numId": numId,
+                    "ilvl": ilvl,
+                    "left": left,
+                    "first": first,
+                }
+            )
+        elif isinstance(b, Table):
+            try:
+                rows = len(b.rows)
+                cols = len(b.columns)
+            except Exception:
+                rows, cols = 0, 0
+            cells: List[Dict[str, Any]] = []
+            for r in range(rows):
+                for c in range(cols):
+                    try:
+                        cell_text = _cell_rich_text(b.cell(r, c))
+                    except Exception:
+                        cell_text = ""
+                    cells.append({"r": r, "c": c, "text": cell_text})
+            items.append(
+                {
+                    "index": gi,
+                    "type": "table",
+                    "rows": rows,
+                    "cols": cols,
+                    "cells": cells,
+                }
+            )
+    return json.dumps({"blocks": items}, ensure_ascii=False)
+
 # ─────────────────── answer-type heuristics ───────────────────
 
 _FILE_KWS = (
@@ -753,18 +799,18 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -
 def llm_detect_questions(
     blocks: List[Union[Paragraph, Table]],
     model: str = MODEL,
-    chunk_size: int = 200,
+    chunk_size: int = 100,
 ) -> List[int]:
-    """Return global block indices that look like questions."""
+    """Return global block indices that look like questions using only the LLM."""
     found: List[int] = []
     for start in range(0, len(blocks), chunk_size):
         end = min(len(blocks), start + chunk_size)
-        excerpt, _ = _render_rich_excerpt(blocks[start:end], start_index=start)
+        excerpt = _render_structured_excerpt(blocks[start:end], start_index=start)
         prompt = (
-            "Below is a format‑aware listing of a DOCX document segment. "
-            "Block lines begin with their global index B[i]. "
-            "Identify EVERY block that asks a question or requests information, even if short, indented, or lacking a question mark. "
-            "Return STRICT JSON like {\"questions\": [0, 5, 12]} (empty list if none).\n\n"
+            "You are given JSON describing consecutive blocks from a DOCX file. "
+            "Each item includes a global 'index' and 'text'. Examine EVERY block carefully "
+            "and list the indices of those that ask a question or request information. "
+            "Return STRICT JSON like {\"questions\": [0,5,12]} (empty list if none).\n\n"
             + excerpt
         )
         if SHOW_TEXT:
@@ -779,6 +825,7 @@ def llm_detect_questions(
             found.extend(questions)
         except Exception as e:
             dbg(f"Error parsing detect_questions response (chunk {start}-{end}): {e}")
+
     unique_sorted = sorted(set(found))
     dbg(f"Questions indices extracted: {unique_sorted}")
     return unique_sorted
