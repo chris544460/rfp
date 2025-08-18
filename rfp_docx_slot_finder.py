@@ -1071,7 +1071,28 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                     f"Missing environment variables for aladdin framework: {', '.join(missing)}"
                 )
         llm_model = MODEL
+        # Primary detection
         q_indices = llm_detect_questions(blocks, model=llm_model)
+
+        # Second-pass to catch any missed questions:
+        #  - First, for blocks containing '?' or starting with 'Please', use single-block prompts.
+        #  - Then, a broader scan on remaining blocks.
+        all_indices = set(q_indices)
+        # Identify high-priority blocks for single-block detection
+        single_priority = [
+            i for i, b in enumerate(blocks)
+            if isinstance(b, Paragraph) and b.text and ('?' in b.text or b.text.strip().lower().startswith('please'))
+        ]
+        # Single-block LLM detection for high-priority items
+        if single_priority:
+            extra_single = llm_detect_questions(blocks, model=llm_model, chunk_size=1)
+            all_indices.update(extra_single)
+        # Broad LLM detection for the rest
+        extra_broad = llm_detect_questions(blocks, model=llm_model, chunk_size=10)
+        all_indices.update(extra_broad)
+
+        # Final combined question indices
+        q_indices = sorted(all_indices)
 
         async def process_q_block(qb: int) -> Optional[QASlot]:
             try:
