@@ -29,5 +29,5 @@ def test_gen_answer_returns_text(monkeypatch):
         return "A. Option1 is correct [1]", [("1", "src.txt", "snippet", 0.9, "2024-01-01")]
     monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
     res = my_module.gen_answer("Which option?", ["Option1", "Option2"])
-    assert res["text"].startswith("A. Option1")
+    assert res["text"] == "The correct answer is: Option1. Option1 is correct [1]"
     assert res["citations"] == {1: "snippet"}

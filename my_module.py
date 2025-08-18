@@ -43,6 +43,41 @@ def _format_with_or_without_comments(ans: str, cmts):
     return re.sub(r"\[\d+\]", "", ans)
 
 
+def _format_mc_answer(ans: str, choices: List[str]) -> str:
+    """Rewrite LLM output so choices are named up front.
+
+    Expects the LLM to begin its response with the correct option letters
+    (e.g. "A." or "A, C."), followed by any explanation. This extracts those
+    letters, maps them to the provided ``choices`` text, and constructs a
+    sentence such as ``"The correct answers are: Option1, Option2."``. The
+    remainder of the original answer (typically the explanation with
+    citations) is appended afterwards. If the expected pattern isn't found,
+    the original answer is returned unchanged.
+    """
+
+    match = re.match(r"([A-Z](?:\s*,\s*[A-Z])*)[\.\)]\s*", ans)
+    if not match:
+        return ans
+
+    letters = [l.strip() for l in match.group(1).split(",")]
+    explanation = ans[match.end():].lstrip()
+
+    names: List[str] = []
+    for l in letters:
+        idx = ord(l) - ord("A")
+        if 0 <= idx < len(choices):
+            names.append(choices[idx])
+
+    if not names:
+        return ans
+
+    if len(names) == 1:
+        intro = f"The correct answer is: {names[0]}."
+    else:
+        intro = "The correct answers are: " + ", ".join(names) + "."
+
+    return f"{intro} {explanation}" if explanation else intro
+
 def _detect_followup(question: str, history: List[str]) -> List[int]:
     """Use the LLM to determine which previous questions provide context."""
     if not history:
@@ -104,6 +139,7 @@ def gen_answer(
             MIN_CONFIDENCE,
             _llm_client,
         )
+        ans = _format_mc_answer(ans, choices)
         QUESTION_HISTORY.append(question)
         return _format_with_or_without_comments(ans, cmts)
 
