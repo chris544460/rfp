@@ -2,8 +2,8 @@
 import os, re
 from typing import Optional, List, Dict
 
-from rfp_utils.answer_composer import CompletionsClient
-from rfp_utils.qa_core import answer_question  # <<— now comes from Utilities core
+from answer_composer import CompletionsClient
+from qa_core import answer_question  # <<— now comes from Utilities core
 
 # Defaults (overridable via env vars)
 MODEL            = os.getenv("OPENAI_MODEL", "gpt-4o")
