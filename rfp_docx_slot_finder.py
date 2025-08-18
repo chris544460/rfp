@@ -519,32 +519,34 @@ def detect_para_question_with_blank(blocks: List[Union[Paragraph, Table]]) -> Li
                 if i + j >= len(blocks):
                     break
                 nb = blocks[i + j]
-                if isinstance(nb, Paragraph) and _is_blank_para(nb):
-                    lvl_num = paragraph_level_from_numbering(b)
-                    hint, hint_level = derive_outline_hint_and_level(text)
-                    ctx_level = lvl_num or hint_level
-                    slots.append(QASlot(
-                        id=f"slot_{uuid.uuid4().hex[:8]}",
-                        question_text=text,
-                        answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
-                        answer_type=infer_answer_type(text, blocks, i),
-                        confidence=min(0.95, conf_base + 0.2),
-                        meta={
-                            "detector": "para_blank_after",
-                            "q_paragraph_index": p_index,
-                            "q_block": i,
-                            "q_style": style,
-                            "outline": {"level": ctx_level, "hint": hint}
-                        }
-                    ))
-                    break
-                # 2) immediate empty 1x1 table (used as a box to type into)
+                if isinstance(nb, Paragraph):
+                    nb_text = (nb.text or "").strip()
+                    if _looks_like_question(nb_text):
+                        break
+                    if _is_blank_para(nb):
+                        lvl_num = paragraph_level_from_numbering(b)
+                        hint, hint_level = derive_outline_hint_and_level(text)
+                        ctx_level = lvl_num or hint_level
+                        slots.append(QASlot(
+                            id=f"slot_{uuid.uuid4().hex[:8]}",
+                            question_text=text,
+                            answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
+                            answer_type=infer_answer_type(text, blocks, i),
+                            confidence=min(0.95, conf_base + 0.2),
+                            meta={
+                                "detector": "para_blank_after",
+                                "q_paragraph_index": p_index,
+                                "q_block": i,
+                                "q_style": style,
+                                "outline": {"level": ctx_level, "hint": hint}
+                            }
+                        ))
+                        break
                 if isinstance(nb, Table):
                     try:
                         if len(nb.rows) == 1 and len(nb.columns) == 1:
                             cell_text = (nb.cell(0, 0).text or "").strip()
                             if cell_text == "":
-                                # need the running table index for locator
                                 t_idx = _running_table_index(blocks, i + j)
                                 lvl_num = paragraph_level_from_numbering(b)
                                 hint, hint_level = derive_outline_hint_and_level(text)
@@ -638,24 +640,28 @@ def detect_response_label_then_blank(blocks: List[Union[Paragraph, Table]]) -> L
                     for j in range(1, 4):
                         if i + j >= len(blocks): break
                         nb = blocks[i + j]
-                        if isinstance(nb, Paragraph) and _is_blank_para(nb):
-                            lvl_num = paragraph_level_from_numbering(prev) if isinstance(prev, Paragraph) else None
-                            hint, hint_level = derive_outline_hint_and_level(q_text)
-                            ctx_level = lvl_num or hint_level
-                            slots.append(QASlot(
-                                id=f"slot_{uuid.uuid4().hex[:8]}",
-                                question_text=q_text,
-                                answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
-                                answer_type=infer_answer_type(q_text, blocks, i - k),
-                                confidence=0.75,
-                                meta={
-                                    "detector": "response_label_then_blank",
-                                    "q_paragraph_index": q_idx,
-                                    "q_block": (i - k),
-                                    "outline": {"level": ctx_level, "hint": hint}
-                                }
-                            ))
-                            break
+                        if isinstance(nb, Paragraph):
+                            nb_text = (nb.text or "").strip()
+                            if _looks_like_question(nb_text):
+                                break
+                            if _is_blank_para(nb):
+                                lvl_num = paragraph_level_from_numbering(prev) if isinstance(prev, Paragraph) else None
+                                hint, hint_level = derive_outline_hint_and_level(q_text)
+                                ctx_level = lvl_num or hint_level
+                                slots.append(QASlot(
+                                    id=f"slot_{uuid.uuid4().hex[:8]}",
+                                    question_text=q_text,
+                                    answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
+                                    answer_type=infer_answer_type(q_text, blocks, i - k),
+                                    confidence=0.75,
+                                    meta={
+                                        "detector": "response_label_then_blank",
+                                        "q_paragraph_index": q_idx,
+                                        "q_block": (i - k),
+                                        "outline": {"level": ctx_level, "hint": hint}
+                                    }
+                                ))
+                                break
     return slots
 
 # ─────────────────── optional LLM refiner ───────────────────

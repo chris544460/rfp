@@ -13,6 +13,7 @@ from docx.text.paragraph import Paragraph
 from docx.table import Table
 from docx.oxml import OxmlElement
 from docx.enum.text import WD_COLOR_INDEX
+from rfp_docx_slot_finder import _looks_like_question
 
 # NEW: real comment helper
 from word_comments import add_comment_to_run
@@ -214,9 +215,16 @@ def get_target_paragraph_after_anchor(
     if anchor_block_index is not None:
         for b in blocks[anchor_block_index + 1:]:
             if isinstance(b, Paragraph):
+                txt = (b.text or "").strip()
+                if _looks_like_question(txt):
+                    break
                 subsequent_paras.append(b)
     else:
-        subsequent_paras = paragraphs[anchor_para_index + 1:]
+        for p in paragraphs[anchor_para_index + 1:]:
+            txt = (p.text or "").strip()
+            if _looks_like_question(txt):
+                break
+            subsequent_paras.append(p)
     if len(subsequent_paras) >= offset:
         return subsequent_paras[offset - 1]
     needed = offset - len(subsequent_paras)
@@ -225,7 +233,8 @@ def get_target_paragraph_after_anchor(
     created: Paragraph = last
     for _ in range(needed):
         created = insert_paragraph_after(created, "")
-    return created
+        subsequent_paras.append(created)
+    return subsequent_paras[offset - 1]
 
 # ---------------------------- Apply operations ----------------------------
 def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") -> None:
