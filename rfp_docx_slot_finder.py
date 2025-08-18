@@ -800,9 +800,18 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -
 def llm_detect_questions(
     blocks: List[Union[Paragraph, Table]],
     model: str = MODEL,
-    chunk_size: int = 100,
+    chunk_size: int = 10,
 ) -> List[int]:
     """Return global block indices that look like questions using only the LLM."""
+    # Pre-filter: remove empty blocks or paragraphs with fewer than 4 words
+    filtered: List[Union[Paragraph, Table]] = []
+    for b in blocks:
+        if isinstance(b, Paragraph):
+            # skip paragraphs with less than 4 words
+            if len((b.text or "").split()) < 4:
+                continue
+        filtered.append(b)
+    blocks = filtered
     found: List[int] = []
     for start in range(0, len(blocks), chunk_size):
         end = min(len(blocks), start + chunk_size)
