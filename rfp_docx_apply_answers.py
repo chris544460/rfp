@@ -17,7 +17,7 @@ from docx.enum.text import WD_COLOR_INDEX
 from word_comments import add_comment_to_run
 
 # ---------------------------- Debug helpers ----------------------------
-DEBUG = False
+DEBUG = True
 def dbg(msg: str):
     if DEBUG:
         print(f"[APPLY-DEBUG] {msg}")
@@ -490,7 +490,19 @@ def main():
     ap.add_argument("-o", "--out", required=True, help="Path to write updated .docx")
     ap.add_argument("--mode", choices=["replace", "append", "fill"], default="fill",
                     help="Write mode for paragraphs/cells (default: fill)")
-    ap.add_argument("--debug", action="store_true", help="Verbose debug logging")
+    ap.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=True,
+        help="Verbose debug logging (default on)",
+    )
+    ap.add_argument(
+        "--no-debug",
+        dest="debug",
+        action="store_false",
+        help="Disable debug logging",
+    )
     ap.add_argument("--generate", metavar="MODULE:FUNC", help="Dynamically generate answers by calling given function for each question (e.g. rfp_utils.my_module:gen_answer)")
     if len(sys.argv) == 1:
         ap.print_help()
@@ -501,12 +513,15 @@ def main():
     DEBUG = args.debug
     if DEBUG:
         print("### APPLY DEBUG MODE ON ###")
+        print(f"[apply_answers] source={args.docx_path} slots={args.slots_json}")
 
     required_paths = [args.docx_path, args.slots_json]
     for p in required_paths:
         if not os.path.isfile(p):
             print(f"Error: '{p}' does not exist.", file=sys.stderr)
             sys.exit(1)
+    if DEBUG:
+        print("[apply_answers] validated input paths")
     if args.answers_json and args.answers_json != "-" and not os.path.isfile(args.answers_json):
         if not args.generate:
             print(f"Error: answers file '{args.answers_json}' does not exist and no --generate specified.", file=sys.stderr)
@@ -532,6 +547,8 @@ def main():
             sys.exit(1)
 
     try:
+        if DEBUG:
+            print("[apply_answers] applying answers to document")
         summary = apply_answers_to_docx(
             args.docx_path,
             args.slots_json,

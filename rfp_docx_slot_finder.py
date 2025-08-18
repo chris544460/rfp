@@ -7,7 +7,7 @@ from __future__ import annotations
 #   • OpenAI: set OPENAI_API_KEY (and optional OPENAI_MODEL)
 #   • Aladdin: set aladdin_studio_api_key, defaultWebServer, aladdin_user, aladdin_passwd
 
-DEBUG = False
+DEBUG = True
 SHOW_TEXT = False  # when True, print full prompt/completion payloads
 
 # ────────────── Token/cost tracking and pricing map ──────────────
@@ -979,7 +979,19 @@ def main():
     ap.add_argument("docx_path", help="Path to .docx")
     ap.add_argument("-o", "--out", default=None, help="Write JSON to this path")
     ap.add_argument("--ai", action="store_true", help="(deprecated) AI mode is always on; flag kept for backward compatibility")
-    ap.add_argument("--debug", action="store_true", help="Print verbose debug info")
+    ap.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=True,
+        help="Print verbose debug info (default on)",
+    )
+    ap.add_argument(
+        "--no-debug",
+        dest="debug",
+        action="store_false",
+        help="Disable debug info",
+    )
     ap.add_argument("--show-text", action="store_true", help="Dump full prompt and completion text for each API call (verbose)")
     ap.add_argument(
         "--framework",
@@ -1002,6 +1014,7 @@ def main():
     DEBUG = args.debug
     if DEBUG:
         print("### DEBUG MODE ON ###")
+        print(f"[slot_finder] processing {args.docx_path}")
 
     global SHOW_TEXT
     SHOW_TEXT = args.show_text
@@ -1036,7 +1049,11 @@ def main():
         print(f"Error: File '{args.docx_path}' does not have a .docx extension.", file=sys.stderr)
         sys.exit(1)
     try:
+        if DEBUG:
+            print("[slot_finder] extracting slots from DOCX")
         result = extract_slots_from_docx(args.docx_path)
+        if DEBUG:
+            print(f"[slot_finder] found {len(result.get('slots', []))} slots")
     except Exception as e:
         print(f"Error: Failed to process DOCX file '{args.docx_path}'. The file may be invalid or corrupted.\nDetails: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1050,7 +1067,10 @@ def main():
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(js)
-        print(f"Wrote {args.out}")
+        if DEBUG:
+            print(f"[slot_finder] wrote output to {args.out}")
+        else:
+            print(f"Wrote {args.out}")
     else:
         print(js)
 
