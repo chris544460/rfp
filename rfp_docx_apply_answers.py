@@ -358,12 +358,15 @@ def apply_answers_to_docx(
             if key in by_q:
                 answer = by_q[key]
         if answer is None and generator is not None:
-            kwargs = {}
-            if s.get("answer_type") == "multiple_choice":
-                choice_meta = meta.get("choices", [])
-                kwargs["choices"] = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
-                kwargs["choice_meta"] = choice_meta
-            to_generate.append((sid, question_text, kwargs))
+            if not question_text:
+                dbg(f"Skipping generation for slot {sid}: blank question text")
+            else:
+                kwargs = {}
+                if s.get("answer_type") == "multiple_choice":
+                    choice_meta = meta.get("choices", [])
+                    kwargs["choices"] = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
+                    kwargs["choice_meta"] = choice_meta
+                to_generate.append((sid, question_text, kwargs))
         answers[sid] = answer
 
     if to_generate:
