@@ -28,18 +28,7 @@ DEBUG = True
 
 # ───────────────────────── Prompt loading ─────────────────────────
 
-PROMPTS = load_prompts(
-    {
-        "extract_questions": "List every distinct question in the following text, one per line:\n{context}",
-        "answer_search_context": "Given the user question, produce search queries to retrieve relevant policy wording.",
-        "answer_llm": (
-            "You are answering RFP questions using the context snippets below. "
-            "When you borrow facts, cite with bracketed numbers like [1], [2] "
-            "that refer to the numbered context items.\n\n"
-            "CONTEXT:\n{context}\n\nQUESTION: {question}\nANSWER:"
-        ),
-    }
-)
+PROMPTS = load_prompts({name: "" for name in ("extract_questions", "answer_search_context", "answer_llm")})
 
 PRESET_INSTRUCTIONS: Dict[str, str] = {
     "short": "Answer briefly in 1–2 sentences.",
