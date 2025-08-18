@@ -1,0 +1,4 @@
+{question}
+Options:
+{options}
+Select the best option and reply with its text only.

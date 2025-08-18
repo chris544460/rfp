@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -20,6 +19,7 @@ from search.vector_search import search
 
 # Use the Utilities' client so the return type is (text, usage)
 from answer_composer import CompletionsClient
+from prompts import load_prompts
 
 
 # Default debug flag; always on unless caller toggles.
@@ -28,59 +28,18 @@ DEBUG = True
 
 # ───────────────────────── Prompt loading ─────────────────────────
 
-def _resolve_prompts_dir() -> Path:
-    """
-    Resolve where the 'prompts' folder lives.
-    Priority:
-      1) RFP_PROMPTS_DIR env var
-      2) ./prompts next to this file
-      3) ./prompts in CWD
-    """
-    env = os.getenv("RFP_PROMPTS_DIR")
-    if env:
-        p = Path(env).expanduser()
-        if p.is_dir():
-            return p
-    here = Path(__file__).resolve().parent / "prompts"
-    if here.is_dir():
-        return here
-    cwdp = Path.cwd() / "prompts"
-    if cwdp.is_dir():
-        return cwdp
-    # Fallback still returns the 'here' path (reads will raise FileNotFoundError if missing)
-    return Path(__file__).resolve().parent / "prompts"
-
-
-_PROMPTS_DIR = _resolve_prompts_dir()
-
-def _read_or_default(p: Path, default: str) -> str:
-    try:
-        return p.read_text(encoding="utf-8")
-    except Exception:
-        return default
-
-def load_prompts() -> Dict[str, str]:
-    return {
-        "extract_questions": _read_or_default(
-            _PROMPTS_DIR / "extract_questions.txt",
-            "List every distinct question in the following text, one per line:\n{context}",
-        ),
-        "answer_search_context": _read_or_default(
-            _PROMPTS_DIR / "answer_search_context.txt",
-            "Given the user question, produce search queries to retrieve relevant policy wording.",
-        ),
-        "answer_llm": _read_or_default(
-            _PROMPTS_DIR / "answer_llm_template.txt",
-            (
-                "You are answering RFP questions using the context snippets below. "
-                "When you borrow facts, cite with bracketed numbers like [1], [2] "
-                "that refer to the numbered context items.\n\n"
-                "CONTEXT:\n{context}\n\nQUESTION: {question}\nANSWER:"
-            ),
+PROMPTS = load_prompts(
+    {
+        "extract_questions": "List every distinct question in the following text, one per line:\n{context}",
+        "answer_search_context": "Given the user question, produce search queries to retrieve relevant policy wording.",
+        "answer_llm": (
+            "You are answering RFP questions using the context snippets below. "
+            "When you borrow facts, cite with bracketed numbers like [1], [2] "
+            "that refer to the numbered context items.\n\n"
+            "CONTEXT:\n{context}\n\nQUESTION: {question}\nANSWER:"
         ),
     }
-
-PROMPTS = load_prompts()
+)
 
 PRESET_INSTRUCTIONS: Dict[str, str] = {
     "short": "Answer briefly in 1–2 sentences.",
