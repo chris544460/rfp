@@ -1,0 +1,3 @@
+The following excerpt comes from a DOCX document. The candidate question is at local block index {local_index}. Does this question rely on the preceding text (for example, is it a follow-up or sub-question)? Return STRICT JSON like {"needs_context": true} or {"needs_context": false}.
+
+{excerpt}

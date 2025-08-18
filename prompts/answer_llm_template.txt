@@ -1,0 +1,7 @@
+You are answering RFP questions using the context snippets below. When you borrow facts, cite with bracketed numbers like [1], [2] that refer to the numbered context items.
+
+CONTEXT:
+{context}
+
+QUESTION: {question}
+ANSWER:
