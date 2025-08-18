@@ -33,38 +33,25 @@ def gen_answer(
     choice_meta: Optional[List[Dict[str, object]]] = None
 ):
     """Generate an answer. Handles both open and multiple-choice questions."""
-    # Multiple-choice: pick and optionally suggest a marking style
+    # Multiple-choice: provide textual explanation with citations
     if choices:
-        opt_list = "\n".join(f"- {c}" for c in choices)
-        select_template = read_prompt("mc_select")
-        select_prompt = select_template.format(question=question, options=opt_list)
-        selection, _ = _llm_client.get_completion(select_prompt)
-        idx = next((i for i, c in enumerate(choices) if c.strip() == selection.strip()), 0)
-        style = "auto"
-        if choice_meta:
-            markers = "\n".join(f"{i}: {m.get('prefix', '')}" for i, m in enumerate(choice_meta))
-            style_template = read_prompt("mc_style")
-            style_prompt = style_template.format(selection=selection.strip(), markers=markers)
-            style_resp, _ = _llm_client.get_completion(style_prompt)
-            style = (style_resp or "").strip().lower() or "auto"
-        citations = {}
-        if INCLUDE_COMMENTS:
-            # Re-use core QA to fetch supporting snippets for comment context
-            ans, cmts = answer_question(
-                question,
-                SEARCH_MODE,
-                FUND_TAG,
-                K,
-                None,
-                None,
-                MIN_CONFIDENCE,
-                _llm_client,
-            )
-            citations = {i + 1: c[2] for i, c in enumerate(cmts)}
-        result = {"choice_index": idx, "style": style}
-        if citations:
-            result["citations"] = citations
-        return result
+        opt_lines = "\n".join(f"{chr(65+i)}. {c}" for i, c in enumerate(choices))
+        mc_question = (
+            f"{question}\n\nOptions:\n{opt_lines}\n\n"
+            "List the correct option letter(s) and briefly explain why each is correct. "
+            "Cite sources with bracketed numbers like [1]."
+        )
+        ans, cmts = answer_question(
+            mc_question,
+            SEARCH_MODE,
+            FUND_TAG,
+            K,
+            None,
+            None,
+            MIN_CONFIDENCE,
+            _llm_client,
+        )
+        return _format_with_or_without_comments(ans, cmts)
 
     # Free-text: call core QA
     approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
