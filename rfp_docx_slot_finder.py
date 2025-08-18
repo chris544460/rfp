@@ -540,11 +540,70 @@ def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> L
     return choices
 
 
+def llm_infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]], q_block: int) -> str:
+    """Use an LLM to classify the expected answer type for a question."""
+    if FRAMEWORK == "openai":
+        if not os.getenv("OPENAI_API_KEY"):
+            dbg("llm_infer_answer_type unavailable: missing OPENAI_API_KEY")
+            return "text"
+    elif FRAMEWORK == "aladdin":
+        required = [
+            "aladdin_studio_api_key",
+            "defaultWebServer",
+            "aladdin_user",
+            "aladdin_passwd",
+        ]
+        missing = [v for v in required if not os.getenv(v)]
+        if missing:
+            dbg(
+                "llm_infer_answer_type unavailable: missing environment variables for aladdin: "
+                + ", ".join(missing)
+            )
+            return "text"
+    else:
+        dbg(f"llm_infer_answer_type unavailable: unsupported framework {FRAMEWORK}")
+        return "text"
+
+    context_lines: List[str] = []
+    for nb in blocks[max(0, q_block - 2) : q_block]:
+        if isinstance(nb, Paragraph):
+            context_lines.append(nb.text or "")
+    for nb in blocks[q_block + 1 : q_block + 10]:
+        if isinstance(nb, Paragraph):
+            txt = nb.text or ""
+            if _looks_like_question(txt):
+                break
+            context_lines.append(txt)
+        else:
+            break
+    context = "\n".join(context_lines)
+
+    template = read_prompt("answer_type_llm_scan")
+    prompt = template.format(question=question_text, context=context)
+    if SHOW_TEXT:
+        print("\n--- PROMPT (llm_infer_answer_type) ---")
+        print(prompt)
+        print("--- END PROMPT ---\n")
+    try:
+        resp = _call_llm(prompt)
+        if SHOW_TEXT:
+            print("\n--- COMPLETION (llm_infer_answer_type) ---")
+            print(resp)
+            print("--- END COMPLETION ---\n")
+        atype = resp.strip().lower()
+        if atype in {"text", "multiple_choice", "file", "table"}:
+            return atype
+    except Exception as e:
+        dbg(f"llm_infer_answer_type error: {e}")
+    return "text"
+
+
 def infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]], q_block: int) -> str:
     """Guess the expected answer format for a question.
 
     The heuristic uses keywords in the question text and looks ahead a few
-    blocks to inspect formatting cues such as checkboxes or tables.
+    blocks to inspect formatting cues such as checkboxes or tables. If the
+    heuristics are inconclusive, an LLM is consulted using nearby context.
     """
 
     t = (question_text or "").strip().lower()
@@ -575,7 +634,7 @@ def infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]],
                 return "multiple_choice"
             if "yes" in low and "no" in low and len(low.split()) <= 4:
                 return "multiple_choice"
-    return "text"
+    return llm_infer_answer_type(question_text, blocks, q_block)
 
 # ─────────────────── rule-based detectors ───────────────────
 
