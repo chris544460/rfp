@@ -15,18 +15,20 @@ def ensure_comments_part(document):
 
     # Preferred modern API: private ``_comments_part`` property
     part = getattr(document.part, "_comments_part", None)
-    if part is not None:
+    if part is not None and hasattr(part, "_element"):
         return part
 
     # Older API: direct attribute
     part = getattr(document.part, "comments_part", None)
-    if part is not None:
+    if part is not None and hasattr(part, "_element"):
         return part
 
     # Fallback: explicit factory method
     add_part = getattr(document.part, "add_comments_part", None)
     if callable(add_part):
-        return add_part()
+        part = add_part()
+        if part is not None and hasattr(part, "_element"):
+            return part
 
     raise AttributeError("This version of python-docx does not support comments")
 
