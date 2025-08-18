@@ -442,22 +442,18 @@ def apply_answers_to_docx(
             continue
 
         choice_meta = meta.get("choices", [])
-        if s.get("answer_type") == "multiple_choice" and choice_meta:
-            choice_texts = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
-            idx = None
-            style = None
+        if (
+            s.get("answer_type") == "multiple_choice"
+            and choice_meta
+            and isinstance(answer, dict)
+            and "choice_index" in answer
+        ):
+            idx = answer.get("choice_index")
+            style = answer.get("style")
+            citations = answer.get("citations") if isinstance(answer, dict) else None
             comment_text = None
-            if isinstance(answer, dict):
-                idx = answer.get("choice_index")
-                style = answer.get("style")
-                citations = answer.get("citations") if isinstance(answer, dict) else None
-                if isinstance(citations, dict):
-                    comment_text = "\n\n".join(str(v) for v in citations.values())
-            else:
-                try:
-                    idx = choice_texts.index(str(answer).strip())
-                except ValueError:
-                    idx = None
+            if isinstance(citations, dict):
+                comment_text = "\n\n".join(str(v) for v in citations.values())
             if idx is not None:
                 try:
                     mark_multiple_choice(doc, blocks, choice_meta, int(idx), style, comment_text)
