@@ -1077,11 +1077,9 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                     f"Missing environment variables for aladdin framework: {', '.join(missing)}"
                 )
         llm_model = MODEL
-        # Primary detection
-        q_indices = llm_detect_questions(blocks, model=llm_model)
 
-        # Heuristic: flag paragraphs containing '?' or the word 'please'
-        q_indices_heur = []
+        # Heuristic first: flag paragraphs containing '?' or the word 'please'
+        q_indices_heur: List[int] = []
         for i, b in enumerate(blocks):
             if isinstance(b, Paragraph) and b.text:
                 raw = b.text.strip()
@@ -1094,8 +1092,24 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                 if reason:
                     dbg(f"Heuristic flagged block {i}: {reason} -> {raw}")
                     q_indices_heur.append(i)
-        # Deduplicate and sort
-        q_indices = sorted(set(q_indices + q_indices_heur))
+
+        # Prepare blocks for LLM: those not already flagged
+        remaining_blocks = []
+        global_to_local = {}
+        for gi, b in enumerate(blocks):
+            if gi not in q_indices_heur:
+                local_idx = len(remaining_blocks)
+                remaining_blocks.append(b)
+                global_to_local[local_idx] = gi
+
+        # LLM detection on remaining blocks (chunk size default)
+        local_q_indices = llm_detect_questions(remaining_blocks, model=llm_model)
+
+        # Map local indices back to global
+        q_indices_llm = [global_to_local[l] for l in local_q_indices if l in global_to_local]
+
+        # Combine heuristic and LLM results
+        q_indices = sorted(set(q_indices_heur + q_indices_llm))
 
         async def process_q_block(qb: int) -> Optional[QASlot]:
             try:
