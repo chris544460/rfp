@@ -88,10 +88,10 @@ def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
 def normalize_question(q: str) -> str:
     return " ".join((q or "").strip().lower().split())
 
-def _normalize_citations(raw: object) -> Dict[str, str]:
+def _normalize_citations(raw: object) -> Dict[str, Dict[str, str]]:
     if not raw:
         return {}
-    result: Dict[str, str] = {}
+    result: Dict[str, Dict[str, str]] = {}
     if isinstance(raw, dict):
         items = raw.items()
     elif isinstance(raw, list):
@@ -102,14 +102,28 @@ def _normalize_citations(raw: object) -> Dict[str, str]:
     else:
         return {}
     for key, val in items:
+        file = ""
+        snippet = ""
         if isinstance(val, dict):
-            snippet = val.get("text") or val.get("snippet") or val.get("source_text") or val.get("content") or ""
+            file = val.get("file") or val.get("source_file") or val.get("path") or ""
+            snippet = (
+                val.get("text")
+                or val.get("snippet")
+                or val.get("source_text")
+                or val.get("content")
+                or ""
+            )
         else:
             snippet = str(val)
-        result[str(key)] = str(snippet)
+        result[str(key)] = {"file": str(file), "snippet": str(snippet)}
     return result
 
-def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, str]) -> None:
+def _format_comment_parts(source_file: str, source_text: str):
+    parts = [("Source file", True), (": ", False), (source_file, False), ("\n\n", False)]
+    parts += [("Source text", True), (": ", False), (source_text, False)]
+    return parts
+
+def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, Dict[str, str]]) -> None:
     """Write text and attach Word comments to each [n] marker using Utilities helper."""
     doc = paragraph.part.document
     parts = text.split("\n")
@@ -120,11 +134,16 @@ def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[ob
                 paragraph.add_run(line[pos:match.start()])
             num = match.group(1)
             run = paragraph.add_run(match.group(0))  # "[n]"
-            snippet = citations.get(num) or citations.get(int(num))
-            if isinstance(snippet, dict):
-                snippet = snippet.get("text") or snippet.get("snippet") or snippet.get("content")
+            meta = citations.get(num) or citations.get(int(num))
+            snippet = ""
+            source_file = ""
+            if isinstance(meta, dict):
+                snippet = meta.get("text") or meta.get("snippet") or meta.get("content") or meta.get("source_text") or ""
+                source_file = meta.get("file") or meta.get("source_file") or meta.get("path") or ""
+            elif meta:
+                snippet = str(meta)
             if snippet:
-                add_comment_to_run(doc, run, str(snippet))
+                add_comment_to_run(doc, run, _format_comment_parts(source_file, str(snippet)))
             pos = match.end()
         if pos < len(line):
             paragraph.add_run(line[pos:])
@@ -453,7 +472,20 @@ def apply_answers_to_docx(
             citations = answer.get("citations") if isinstance(answer, dict) else None
             comment_text = None
             if isinstance(citations, dict):
-                comment_text = "\n\n".join(str(v) for v in citations.values())
+                comment_parts = []
+                for meta in citations.values():
+                    if comment_parts:
+                        comment_parts.append(("\n\n", False))
+                    file = ""
+                    snippet = ""
+                    if isinstance(meta, dict):
+                        file = meta.get("file") or meta.get("source_file") or meta.get("path") or ""
+                        snippet = meta.get("text") or meta.get("snippet") or meta.get("source_text") or meta.get("content") or ""
+                    else:
+                        snippet = str(meta)
+                    comment_parts.extend(_format_comment_parts(file, snippet))
+                if comment_parts:
+                    comment_text = comment_parts
             if idx is not None:
                 try:
                     mark_multiple_choice(doc, blocks, choice_meta, int(idx), style, comment_text)

@@ -46,11 +46,41 @@ def add_comment_to_run(document, run, comment_text, author="RFPBot"):
     c.set(qn("w:author"), author)
     c.set(qn("w:date"), datetime.utcnow().isoformat() + "Z")
     p = OxmlElement("w:p")
-    r = OxmlElement("w:r")
-    t = OxmlElement("w:t")
-    t.text = str(comment_text or "")
-    r.append(t)
-    p.append(r)
+
+    def _append_run(text: str, bold: bool = False) -> None:
+        r = OxmlElement("w:r")
+        if bold:
+            rPr = OxmlElement("w:rPr")
+            b = OxmlElement("w:b")
+            rPr.append(b)
+            r.append(rPr)
+        t = OxmlElement("w:t")
+        t.text = text
+        r.append(t)
+        p.append(r)
+
+    def _append_break() -> None:
+        br_r = OxmlElement("w:r")
+        br = OxmlElement("w:br")
+        br_r.append(br)
+        p.append(br_r)
+
+    if isinstance(comment_text, (list, tuple)):
+        for chunk in comment_text:
+            if isinstance(chunk, tuple):
+                text, bold = chunk
+            else:
+                text, bold = chunk, False
+            text = str(text or "")
+            parts = text.split("\n")
+            for i, part in enumerate(parts):
+                if part:
+                    _append_run(part, bold)
+                if i < len(parts) - 1:
+                    _append_break()
+    else:
+        _append_run(str(comment_text or ""))
+
     c.append(p)
     part._element.append(c)
 
