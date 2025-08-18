@@ -1173,19 +1173,58 @@ def attach_context(slots: List[QASlot], blocks):
         last_at_level[level] = s
 
 def dedupe_slots(slots: List[QASlot]) -> List[QASlot]:
-    """Remove obvious duplicates (same question text + same locator)."""
-    seen = set()
-    out = []
+    """Collapse slots with identical questions and overlapping locator ranges."""
+
+    def norm_q(text: str) -> str:
+        return strip_enum_prefix(text or "").strip().lower()
+
+    def loc_range(slot: QASlot):
+        loc = slot.answer_locator
+        if loc.type == "table_cell":
+            return ("cell", loc.table_index, loc.row, loc.col)
+        if loc.type == "paragraph":
+            return (loc.paragraph_index, loc.paragraph_index)
+        if loc.type == "paragraph_after":
+            start = (loc.paragraph_index or 0) + 1
+            end = (loc.paragraph_index or 0) + loc.offset
+            return (start, end)
+        return None
+
+    def more_specific(a: QASlot, b: QASlot) -> QASlot:
+        ra, rb = loc_range(a), loc_range(b)
+        if ra is None or rb is None:
+            return a
+        if len(ra) == 4 and len(rb) == 4:
+            return a  # same cell → keep first
+        la = ra[1] - ra[0]
+        lb = rb[1] - rb[0]
+        if la != lb:
+            return a if la < lb else b
+        pr = {"paragraph": 2, "paragraph_after": 1}
+        return a if pr.get(a.answer_locator.type, 0) >= pr.get(b.answer_locator.type, 0) else b
+
+    out: List[QASlot] = []
     for s in slots:
-        key = (s.question_text.strip().lower(),
-               s.answer_locator.type,
-               s.answer_locator.paragraph_index,
-               s.answer_locator.offset,
-               s.answer_locator.table_index,
-               s.answer_locator.row,
-               s.answer_locator.col)
-        if key not in seen:
-            seen.add(key)
+        nq = norm_q(s.question_text)
+        r = loc_range(s)
+        dup_idx = None
+        for i, ex in enumerate(out):
+            if norm_q(ex.question_text) != nq:
+                continue
+            er = loc_range(ex)
+            if r is None or er is None:
+                continue
+            if len(r) == 4 and len(er) == 4:
+                if r == er:
+                    dup_idx = i
+                    break
+            elif len(r) == 2 and len(er) == 2:
+                if not (r[1] < er[0] or r[0] > er[1]):
+                    dup_idx = i
+                    break
+        if dup_idx is not None:
+            out[dup_idx] = more_specific(out[dup_idx], s)
+        else:
             out.append(s)
     return out
 
