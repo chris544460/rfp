@@ -47,7 +47,24 @@ def gen_answer(
             style_prompt = style_template.format(selection=selection.strip(), markers=markers)
             style_resp, _ = _llm_client.get_completion(style_prompt)
             style = (style_resp or "").strip().lower() or "auto"
-        return {"choice_index": idx, "style": style}
+        citations = {}
+        if INCLUDE_COMMENTS:
+            # Re-use core QA to fetch supporting snippets for comment context
+            ans, cmts = answer_question(
+                question,
+                SEARCH_MODE,
+                FUND_TAG,
+                K,
+                None,
+                None,
+                MIN_CONFIDENCE,
+                _llm_client,
+            )
+            citations = {i + 1: c[2] for i, c in enumerate(cmts)}
+        result = {"choice_index": idx, "style": style}
+        if citations:
+            result["citations"] = citations
+        return result
 
     # Free-text: call core QA
     approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
