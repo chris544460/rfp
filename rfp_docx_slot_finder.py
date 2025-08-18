@@ -1002,6 +1002,23 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
     doc = docx.Document(path)
     blocks = list(_iter_block_items(doc))
 
+    # Split any Paragraph with explicit line breaks into separate blocks
+    expanded_blocks: List[Union[Paragraph, Table]] = []
+    for b in blocks:
+        if isinstance(b, Paragraph) and "\n" in (b.text or ""):
+            for line in b.text.splitlines():
+                # Clone the XML element and create a new Paragraph for each line
+                p = Paragraph(b._p, doc)
+                # Remove all existing runs from the clone
+                for r in list(p.runs):
+                    p._p.remove(r._r)
+                # Add a single run containing just this line
+                p.add_run(line)
+                expanded_blocks.append(p)
+        else:
+            expanded_blocks.append(b)
+    blocks = expanded_blocks
+
     dbg(f"extract_slots_from_docx: USE_LLM={USE_LLM}")
     dbg(f"Total blocks: {len(blocks)}")
 
