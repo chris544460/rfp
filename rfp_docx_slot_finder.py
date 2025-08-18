@@ -416,8 +416,26 @@ _CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
 
 def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
     """Use an LLM to guess multiple-choice options when heuristics fail."""
-    if FRAMEWORK != "openai" or not os.getenv("OPENAI_API_KEY"):
-        dbg("llm_extract_mc_choices unavailable: framework!=openai or missing API key")
+    if FRAMEWORK == "openai":
+        if not os.getenv("OPENAI_API_KEY"):
+            dbg("llm_extract_mc_choices unavailable: missing OPENAI_API_KEY")
+            return []
+    elif FRAMEWORK == "aladdin":
+        required = [
+            "aladdin_studio_api_key",
+            "defaultWebServer",
+            "aladdin_user",
+            "aladdin_passwd",
+        ]
+        missing = [v for v in required if not os.getenv(v)]
+        if missing:
+            dbg(
+                "llm_extract_mc_choices unavailable: missing environment variables for aladdin: "
+                + ", ".join(missing)
+            )
+            return []
+    else:
+        dbg(f"llm_extract_mc_choices unavailable: unsupported framework {FRAMEWORK}")
         return []
 
     question = ""
