@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""
+qa_core.py
+Home of `answer_question(...)` and its prompt plumbing.
+
+This module centralizes the RAG→LLM answer generation so both the CLI and
+other pipelines can reuse it without circular imports.
+"""
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+# Your vector search — keep the original import path you already use.
+# If your project uses a different path, update this import accordingly.
+from search.vector_search import search
+
+# Use the Utilities' client so the return type is (text, usage)
+from rfp_utils.answer_composer import CompletionsClient
+
+
+# ───────────────────────── Prompt loading ─────────────────────────
+
+def _resolve_prompts_dir() -> Path:
+    """
+    Resolve where the 'prompts' folder lives.
+    Priority:
+      1) RFP_PROMPTS_DIR env var
+      2) ./prompts next to this file
+      3) ./prompts in CWD
+    """
+    env = os.getenv("RFP_PROMPTS_DIR")
+    if env:
+        p = Path(env).expanduser()
+        if p.is_dir():
+            return p
+    here = Path(__file__).resolve().parent / "prompts"
+    if here.is_dir():
+        return here
+    cwdp = Path.cwd() / "prompts"
+    if cwdp.is_dir():
+        return cwdp
+    # Fallback still returns the 'here' path (reads will raise FileNotFoundError if missing)
+    return Path(__file__).resolve().parent / "prompts"
+
+
+_PROMPTS_DIR = _resolve_prompts_dir()
+
+def _read_or_default(p: Path, default: str) -> str:
+    try:
+        return p.read_text(encoding="utf-8")
+    except Exception:
+        return default
+
+def load_prompts() -> Dict[str, str]:
+    return {
+        "extract_questions": _read_or_default(
+            _PROMPTS_DIR / "extract_questions.txt",
+            "List every distinct question in the following text, one per line:\n{context}",
+        ),
+        "answer_search_context": _read_or_default(
+            _PROMPTS_DIR / "answer_search_context.txt",
+            "Given the user question, produce search queries to retrieve relevant policy wording.",
+        ),
+        "answer_llm": _read_or_default(
+            _PROMPTS_DIR / "answer_llm_template.txt",
+            (
+                "You are answering RFP questions using the context snippets below. "
+                "When you borrow facts, cite with bracketed numbers like [1], [2] "
+                "that refer to the numbered context items.\n\n"
+                "CONTEXT:\n{context}\n\nQUESTION: {question}\nANSWER:"
+            ),
+        ),
+    }
+
+PROMPTS = load_prompts()
+
+PRESET_INSTRUCTIONS: Dict[str, str] = {
+    "short": "Answer briefly in 1–2 sentences.",
+    "medium": "Answer in one concise paragraph.",
+    "long": "Answer in detail (up to one page).",
+}
+
+
+# ───────────────────────── Core answering ─────────────────────────
+
+def answer_question(
+    q: str,
+    mode: str,
+    fund: Optional[str],
+    k: int,
+    length: Optional[str],
+    approx_words: Optional[int],
+    min_confidence: float,
+    llm: CompletionsClient,
+) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
+    """
+    Return (answer_text, comments) where comments is a list of:
+    (new_label_without_brackets, source_name, snippet, score, date_str)
+
+    The answer contains bracket markers like [1], [2], ... which we re-number
+    to match the order of comments we return.
+    """
+    # 1) Retrieve candidate context snippets
+    if mode == "both":
+        # Back-compat: treat "both" as blend + dual
+        hits = search(q, kk=k, mode="blend", fund_filter=fund) + search(q, kk=k, mode="dual", fund_filter=fund)
+    else:
+        hits = search(q, kk=k, mode=mode, fund_filter=fund)
+
+    seen_snippets = set()
+    rows: List[Tuple[str, str, str, float, str]] = []  # (lbl, src, snippet, score, date)
+    for h in hits:
+        score = float(h.get("cosine", 0.0))
+        if score < min_confidence:
+            continue
+        txt = (h.get("text") or "").strip()
+        if not txt or txt in seen_snippets:
+            continue
+        meta = h.get("meta", {}) or {}
+        src_path = str(meta.get("source", "")) or "unknown"
+        src_name = Path(src_path).name if src_path else "unknown"
+        try:
+            mtime = Path(src_path).stat().st_mtime if src_path and Path(src_path).exists() else None
+            date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d") if mtime else "unknown"
+        except Exception:
+            date_str = "unknown"
+
+        lbl = f"[{len(rows)+1}]"
+        rows.append((lbl, src_name, txt, score, date_str))
+        seen_snippets.add(txt)
+
+    # Build the context block presented to the model
+    if rows:
+        ctx_block = "\n\n".join(f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows)
+    else:
+        ctx_block = "(no relevant context found)"
+
+    # 2) Compose the prompt with a length instruction
+    if approx_words is not None:
+        length_instr = f"Please aim for approximately {approx_words} words."
+    else:
+        length_instr = PRESET_INSTRUCTIONS.get(length or "medium", "")
+
+    prompt = f"{length_instr}\n\n{PROMPTS['answer_llm'].format(context=ctx_block, question=q)}"
+
+    # 3) Call the model
+    content, _usage = llm.get_completion(prompt)
+    ans = (content or "").strip()
+
+    # 4) Re-number bracket markers [n] in the answer to reflect the order they first appear
+    order: List[str] = []
+    for m in re.finditer(r"\[(\d+)\]", ans):
+        tok = m.group(0)  # like "[3]"
+        if tok not in order:
+            order.append(tok)
+
+    mapping = {old: f"[{i+1}]" for i, old in enumerate(order)}
+    for old, new in mapping.items():
+        ans = ans.replace(old, new)
+
+    # 5) Build comments in that order
+    comments: List[Tuple[str, str, str, float, str]] = []
+    for old in order:
+        try:
+            idx = int(old.strip("[]")) - 1
+        except Exception:
+            continue
+        if 0 <= idx < len(rows):
+            lbl, src, snippet, score, date_str = rows[idx]
+            new_lbl = mapping.get(old, lbl).strip("[]")  # "1", "2", ...
+            comments.append((new_lbl, src, snippet, score, date_str))
+
+    return ans, comments
