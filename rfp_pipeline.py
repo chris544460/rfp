@@ -42,12 +42,26 @@ def main() -> None:
         metavar="MODULE:FUNC",
         help="Optional answer generator to call when an answer is missing or when no answers JSON is provided",
     )
-    ap.add_argument("--debug", action="store_true", help="Verbose debug output")
+    ap.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=True,
+        help="Verbose debug output (default on)",
+    )
+    ap.add_argument(
+        "--no-debug",
+        dest="debug",
+        action="store_false",
+        help="Disable debug output",
+    )
     if len(sys.argv) == 1:
         ap.print_help()
         sys.exit(1)
     args = ap.parse_args()
 
+    if args.debug:
+        print("[rfp_pipeline] starting pipeline")
     # Determine file handlers based on extension
     if not os.path.isfile(args.source_path):
         print(f"Error: '{args.source_path}' does not exist.", file=sys.stderr)
@@ -63,6 +77,8 @@ def main() -> None:
     out_path = args.out or f"Answered{ext}"
 
     # Step 1: detect slots
+    if args.debug:
+        print("[rfp_pipeline] extracting slots")
     try:
         slots_payload = extract_slots(args.source_path)
     except Exception as e:  # pragma: no cover - defensive
@@ -81,6 +97,8 @@ def main() -> None:
 
     # If no answers JSON and no generator specified, just print slots and exit
     if not args.answers_json and not args.generate:
+        if args.debug:
+            print("[rfp_pipeline] no answers JSON or generator; exiting after slot detection")
         print(json.dumps(slots_payload, indent=2, ensure_ascii=False))
         if not args.slots:
             os.unlink(slots_path)
@@ -102,6 +120,8 @@ def main() -> None:
             if not callable(gen_callable):
                 raise AttributeError
             gen_name = args.generate
+            if args.debug:
+                print(f"[rfp_pipeline] loaded generator {gen_name}")
         except Exception as e:  # pragma: no cover - defensive
             print(f"Error: failed to load generator {args.generate}: {e}", file=sys.stderr)
             if not args.slots:
@@ -109,6 +129,8 @@ def main() -> None:
             sys.exit(1)
 
     # Step 2: apply answers
+    if args.debug:
+        print("[rfp_pipeline] applying answers")
     try:
         summary = apply_answers(
             args.source_path,
