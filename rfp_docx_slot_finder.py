@@ -417,25 +417,45 @@ _CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
 def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
     """Use an LLM to guess multiple-choice options when heuristics fail."""
     if FRAMEWORK != "openai" or not os.getenv("OPENAI_API_KEY"):
+        dbg("llm_extract_mc_choices unavailable: framework!=openai or missing API key")
         return []
+
     question = ""
     if isinstance(blocks[q_block], Paragraph):
         question = blocks[q_block].text or ""
+    dbg(f"llm_extract_mc_choices for q_block {q_block}: '{question}'")
+
     following: List[str] = []
     for nb in blocks[q_block + 1 : q_block + 10]:
         if isinstance(nb, Paragraph):
             following.append(nb.text or "")
         else:
             break
+    context = "\n".join(following)
+    dbg(f"Context lines after question: {len(following)}")
+
     template = read_prompt("mc_llm_scan")
-    prompt = template.format(question=question, context="\n".join(following))
+    prompt = template.format(question=question, context=context)
+    if SHOW_TEXT:
+        print("\n--- PROMPT (llm_extract_mc_choices) ---")
+        print(prompt)
+        print("--- END PROMPT ---\n")
     try:
         resp = _call_llm(prompt, json_output=True)
+        if SHOW_TEXT:
+            print("\n--- COMPLETION (llm_extract_mc_choices) ---")
+            print(resp)
+            print("--- END COMPLETION ---\n")
         options = json.loads(resp)
-    except Exception:
+        dbg(f"LLM suggested options: {options}")
+    except Exception as e:
+        dbg(f"llm_extract_mc_choices error: {e}")
         return []
+
     if not isinstance(options, list):
+        dbg("LLM response was not a list of options")
         return []
+
     choices: List[Dict[str, object]] = []
     for opt in options:
         if not isinstance(opt, str):
@@ -445,7 +465,11 @@ def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) 
         for offset, nb in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
             if isinstance(nb, Paragraph) and opt_low in (nb.text or "").lower():
                 choices.append({"text": opt.strip(), "prefix": "", "block_index": q_block + offset})
+                dbg(
+                    f"Matched option '{opt.strip()}' to block {q_block + offset}"
+                )
                 break
+    dbg(f"Final choices from LLM: {choices}")
     return choices
 
 
@@ -492,7 +516,9 @@ def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> L
             "block_index": q_block + offset,
         })
     if not choices:
+        dbg("Heuristic MC extraction found no choices; invoking LLM")
         choices = llm_extract_mc_choices(blocks, q_block)
+        dbg(f"LLM returned choices: {choices}")
     return choices
 
 
