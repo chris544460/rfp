@@ -65,3 +65,17 @@ def test_dedupe_overlapping_ranges():
     )
     deduped = dedupe_slots([s1, s2])
     assert len(deduped) == 1
+
+
+def test_blank_search_stops_before_next_question(tmp_path):
+    doc = docx.Document()
+    doc.add_paragraph("Question one?")
+    doc.add_paragraph("Question two?")
+    doc.add_paragraph("")
+    src = tmp_path / "two_questions.docx"
+    doc.save(src)
+    loaded = docx.Document(src)
+    blocks = list(_iter_block_items(loaded))
+    slots = detect_para_question_with_blank(blocks)
+    assert len(slots) == 1
+    assert slots[0].question_text.strip() == "Question two?"
