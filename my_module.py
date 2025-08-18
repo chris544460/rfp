@@ -1,5 +1,5 @@
 # my_module.py (Utilities-owned generator)
-import os, re
+import os, re, json
 from typing import Optional, List, Dict
 
 from answer_composer import CompletionsClient
@@ -18,6 +18,21 @@ INCLUDE_COMMENTS = os.getenv("RFP_INCLUDE_COMMENTS", "1") == "1"  # "0" to disab
 
 _llm_client = CompletionsClient(model=MODEL)
 
+# Maintain history of previous questions so follow-ups can pull context.
+QUESTION_HISTORY: List[str] = []
+
+# Prompt template for deciding whether a question depends on prior ones.
+FOLLOWUP_PROMPT = read_prompt(
+    "followup_detect",
+    (
+        "Given a current question and a list of previous questions, "
+        "return JSON with keys 'follow_up' (true/false) and 'indices' (list of "
+        "integers of prior questions that provide necessary context)."
+    ),
+)
+
+DEBUG = True
+
 def _format_with_or_without_comments(ans: str, cmts):
     """Return answer text plus optional citation metadata."""
     if INCLUDE_COMMENTS:
@@ -27,17 +42,55 @@ def _format_with_or_without_comments(ans: str, cmts):
     # strip [n] if comments are off
     return re.sub(r"\[\d+\]", "", ans)
 
+
+def _detect_followup(question: str, history: List[str]) -> List[int]:
+    """Use the LLM to determine which previous questions provide context."""
+    if not history:
+        return []
+    history_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(history))
+    prompt = FOLLOWUP_PROMPT.format(question=question, history=history_block)
+    if DEBUG:
+        print("[my_module] checking if question is follow-up")
+    try:
+        content, _ = _llm_client.get_completion(prompt)
+        data = json.loads(content or "{}")
+    except Exception:
+        return []
+    if not isinstance(data, dict) or not data.get("follow_up"):
+        return []
+    indices = []
+    for i in data.get("indices", []):
+        try:
+            idx = int(i)
+            if 1 <= idx <= len(history):
+                indices.append(idx)
+        except Exception:
+            continue
+    if DEBUG and indices:
+        ctx = " | ".join(history[i - 1] for i in indices)
+        print(
+            f"[my_module] follow-up detected; using context from questions {indices}: {ctx}"
+        )
+    return indices
+
 def gen_answer(
     question: str,
     choices: Optional[List[str]] = None,
     choice_meta: Optional[List[Dict[str, object]]] = None
 ):
     """Generate an answer. Handles both open and multiple-choice questions."""
+    # Determine if this question relies on previous ones
+    indices = _detect_followup(question, QUESTION_HISTORY)
+    question_with_ctx = question
+    if indices:
+        ctx_text = " ".join(QUESTION_HISTORY[i - 1] for i in indices)
+        question_with_ctx = f"{ctx_text}\n\n{question}"
+
     # Multiple-choice: provide textual explanation with citations
     if choices:
         opt_lines = "\n".join(f"{chr(65+i)}. {c}" for i, c in enumerate(choices))
         mc_question = (
-            f"{question}\n\nOptions:\n{opt_lines}\n\n"
+            f"{question_with_ctx}\n\nOptions:\n{opt_lines}\n\n"
             "List the correct option letter(s) and briefly explain why each is correct. "
             "Cite sources with bracketed numbers like [1]."
         )
@@ -51,6 +104,7 @@ def gen_answer(
             MIN_CONFIDENCE,
             _llm_client,
         )
+        QUESTION_HISTORY.append(question)
         return _format_with_or_without_comments(ans, cmts)
 
     # Free-text: call core QA
@@ -58,7 +112,7 @@ def gen_answer(
     length = None if approx_words is not None else LENGTH_PRESET
 
     ans, cmts = answer_question(
-        question,
+        question_with_ctx,
         SEARCH_MODE,
         FUND_TAG,
         K,
@@ -67,4 +121,5 @@ def gen_answer(
         MIN_CONFIDENCE,
         _llm_client,
     )
+    QUESTION_HISTORY.append(question)
     return _format_with_or_without_comments(ans, cmts)
