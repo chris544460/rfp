@@ -446,7 +446,10 @@ def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) 
     following: List[str] = []
     for nb in blocks[q_block + 1 : q_block + 10]:
         if isinstance(nb, Paragraph):
-            following.append(nb.text or "")
+            txt = nb.text or ""
+            if _looks_like_question(txt):
+                break
+            following.append(txt)
         else:
             break
     context = "\n".join(following)
@@ -481,7 +484,12 @@ def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) 
         # try to locate paragraph containing this option text
         opt_low = opt.lower()
         for offset, nb in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
-            if isinstance(nb, Paragraph) and opt_low in (nb.text or "").lower():
+            if not isinstance(nb, Paragraph):
+                break
+            nb_text = nb.text or ""
+            if _looks_like_question(nb_text):
+                break
+            if opt_low in nb_text.lower():
                 choices.append({"text": opt.strip(), "prefix": "", "block_index": q_block + offset})
                 dbg(
                     f"Matched option '{opt.strip()}' to block {q_block + offset}"
@@ -626,8 +634,11 @@ def infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]],
                     return "table"
             except Exception:
                 pass
-        if isinstance(nb, Paragraph):
+            break
+        elif isinstance(nb, Paragraph):
             txt = (nb.text or "").strip()
+            if _looks_like_question(txt):
+                break
             low = txt.lower()
             if any(ch in txt for ch in _CHECKBOX_CHARS):
                 return "multiple_choice"
@@ -637,6 +648,8 @@ def infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]],
                 return "multiple_choice"
             if "yes" in low and "no" in low and len(low.split()) <= 4:
                 return "multiple_choice"
+        else:
+            break
     return llm_infer_answer_type(question_text, blocks, q_block)
 
 # ─────────────────── rule-based detectors ───────────────────
@@ -1086,6 +1099,11 @@ async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int,
     # Build context window
     start = max(0, q_block - window)
     end = min(len(blocks), q_block + window + 1)
+    for i in range(q_block + 1, end):
+        b = blocks[i]
+        if isinstance(b, Paragraph) and _looks_like_question((b.text or "").strip()):
+            end = i
+            break
     local_blocks = blocks[start:end]
     excerpt, table_idx_map = _render_rich_excerpt(local_blocks)
     template = read_prompt("docx_locate_answer")
