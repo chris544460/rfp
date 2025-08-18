@@ -47,6 +47,7 @@ import math
 import asyncio
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Any, Tuple, Union, Set
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file if present
@@ -1083,13 +1084,21 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             i for i, b in enumerate(blocks)
             if isinstance(b, Paragraph) and b.text and ('?' in b.text or b.text.strip().lower().startswith('please'))
         ]
-        # Single-block LLM detection for high-priority items
-        if single_priority:
-            extra_single = llm_detect_questions(blocks, model=llm_model, chunk_size=1)
-            all_indices.update(extra_single)
-        # Broad LLM detection for the rest
-        extra_broad = llm_detect_questions(blocks, model=llm_model, chunk_size=10)
-        all_indices.update(extra_broad)
+        # Prepare tasks for ThreadPoolExecutor
+        tasks = []
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Always run broad scan
+            tasks.append(executor.submit(llm_detect_questions, blocks, llm_model, 10))
+            # Only run single-block scan if needed
+            if single_priority:
+                tasks.append(executor.submit(llm_detect_questions, blocks, llm_model, 1))
+            # Wait for both to complete
+            for future in tasks:
+                try:
+                    result = future.result()
+                    all_indices.update(result)
+                except Exception as e:
+                    dbg(f"Second-pass LLM scan error: {e}")
 
         # Final combined question indices
         q_indices = sorted(all_indices)
