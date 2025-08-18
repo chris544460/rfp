@@ -819,9 +819,14 @@ def llm_detect_questions(
         excerpt = _render_structured_excerpt(blocks[start:end], start_index=start)
         prompt = (
             "You are given JSON describing consecutive blocks from a DOCX file. "
-            "Each item includes a global 'index' and 'text'. Examine EVERY block carefully "
-            "and list the indices of those that ask a question or request information. "
-            "Return STRICT JSON like {\"questions\": [0,5,12]} (empty list if none).\n\n"
+            "Each item includes a global 'index' and 'text'. "
+            "Identify all blocks that explicitly request information, either in interrogative form "
+            "(e.g., questions ending with '?', like \"Does your firm have...?\", \"What are your...?\") "
+            "or in imperative form (commands that ask for information, like \"Please describe...\", "
+            "\"Please provide...\", \"Explain...\"). "
+            "Do NOT flag narrative statements or descriptions that do not ask for information "
+            "(e.g., \"Our firm uses...\", \"The audit was conducted...\"). "
+            "Return STRICT JSON of the form {\"questions\": [0,5,12]} (empty list if none).\n\n"
             + excerpt
         )
         if SHOW_TEXT:
