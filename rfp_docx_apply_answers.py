@@ -4,6 +4,7 @@
 
 import argparse, json, os, sys, re, asyncio
 import importlib
+import traceback
 from types import ModuleType
 from typing import List, Union, Optional, Dict, Tuple, Callable
 
@@ -374,6 +375,8 @@ def apply_answers_to_docx(
                     return sid, ans
                 except Exception as e:
                     dbg(f"Generator error for question '{q}': {e}")
+                    # give all detail on the error
+                    dbg(f"Generator error details: {traceback.format_exc()}")
                     return sid, None
             tasks = [asyncio.create_task(worker(sid, q, kw)) for sid, q, kw in to_generate]
             return await asyncio.gather(*tasks)
