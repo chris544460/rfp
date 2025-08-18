@@ -1,4 +1,4 @@
-import sys, pathlib, types
+import sys, pathlib, types, json
 
 # Ensure project root on path
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
@@ -26,8 +26,9 @@ import my_module
 def test_gen_answer_returns_text(monkeypatch):
     my_module.QUESTION_HISTORY.clear()
     def fake_answer_question(q, mode, fund, k, length, approx_words, min_conf, llm):
-        return "A. Option1 is correct [1]", [("1", "src.txt", "snippet", 0.9, "2024-01-01")]
+        data = {"correct": ["A"], "explanations": {"A": "Because it's correct [1]"}}
+        return json.dumps(data), [("1", "src.txt", "snippet", 0.9, "2024-01-01")]
     monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
     res = my_module.gen_answer("Which option?", ["Option1", "Option2"])
-    assert res["text"] == "The correct answer is: Option1. Option1 is correct [1]"
+    assert res["text"] == "The correct answer is: Option1. A. Because it's correct [1]"
     assert res["citations"] == {1: "snippet"}
