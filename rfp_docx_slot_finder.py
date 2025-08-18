@@ -506,6 +506,9 @@ def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> L
         txt = (nb.text or "").strip()
         if not txt:
             continue
+        if _looks_like_question(txt):
+            # Stop before we spill into the next question's territory
+            break
         prefix = ""
         cleaned = txt
         if any(ch in txt for ch in _CHECKBOX_CHARS):
