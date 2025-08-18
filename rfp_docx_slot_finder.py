@@ -46,7 +46,7 @@ import sys
 import math
 import asyncio
 from dataclasses import dataclass, asdict
-from typing import List, Optional, Dict, Any, Tuple, Union
+from typing import List, Optional, Dict, Any, Tuple, Union, Set
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file if present
@@ -55,6 +55,7 @@ load_dotenv(override=True)
 import docx
 from docx.text.paragraph import Paragraph
 from docx.table import Table
+from docx.oxml.ns import qn
 from answer_composer import CompletionsClient, get_openai_completion
 
 # Framework and model selection
@@ -831,6 +832,94 @@ def llm_detect_questions(
     return unique_sorted
 
 
+def _para_has_page_break(p: Paragraph) -> bool:
+    """Return True if paragraph contains a hard page break."""
+    for r in p.runs:
+        try:
+            for br in r._r.findall('.//' + qn('w:br')):
+                if br.get(qn('w:type')) == 'page':
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _blocks_to_text_pages(blocks: List[Union[Paragraph, Table]]) -> List[str]:
+    """Convert DOCX blocks into a list of page-level plain-text strings."""
+    pages: List[str] = []
+    current: List[str] = []
+    for b in blocks:
+        if isinstance(b, Paragraph):
+            current.append(b.text or "")
+            if _para_has_page_break(b):
+                pages.append("\n".join(current).strip())
+                current = []
+        elif isinstance(b, Table):
+            rows = []
+            for row in b.rows:
+                row_text = "\t".join((cell.text or "").strip() for cell in row.cells)
+                rows.append(row_text)
+            current.append("\n".join(rows))
+    if current or not pages:
+        pages.append("\n".join(current).strip())
+    return pages
+
+
+def _find_block_index_for_question(q: str, blocks: List[Union[Paragraph, Table]]) -> Optional[int]:
+    """Find the global block index whose text contains the question string."""
+    norm = re.sub(r"\s+", " ", q.lower().strip())
+    for idx, b in enumerate(blocks):
+        if isinstance(b, Paragraph):
+            txt = re.sub(r"\s+", " ", (b.text or "").lower())
+            if norm and norm in txt:
+                return idx
+        elif isinstance(b, Table):
+            try:
+                for row in b.rows:
+                    for cell in row.cells:
+                        txt = re.sub(r"\s+", " ", (cell.text or "").lower())
+                        if norm and norm in txt:
+                            return idx
+            except Exception:
+                continue
+    return None
+
+
+def llm_detect_questions_raw_text(
+    blocks: List[Union[Paragraph, Table]],
+    existing_questions: Set[str],
+    model: str = MODEL,
+    buffer: int = 200,
+) -> List[int]:
+    """Use page-level plain text to find additional question block indices."""
+    pages = _blocks_to_text_pages(blocks)
+    extra_blocks: List[int] = []
+    for i, page in enumerate(pages):
+        context = page
+        if i > 0:
+            context = pages[i - 1][-buffer:] + "\n" + context
+        if i + 1 < len(pages):
+            context = context + "\n" + pages[i + 1][:buffer]
+        prompt = (
+            "List every distinct question in the following text, one per line:\n" + context
+        )
+        try:
+            content = _call_llm(prompt)
+            lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        except Exception as e:
+            dbg(f"Error in raw text detection page {i}: {e}")
+            continue
+        for q in lines:
+            norm = q.lower().strip()
+            if not norm or norm in existing_questions:
+                continue
+            idx = _find_block_index_for_question(q, blocks)
+            if idx is not None:
+                extra_blocks.append(idx)
+                existing_questions.add(norm)
+    return sorted(set(extra_blocks))
+
+
 async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = MODEL) -> Optional[AnswerLocator]:
     """Given a question block index, ask the LLM to pick best answer location within ±window."""
 
@@ -966,6 +1055,15 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             return await asyncio.gather(*tasks)
 
         slots = [s for s in asyncio.run(gather_slots()) if s]
+        existing_qtexts = {s.question_text.strip().lower() for s in slots}
+        extra_q_blocks = llm_detect_questions_raw_text(blocks, existing_qtexts, model=llm_model)
+        for qb in extra_q_blocks:
+            extra_slot = asyncio.run(process_q_block(qb))
+            if extra_slot:
+                if extra_slot.meta is None:
+                    extra_slot.meta = {}
+                extra_slot.meta["detector"] = "raw_text"
+                slots.append(extra_slot)
         if not slots:  # fallback to legacy single scan
             slots = llm_scan_blocks(blocks, model=llm_model)
     else:
