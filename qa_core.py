@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from search.vector_search import search
 
 # Use the Utilities' client so the return type is (text, usage)
-from rfp_utils.answer_composer import CompletionsClient
+from answer_composer import CompletionsClient
 
 
 # ───────────────────────── Prompt loading ─────────────────────────
