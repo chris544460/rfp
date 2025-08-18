@@ -1080,36 +1080,22 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
         # Primary detection
         q_indices = llm_detect_questions(blocks, model=llm_model)
 
-        # Second-pass to catch any missed questions:
-        #  - First, for blocks containing '?' or starting with 'Please', use single-block prompts.
-        #  - Then, a broader scan on remaining blocks.
-        all_indices = set(q_indices)
-        # Identify high-priority blocks for single-block detection
-        single_priority = [
-            i for i, b in enumerate(blocks)
-            if isinstance(b, Paragraph) and b.text and ('?' in b.text or b.text.strip().lower().startswith('please'))
-        ]
-        dbg(f"Second-pass: single-priority indices = {single_priority}")
-        # Prepare tasks for ThreadPoolExecutor
-        tasks = []
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Always run broad scan
-            dbg("Submitting broad scan (chunk_size=10)")
-            tasks.append(executor.submit(llm_detect_questions, blocks, llm_model, 10))
-            # Only run single-block scan if needed
-            if single_priority:
-                dbg("Submitting single-block scan (chunk_size=1)")
-                tasks.append(executor.submit(llm_detect_questions, blocks, llm_model, 1))
-            # Wait for both to complete
-            for future in tasks:
-                try:
-                    result = future.result()
-                    all_indices.update(result)
-                except Exception as e:
-                    dbg(f"Second-pass LLM scan error: {e}")
-
-        # Final combined question indices
-        q_indices = sorted(all_indices)
+        # Heuristic: flag paragraphs containing '?' or the word 'please'
+        q_indices_heur = []
+        for i, b in enumerate(blocks):
+            if isinstance(b, Paragraph) and b.text:
+                raw = b.text.strip()
+                low = raw.lower()
+                reason = None
+                if '?' in raw:
+                    reason = "contains '?'"
+                elif 'please' in low:
+                    reason = "contains 'please'"
+                if reason:
+                    dbg(f"Heuristic flagged block {i}: {reason} -> {raw}")
+                    q_indices_heur.append(i)
+        # Deduplicate and sort
+        q_indices = sorted(set(q_indices + q_indices_heur))
 
         async def process_q_block(qb: int) -> Optional[QASlot]:
             try:
