@@ -46,15 +46,43 @@ def _format_with_or_without_comments(ans: str, cmts):
 def _format_mc_answer(ans: str, choices: List[str]) -> str:
     """Rewrite LLM output so choices are named up front.
 
-    Expects the LLM to begin its response with the correct option letters
-    (e.g. "A." or "A, C."), followed by any explanation. This extracts those
-    letters, maps them to the provided ``choices`` text, and constructs a
-    sentence such as ``"The correct answers are: Option1, Option2."``. The
-    remainder of the original answer (typically the explanation with
-    citations) is appended afterwards. If the expected pattern isn't found,
-    the original answer is returned unchanged.
+    The language model is expected to return JSON of the form::
+
+        {"correct": ["A", ...], "explanations": {"A": "why", ...}}
+
+    This function parses that structure and converts it into a human-readable
+    sentence such as ``"The correct answers are: Option1, Option2."`` followed
+    by per-option explanations (e.g. ``"A. because..."``). If JSON parsing
+    fails, it falls back to a best-effort regex that looks for leading option
+    letters in the raw text.
     """
 
+    try:
+        data = json.loads(ans)
+        letters = [str(l).strip().upper() for l in data.get("correct", [])]
+        if letters:
+            explanations: Dict[str, str] = data.get("explanations", {}) or {}
+            names: List[str] = []
+            details: List[str] = []
+            for l in letters:
+                idx = ord(l) - ord("A")
+                if 0 <= idx < len(choices):
+                    names.append(choices[idx])
+                    expl = explanations.get(l, "").strip()
+                    if expl:
+                        details.append(f"{l}. {expl}")
+            if names:
+                intro = (
+                    f"The correct answer is: {names[0]}."
+                    if len(names) == 1
+                    else "The correct answers are: " + ", ".join(names) + "."
+                )
+                tail = " ".join(details)
+                return f"{intro} {tail}".strip()
+    except Exception:
+        pass
+
+    # Fallback: look for leading letters in free-form text
     match = re.match(r"([A-Z](?:\s*,\s*[A-Z])*)[\.\)]\s*", ans)
     if not match:
         return ans
@@ -126,8 +154,9 @@ def gen_answer(
         opt_lines = "\n".join(f"{chr(65+i)}. {c}" for i, c in enumerate(choices))
         mc_question = (
             f"{question_with_ctx}\n\nOptions:\n{opt_lines}\n\n"
-            "List the correct option letter(s) and briefly explain why each is correct. "
-            "Cite sources with bracketed numbers like [1]."
+            "Identify the correct option letter(s). For each correct option, provide a brief explanation "
+            "with citations in square brackets like [1]. Return the result as JSON with keys "
+            "'correct' (list of letters) and 'explanations' (mapping letters to explanations)."
         )
         ans, cmts = answer_question(
             mc_question,
