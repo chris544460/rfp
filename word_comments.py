@@ -2,11 +2,33 @@ from datetime import datetime
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
+
 def ensure_comments_part(document):
-    try:
-        return document.part.comments_part
-    except AttributeError:
-        return document.part.add_comments_part()
+    """Return the document's comments part, creating it if necessary.
+
+    The `python-docx` API has changed over versions. Newer versions expose a
+    ``_comments_part`` property that creates the part on access, while older
+    versions provided ``comments_part`` or an ``add_comments_part()`` factory
+    method. This helper tries the available options to stay compatible across
+    versions.
+    """
+
+    # Preferred modern API: private ``_comments_part`` property
+    part = getattr(document.part, "_comments_part", None)
+    if part is not None:
+        return part
+
+    # Older API: direct attribute
+    part = getattr(document.part, "comments_part", None)
+    if part is not None:
+        return part
+
+    # Fallback: explicit factory method
+    add_part = getattr(document.part, "add_comments_part", None)
+    if callable(add_part):
+        return add_part()
+
+    raise AttributeError("This version of python-docx does not support comments")
 
 def add_comment_to_run(document, run, comment_text, author="RFPBot"):
     part = ensure_comments_part(document)
