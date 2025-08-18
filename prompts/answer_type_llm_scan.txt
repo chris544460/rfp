@@ -1,0 +1,9 @@
+Question:
+{question}
+
+Context:
+{context}
+
+From the question and context, choose the expected answer type from this list:
+text, multiple_choice, file, table.
+Respond with exactly one of these words. If uncertain, respond with "text".
