@@ -107,6 +107,9 @@ def answer_question(
 
     The answer contains bracket markers like [1], [2], ... which we re-number
     to match the order of comments we return.
+    If no search results meet the confidence threshold, the function returns
+    "No relevant information found." and an empty comments list without calling
+    the language model.
     """
     if DEBUG:
         print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
@@ -149,11 +152,13 @@ def answer_question(
         if DEBUG:
             print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
 
+    if not rows:
+        if DEBUG:
+            print("[qa_core] no relevant context found; returning fallback answer")
+        return "No relevant information found.", []
+
     # Build the context block presented to the model
-    if rows:
-        ctx_block = "\n\n".join(f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows)
-    else:
-        ctx_block = "(no relevant context found)"
+    ctx_block = "\n\n".join(f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows)
     if DEBUG:
         print(f"[qa_core] built context with {len(rows)} snippets")
 
