@@ -250,10 +250,28 @@ def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") ->
     if is_blank_para(target) or not existing.strip():
         target.text = ""
         _add_text_with_citations(target, answer_text, citations)
-    else:
-        new_p = insert_paragraph_after(target, "")
-        _add_text_with_citations(new_p, answer_text, citations)
-        dbg("Target paragraph not blank; appended answer in a new paragraph below.")
+        return
+
+    answer_norm = answer_text.strip()
+    if existing.strip() == answer_norm:
+        target.text = ""
+        _add_text_with_citations(target, answer_text, citations)
+        dbg("Replaced existing matching answer in target paragraph.")
+        return
+
+    next_p_elm = target._p.getnext()
+    next_para = None
+    if next_p_elm is not None and next_p_elm.tag.endswith("p"):
+        next_para = Paragraph(next_p_elm, target._parent)
+    if next_para and (next_para.text or "").strip() == answer_norm:
+        next_para.text = ""
+        _add_text_with_citations(next_para, answer_text, citations)
+        dbg("Replaced matching answer in subsequent paragraph.")
+        return
+
+    new_p = insert_paragraph_after(target, "")
+    _add_text_with_citations(new_p, answer_text, citations)
+    dbg("Target paragraph not blank; appended answer in a new paragraph below.")
 
 def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: str = "fill") -> None:
     try:
