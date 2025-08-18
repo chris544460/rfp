@@ -123,6 +123,19 @@ def answer_question(
         hits = search(q, k=k, mode=mode, fund_filter=fund)
     if DEBUG:
         print(f"[qa_core] retrieved {len(hits)} hits")
+        top_n = min(len(hits), k)
+        print(f"[qa_core] top {top_n} hits:")
+        for i, h in enumerate(hits[:top_n], 1):
+            meta = h.get("meta", {}) or {}
+            src = meta.get("source", "unknown")
+            doc_id = h.get("id", "unknown")
+            score = float(h.get("cosine", 0.0))
+            snippet = (h.get("text") or "").strip().replace("\n", " ")
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            print(
+                f"    {i}. id={doc_id} score={score:.3f} source={src} text='{snippet}'"
+            )
 
     seen_snippets = set()
     rows: List[Tuple[str, str, str, float, str]] = []  # (lbl, src, snippet, score, date)
