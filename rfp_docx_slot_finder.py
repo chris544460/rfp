@@ -283,7 +283,17 @@ def _para_num_info(p: Paragraph) -> Tuple[Optional[int], Optional[int]]:
     except Exception:
         return (None, None)
 
-def _render_rich_excerpt(blocks: List[Union[Paragraph, Table]]) -> Tuple[str, Dict[int, int]]:
+def _para_indent_info(p: Paragraph) -> Tuple[int, int]:
+    """Return left and first-line indent in points (0 if absent)."""
+    try:
+        pf = p.paragraph_format
+        left = int(pf.left_indent.pt) if pf.left_indent else 0
+        first = int(pf.first_line_indent.pt) if pf.first_line_indent else 0
+        return left, first
+    except Exception:
+        return 0, 0
+
+def _render_rich_excerpt(blocks: List[Union[Paragraph, Table]], start_index: int = 0) -> Tuple[str, Dict[int, int]]:
     """
     Produce a linearized, format-aware representation with global block indices.
     For tables, also return a map {global_block_index -> 0-based table_index}.
@@ -291,15 +301,20 @@ def _render_rich_excerpt(blocks: List[Union[Paragraph, Table]]) -> Tuple[str, Di
     lines: List[str] = []
     table_idx_map: Dict[int, int] = {}
     running_table_index = 0
-    for gi, b in enumerate(blocks):
+    for gi, b in enumerate(blocks, start=start_index):
         if isinstance(b, Paragraph):
             style = _para_style_name(b)
             align = _para_alignment(b)
             numId, ilvl = _para_num_info(b)
+            left, first = _para_indent_info(b)
+            raw = b.text or ""
+            leading_ws = len(raw) - len(raw.lstrip(" \t"))
             rich = _paragraph_rich_text(b)
-            text = (b.text or "").strip()
-            lines.append(f"B[{gi}] PARAGRAPH style='{style}' align={align} numId={numId} ilvl={ilvl}")
-            lines.append(f"B[{gi}] TEXT: {rich if rich else text}")
+            lines.append(
+                f"B[{gi}] PARAGRAPH style='{style}' align={align} numId={numId} ilvl={ilvl} "
+                f"left={left} first={first} leading_ws={leading_ws}"
+            )
+            lines.append(f"B[{gi}] TEXT: {rich if rich else raw}")
         elif isinstance(b, Table):
             # Table header line
             try:
@@ -735,30 +750,38 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -
 
 # ─────────────────── 2‑stage LLM helpers ───────────────────
 
-def llm_detect_questions(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -> List[int]:
+def llm_detect_questions(
+    blocks: List[Union[Paragraph, Table]],
+    model: str = MODEL,
+    chunk_size: int = 200,
+) -> List[int]:
     """Return global block indices that look like questions."""
-    excerpt, _ = _render_rich_excerpt(blocks)
-    prompt = (
-        "Below is a format‑aware listing of a DOCX document. "
-        "Identify every block that asks a question or requests information."
-        "This includes sub‑questions, prompts without a question mark, and items that begin after tabs or numbering.\n\n"
-        + excerpt
-        + "\n\nReturn STRICT JSON like {\"questions\": [0, 5, 12]} (empty list if none)."
-    )
-    if SHOW_TEXT:
-        print("\n--- PROMPT (detect_questions) ---\n" + prompt + "\n--- END PROMPT ---\n")
-    try:
-        content = _call_llm(prompt, json_output=True)
+    found: List[int] = []
+    for start in range(0, len(blocks), chunk_size):
+        end = min(len(blocks), start + chunk_size)
+        excerpt, _ = _render_rich_excerpt(blocks[start:end], start_index=start)
+        prompt = (
+            "Below is a format‑aware listing of a DOCX document segment. "
+            "Block lines begin with their global index B[i]. "
+            "Identify EVERY block that asks a question or requests information, even if short, indented, or lacking a question mark. "
+            "Return STRICT JSON like {\"questions\": [0, 5, 12]} (empty list if none).\n\n"
+            + excerpt
+        )
         if SHOW_TEXT:
-            print("\n--- COMPLETION (detect_questions) ---\n" + content + "\n--- END COMPLETION ---\n")
-        js = json.loads(content)
-        questions = [int(i) for i in js.get("questions", [])]
-        dbg(f"Model returned JSON (detect_questions): {js}")
-        dbg(f"Questions indices extracted: {questions}")
-        return questions
-    except Exception as e:
-        dbg(f"Error parsing detect_questions response: {e}")
-        return []
+            print("\n--- PROMPT (detect_questions) ---\n" + prompt + "\n--- END PROMPT ---\n")
+        try:
+            content = _call_llm(prompt, json_output=True)
+            if SHOW_TEXT:
+                print("\n--- COMPLETION (detect_questions) ---\n" + content + "\n--- END COMPLETION ---\n")
+            js = json.loads(content)
+            questions = [int(i) for i in js.get("questions", [])]
+            dbg(f"Model returned JSON (detect_questions) chunk {start}-{end}: {js}")
+            found.extend(questions)
+        except Exception as e:
+            dbg(f"Error parsing detect_questions response (chunk {start}-{end}): {e}")
+    unique_sorted = sorted(set(found))
+    dbg(f"Questions indices extracted: {unique_sorted}")
+    return unique_sorted
 
 
 async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = MODEL) -> Optional[AnswerLocator]:
