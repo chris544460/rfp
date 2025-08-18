@@ -308,7 +308,14 @@ def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: st
         p = cell.paragraphs[0]
         _add_text_with_citations(p, answer_text, citations)
 
-def mark_multiple_choice(blocks: List[Union[Paragraph, Table]], choices_meta: List[Dict[str, object]], index: int, style: Optional[str] = None) -> None:
+def mark_multiple_choice(
+    doc: docx.document.Document,
+    blocks: List[Union[Paragraph, Table]],
+    choices_meta: List[Dict[str, object]],
+    index: int,
+    style: Optional[str] = None,
+    comment_text: Optional[str] = None,
+) -> None:
     if not isinstance(choices_meta, list):
         return
     if index is None or not (0 <= index < len(choices_meta)):
@@ -339,6 +346,12 @@ def mark_multiple_choice(blocks: List[Union[Paragraph, Table]], choices_meta: Li
             run.font.highlight_color = WD_COLOR_INDEX.YELLOW
     else:
         para.text = "X " + text
+    if comment_text:
+        run = para.runs[0] if para.runs else para.add_run()
+        try:
+            add_comment_to_run(doc, run, comment_text)
+        except Exception as e:
+            dbg(f"  -> error adding comment: {e}")
 
 # ---------------------------- Main application flow ----------------------------
 def apply_answers_to_docx(
@@ -433,9 +446,13 @@ def apply_answers_to_docx(
             choice_texts = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
             idx = None
             style = None
+            comment_text = None
             if isinstance(answer, dict):
                 idx = answer.get("choice_index")
                 style = answer.get("style")
+                citations = answer.get("citations") if isinstance(answer, dict) else None
+                if isinstance(citations, dict):
+                    comment_text = "\n\n".join(str(v) for v in citations.values())
             else:
                 try:
                     idx = choice_texts.index(str(answer).strip())
@@ -443,7 +460,7 @@ def apply_answers_to_docx(
                     idx = None
             if idx is not None:
                 try:
-                    mark_multiple_choice(blocks, choice_meta, int(idx), style)
+                    mark_multiple_choice(doc, blocks, choice_meta, int(idx), style, comment_text)
                     applied += 1
                     dbg("  -> marked choice in-place")
                 except Exception as e:
