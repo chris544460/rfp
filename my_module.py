@@ -7,7 +7,7 @@ from qa_core import answer_question  # <<— now comes from Utilities core
 
 # Defaults (overridable via env vars)
 MODEL            = os.getenv("OPENAI_MODEL", "gpt-4o")
-SEARCH_MODE      = os.getenv("RFP_SEARCH_MODE", "dual")      # "answer"|"question"|"blend"|"dual"|"both"
+SEARCH_MODE      = os.getenv("RFP_SEARCH_MODE", "both")      # "answer"|"question"|"blend"|"dual"|"both"
 K                = int(os.getenv("RFP_K", "6"))
 FUND_TAG         = os.getenv("RFP_FUND_TAG") or None
 MIN_CONFIDENCE   = float(os.getenv("RFP_MIN_CONFIDENCE", "0.0"))
