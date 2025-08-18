@@ -1,4 +1,4 @@
-You are given a DOCX excerpt. Identify if it contains a question and the precise location of the answer area (e.g., 'immediately after in next paragraph', 'table cell: table=2,row=3,col=2'). Return JSON: {'is_question': bool, 'question_text': str, 'answer': {'kind': 'paragraph_after'|'table_cell','offset': int, 'table_index': int|null, 'row': int|null, 'col': int|null}}.
+You are given a DOCX excerpt. Identify if it contains a question and the precise location of the answer area (e.g., 'immediately after in next paragraph', 'table cell: table=2,row=3,col=2'). Return JSON: {{'is_question': bool, 'question_text': str, 'answer': {{'kind': 'paragraph_after'|'table_cell','offset': int, 'table_index': int|null, 'row': int|null, 'col': int|null}}}}.
 
 EXCERPT:
 {ctx}

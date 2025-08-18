@@ -1,6 +1,6 @@
 The following excerpt is from a DOCX. Block indices are local (start={start}). Identify where the ANSWER area begins for the question in local block index 0 (the first block). Return STRICT JSON either:
-  {"kind": "paragraph_after", "offset": int} or
-  {"kind": "table_cell", "row": int, "col": int}
+  {{"kind": "paragraph_after", "offset": int}} or
+  {{"kind": "table_cell", "row": int, "col": int}}
 If unsure, assume paragraph_after offset=1.
 
 {excerpt}
