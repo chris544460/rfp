@@ -58,6 +58,7 @@ from docx.text.paragraph import Paragraph
 from docx.table import Table
 from docx.oxml.ns import qn
 from answer_composer import CompletionsClient, get_openai_completion
+from prompts import read_prompt
 
 # Framework and model selection
 FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "openai")
@@ -674,14 +675,11 @@ def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
         if s.confidence >= 0.8:
             refined.append(s)
             continue
-        prompt = (
-            "You are given a DOCX excerpt. Identify if it contains a question and the precise "
-            "location of the answer area (e.g., 'immediately after in next paragraph', "
-            "'table cell: table=2,row=3,col=2'). Return JSON: "
-            "{'is_question': bool, 'question_text': str, 'answer': {'kind': 'paragraph_after'|'table_cell',"
-            "'offset': int, 'table_index': int|null, 'row': int|null, 'col': int|null}}.\n\n"
-            f"EXCERPT:\n{ctx}"
+        template = read_prompt(
+            "docx_llm_refine",
+            "You are given a DOCX excerpt. Identify if it contains a question and the precise location of the answer area (e.g., 'immediately after in next paragraph', 'table cell: table=2,row=3,col=2'). Return JSON: {'is_question': bool, 'question_text': str, 'answer': {'kind': 'paragraph_after'|'table_cell','offset': int, 'table_index': int|null, 'row': int|null, 'col': int|null}}.\n\nEXCERPT:\n{ctx}",
         )
+        prompt = template.format(ctx=ctx)
         try:
             content = _call_llm(prompt, json_output=True)
             if SHOW_TEXT:
@@ -706,26 +704,18 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -
     dbg(f"llm_scan_blocks (rich): {len(excerpt)} chars, model={model}")
     dbg(f"Sending prompt to LLM (first 400 chars): {excerpt[:400]}...")
 
-    instruction = (
-        "You are given a linearized, format-aware representation of a .docx file.\n"
-        "Each block has a global index B[i]. Blocks are PARAGRAPH or TABLE. TABLE blocks also list each cell as B[i] [r,c] TEXT: ...\n"
-        "Your task: find QUESTION prompts and the associated blank answer areas.\n"
-        "Valid cases include:\n"
-        "  • Paragraph question followed by blank area in the next 1–3 paragraphs (or end-of-document → treat as blank area after it).\n"
-        "  • Table row/column where a cell with a question pairs with an adjacent empty cell used for the answer.\n"
-        "Return STRICT JSON with key 'slots' as a list. Each element must be one of:\n"
-        "  {\"kind\":\"paragraph_after\",\"question\":{\"block\":int},\"answer\":{\"offset\":int}}\n"
-        "  {\"kind\":\"table_cell\",\"question\":{\"block\":int,\"row\":int,\"col\":int},\"answer\":{\"block\":int,\"row\":int,\"col\":int}}\n"
-        "Use the same global B[i] indices shown. If none, return {\"slots\":[]}.\n"
-        "Edge case: if the document has a single paragraph ending with '?', return one paragraph_after with offset=1.\n"
+    template = read_prompt(
+        "docx_llm_scan_blocks",
+        "You are given a linearized, format-aware representation of a .docx file.\nEach block has a global index B[i]. Blocks are PARAGRAPH or TABLE. TABLE blocks also list each cell as B[i] [r,c] TEXT: ...\nYour task: find QUESTION prompts and the associated blank answer areas.\nValid cases include:\n  • Paragraph question followed by blank area in the next 1–3 paragraphs (or end-of-document → treat as blank area after it).\n  • Table row/column where a cell with a question pairs with an adjacent empty cell used for the answer.\nReturn STRICT JSON with key 'slots' as a list. Each element must be one of:\n  {\"kind\":\"paragraph_after\",\"question\":{\"block\":int},\"answer\":{\"offset\":int}}\n  {\"kind\":\"table_cell\",\"question\":{\"block\":int,\"row\":int,\"col\":int},\"answer\":{\"block\":int,\"row\":int,\"col\":int}}\nUse the same global B[i] indices shown. If none, return {\"slots\":[]}.\nEdge case: if the document has a single paragraph ending with '?', return one paragraph_after with offset=1.\n\nDOC:\n{doc}",
     )
+    prompt = template.format(doc=excerpt)
     if SHOW_TEXT:
         print("\n--- PROMPT (llm_scan_blocks) ---")
-        print(instruction + "\n\nDOC:\n" + excerpt)
+        print(prompt)
         print("--- END PROMPT ---\n")
     try:
         content = _call_llm(
-            instruction + "\n\nDOC:\n" + excerpt,
+            prompt,
             json_output=True,
         )
         js = json.loads(content)
@@ -817,18 +807,11 @@ def llm_detect_questions(
     for start in range(0, len(blocks), chunk_size):
         end = min(len(blocks), start + chunk_size)
         excerpt = _render_structured_excerpt(blocks[start:end], start_index=start)
-        prompt = (
-            "You are given JSON describing consecutive blocks from a DOCX file. "
-            "Each item includes a global 'index' and 'text'. "
-            "Identify all blocks that explicitly request information, either in interrogative form "
-            "(e.g., questions ending with '?', like \"Does your firm have...?\", \"What are your...?\") "
-            "or in imperative form (commands that ask for information, like \"Please describe...\", "
-            "\"Please provide...\", \"Explain...\"). "
-            "Do NOT flag narrative statements or descriptions that do not ask for information "
-            "(e.g., \"Our firm uses...\", \"The audit was conducted...\"). "
-            "Return STRICT JSON of the form {\"questions\": [0,5,12]} (empty list if none).\n\n"
-            + excerpt
+        detect_template = read_prompt(
+            "docx_detect_questions",
+            "You are given JSON describing consecutive blocks from a DOCX file. Each item includes a global 'index' and 'text'. Identify all blocks that explicitly request information, either in interrogative form (e.g., questions ending with '?', like \"Does your firm have...?\", \"What are your...?\") or in imperative form (commands that ask for information, like \"Please describe...\", \"Please provide...\", \"Explain...\"). Do NOT flag narrative statements or descriptions that do not ask for information (e.g., \"Our firm uses...\", \"The audit was conducted...\"). Return STRICT JSON of the form {\"questions\": [0,5,12]} (empty list if none).\n\n{excerpt}",
         )
+        prompt = detect_template.format(excerpt=excerpt)
         if SHOW_TEXT:
             print("\n--- PROMPT (detect_questions) ---\n" + prompt + "\n--- END PROMPT ---\n")
         try:
@@ -938,9 +921,11 @@ def llm_detect_questions_raw_text(
             context = pages[i - 1][-buffer:] + "\n" + context
         if i + 1 < len(pages):
             context = context + "\n" + pages[i + 1][:buffer]
-        prompt = (
-            "List every distinct question in the following text, one per line:\n" + context
+        template = read_prompt(
+            "extract_questions",
+            "List every distinct question in the following text, one per line:\n{context}",
         )
+        prompt = template.format(context=context)
         try:
             content = _call_llm(prompt)
             lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
@@ -966,15 +951,11 @@ async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int,
     end = min(len(blocks), q_block + window + 1)
     local_blocks = blocks[start:end]
     excerpt, table_idx_map = _render_rich_excerpt(local_blocks)
-    prompt = (
-        f"The following excerpt is from a DOCX. Block indices are local (start={start}).\n"
-        "Identify where the ANSWER area begins for the question in local block index 0 (the first block). "
-        "Return STRICT JSON either:\n"
-        "  {\"kind\": \"paragraph_after\", \"offset\": int} or\n"
-        "  {\"kind\": \"table_cell\", \"row\": int, \"col\": int}\n"
-        "If unsure, assume paragraph_after offset=1.\n\n" +
-        excerpt
+    template = read_prompt(
+        "docx_locate_answer",
+        "The following excerpt is from a DOCX. Block indices are local (start={start}). Identify where the ANSWER area begins for the question in local block index 0 (the first block). Return STRICT JSON either:\n  {\"kind\": \"paragraph_after\", \"offset\": int} or\n  {\"kind\": \"table_cell\", \"row\": int, \"col\": int}\nIf unsure, assume paragraph_after offset=1.\n\n{excerpt}",
     )
+    prompt = template.format(start=start, excerpt=excerpt)
     if SHOW_TEXT:
         print(f"\n--- PROMPT (locate_answer q_block={q_block}) ---\n" + prompt + "\n--- END PROMPT ---\n")
     try:
@@ -1017,12 +998,11 @@ async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int
     end = min(len(blocks), q_block + 1)
     local_blocks = blocks[start:end]
     excerpt, _ = _render_rich_excerpt(local_blocks)
-    prompt = (
-        f"The following excerpt comes from a DOCX document. The candidate question is at local block index {q_block - start}. "
-        "Does this question rely on the preceding text (for example, is it a follow-up or sub-question)? "
-        "Return STRICT JSON like {\"needs_context\": true} or {\"needs_context\": false}.\n\n"
-        + excerpt
+    template = read_prompt(
+        "docx_assess_context",
+        "The following excerpt comes from a DOCX document. The candidate question is at local block index {local_index}. Does this question rely on the preceding text (for example, is it a follow-up or sub-question)? Return STRICT JSON like {\"needs_context\": true} or {\"needs_context\": false}.\n\n{excerpt}",
     )
+    prompt = template.format(local_index=q_block - start, excerpt=excerpt)
     try:
         content = await asyncio.to_thread(_call_llm, prompt, True)
     except Exception as e:
