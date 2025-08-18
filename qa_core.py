@@ -22,6 +22,10 @@ from search.vector_search import search
 from answer_composer import CompletionsClient
 
 
+# Default debug flag; always on unless caller toggles.
+DEBUG = True
+
+
 # ───────────────────────── Prompt loading ─────────────────────────
 
 def _resolve_prompts_dir() -> Path:
@@ -104,21 +108,31 @@ def answer_question(
     The answer contains bracket markers like [1], [2], ... which we re-number
     to match the order of comments we return.
     """
+    if DEBUG:
+        print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
     # 1) Retrieve candidate context snippets
+    if DEBUG:
+        print("[qa_core] searching for context snippets")
     if mode == "both":
         # Back-compat: treat "both" as blend + dual
         hits = search(q, kk=k, mode="blend", fund_filter=fund) + search(q, kk=k, mode="dual", fund_filter=fund)
     else:
         hits = search(q, kk=k, mode=mode, fund_filter=fund)
+    if DEBUG:
+        print(f"[qa_core] retrieved {len(hits)} hits")
 
     seen_snippets = set()
     rows: List[Tuple[str, str, str, float, str]] = []  # (lbl, src, snippet, score, date)
     for h in hits:
         score = float(h.get("cosine", 0.0))
         if score < min_confidence:
+            if DEBUG:
+                print(f"[qa_core] skip hit below confidence {score:.3f}")
             continue
         txt = (h.get("text") or "").strip()
         if not txt or txt in seen_snippets:
+            if DEBUG:
+                print("[qa_core] skip empty/duplicate snippet")
             continue
         meta = h.get("meta", {}) or {}
         src_path = str(meta.get("source", "")) or "unknown"
@@ -132,12 +146,16 @@ def answer_question(
         lbl = f"[{len(rows)+1}]"
         rows.append((lbl, src_name, txt, score, date_str))
         seen_snippets.add(txt)
+        if DEBUG:
+            print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
 
     # Build the context block presented to the model
     if rows:
         ctx_block = "\n\n".join(f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows)
     else:
         ctx_block = "(no relevant context found)"
+    if DEBUG:
+        print(f"[qa_core] built context with {len(rows)} snippets")
 
     # 2) Compose the prompt with a length instruction
     if approx_words is not None:
@@ -148,6 +166,8 @@ def answer_question(
     prompt = f"{length_instr}\n\n{PROMPTS['answer_llm'].format(context=ctx_block, question=q)}"
 
     # 3) Call the model
+    if DEBUG:
+        print("[qa_core] calling language model")
     content, _usage = llm.get_completion(prompt)
     ans = (content or "").strip()
 
@@ -161,6 +181,8 @@ def answer_question(
     mapping = {old: f"[{i+1}]" for i, old in enumerate(order)}
     for old, new in mapping.items():
         ans = ans.replace(old, new)
+    if DEBUG:
+        print("[qa_core] renumbered citations")
 
     # 5) Build comments in that order
     comments: List[Tuple[str, str, str, float, str]] = []
@@ -174,4 +196,6 @@ def answer_question(
             new_lbl = mapping.get(old, lbl).strip("[]")  # "1", "2", ...
             comments.append((new_lbl, src, snippet, score, date_str))
 
+    if DEBUG:
+        print(f"[qa_core] returning answer with {len(comments)} comments")
     return ans, comments
