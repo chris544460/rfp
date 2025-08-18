@@ -1,0 +1,14 @@
+You are given a linearized, format-aware representation of a .docx file.
+Each block has a global index B[i]. Blocks are PARAGRAPH or TABLE. TABLE blocks also list each cell as B[i] [r,c] TEXT: ...
+Your task: find QUESTION prompts and the associated blank answer areas.
+Valid cases include:
+  • Paragraph question followed by blank area in the next 1–3 paragraphs (or end-of-document → treat as blank area after it).
+  • Table row/column where a cell with a question pairs with an adjacent empty cell used for the answer.
+Return STRICT JSON with key 'slots' as a list. Each element must be one of:
+  {"kind":"paragraph_after","question":{"block":int},"answer":{"offset":int}}
+  {"kind":"table_cell","question":{"block":int,"row":int,"col":int},"answer":{"block":int,"row":int,"col":int}}
+Use the same global B[i] indices shown. If none, return {"slots":[]}.
+Edge case: if the document has a single paragraph ending with '?', return one paragraph_after with offset=1.
+
+DOC:
+{doc}
