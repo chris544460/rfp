@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # Your vector search — keep the original import path you already use.
