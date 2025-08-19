@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 # If your project uses a different path, update this import accordingly.
 from search.vector_search import search
 
-# Use the Utilities' client so the return type is (text, usage)
+# Use the Utilities' client; typically returns (text, usage)
 from answer_composer import CompletionsClient
 from prompts import load_prompts
 
@@ -141,12 +141,10 @@ def answer_question(
     raw_response = llm.get_completion(prompt)
     if DEBUG:
         print(f"[qa_core] raw response: {raw_response!r}")
-    try:
-        content, _usage = raw_response
-    except Exception as e:
-        if DEBUG:
-            print(f"[qa_core] error unpacking response: {e}")
-        raise
+    if isinstance(raw_response, tuple):
+        content = raw_response[0]
+    else:
+        content = raw_response
     ans = (content or "").strip()
 
     # 4) Re-number bracket markers [n] in the answer to reflect the order they first appear
