@@ -135,7 +135,18 @@ def answer_question(
     # 3) Call the model
     if DEBUG:
         print("[qa_core] calling language model")
-    content, _usage = llm.get_completion(prompt)
+        print(f"[qa_core] prompt:\n{prompt}")
+        print(f"[qa_core] llm type: {type(llm)}")
+
+    raw_response = llm.get_completion(prompt)
+    if DEBUG:
+        print(f"[qa_core] raw response: {raw_response!r}")
+    try:
+        content, _usage = raw_response
+    except Exception as e:
+        if DEBUG:
+            print(f"[qa_core] error unpacking response: {e}")
+        raise
     ans = (content or "").strip()
 
     # 4) Re-number bracket markers [n] in the answer to reflect the order they first appear
