@@ -69,9 +69,13 @@ def _call_llm(prompt: str, json_output: bool = False) -> str:
     """Call the selected LLM framework and record usage."""
     if FRAMEWORK == "aladdin":
         client = CompletionsClient(model=MODEL)
-        content, usage = client.get_completion(prompt, json_output=json_output)
+        resp = client.get_completion(prompt, json_output=json_output)
     else:
-        content, usage = get_openai_completion(prompt, MODEL, json_output=json_output)
+        resp = get_openai_completion(prompt, MODEL, json_output=json_output)
+    if isinstance(resp, tuple):
+        content, usage = resp
+    else:
+        content, usage = resp, {}
     try:
         _record_usage(MODEL, usage)
     except Exception:
