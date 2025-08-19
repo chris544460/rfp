@@ -78,8 +78,27 @@ def is_blank_para(p: Paragraph) -> bool:
     return False
 
 def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
+    """Insert a new paragraph immediately after *paragraph*.
+
+    python-docx does not expose a public API for inserting paragraphs, so we
+    poke at the underlying XML.  Some callers ended up passing a plain string
+    instead of a :class:`Paragraph`, which later resulted in an obscure
+    ``'str' object has no attribute '_element'`` error.  By validating the
+    input upfront we both support newer ``python-docx`` versions (which use the
+    ``_p`` attribute) and provide a clearer failure mode when a non-paragraph
+    object is supplied.
+    """
+
+    if not isinstance(paragraph, Paragraph):
+        raise TypeError(
+            "insert_paragraph_after() requires a Paragraph instance,"
+            f" got {type(paragraph)!r}"
+        )
+
     new_p_elm = OxmlElement("w:p")
-    paragraph._element.addnext(new_p_elm)
+    # ``_p`` is the underlying XML element for a paragraph and is present in
+    # all supported versions of python-docx.
+    paragraph._p.addnext(new_p_elm)
     new_p = Paragraph(new_p_elm, paragraph._parent)
     if text:
         new_p.add_run(text)
