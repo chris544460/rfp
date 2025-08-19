@@ -26,6 +26,10 @@ FILE_HANDLERS: Dict[str, Tuple[str, str, str, str]] = {
         "rfp_docx_slot_finder", "extract_slots_from_docx",
         "rfp_docx_apply_answers", "apply_answers_to_docx",
     ),
+    ".xlsx": (
+        "rfp_xlsx_slot_finder", "extract_slots_from_xlsx",
+        "rfp_xlsx_apply_answers", "apply_answers_to_xlsx",
+    ),
 }
 
 
