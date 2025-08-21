@@ -108,7 +108,8 @@ def write_excel_answers(
         # Put citations into a single Excel comment
         if inc_comments and citations:
             try:
-                comment_txt = "\n\n".join(str(v) for v in citations.values())
+                parts = [f"[{k}] {v}" for k, v in citations.items()]
+                comment_txt = "\n\n".join(parts)
                 cell.comment = Comment(comment_txt, "RFPBot")
             except Exception:
                 pass
