@@ -88,39 +88,58 @@ def _two_col_header(ws) -> Optional[Tuple[int, int]]:
     return None
 
 
-def extract_schema_from_xlsx(path: str) -> List[Dict[str, Any]]:
+def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, Any]]:
+    """Scan an XLSX workbook for question/answer slots.
+
+    Parameters
+    ----------
+    path:
+        Path to the workbook on disk.
+    debug:
+        When ``True`` (the default) verbose status messages are printed
+        describing how questions are detected.
+
+    Returns
+    -------
+    list[dict]
+        Each entry contains ``sheet``, ``question_cell``, ``question_text``,
+        ``answer_cell``, ``detector`` and ``confidence`` keys describing a
+        potential question/answer pair.
     """
-    Return a list[dict] with:
-      {
-        'sheet': <sheet name>,
-        'question_cell': 'A10',
-        'question_text': 'Please describe...',
-        'answer_cell': 'B10',
-        'detector': 'two_col_header' | 'right_blank' | 'below_blank' | 'inline_pair',
-        'confidence': float,
-      }
-    """
+    if debug:
+        print(f"Opening workbook: {path}")
     wb = load_workbook(path, data_only=True)
     schema: List[Dict[str, Any]] = []
 
     for ws in wb.worksheets:
+        if debug:
+            print(f"Scanning sheet '{ws.title}'")
+
         # 1) Prefer 2‑column Q/A tables with headers
         two_col = _two_col_header(ws)
         if two_col:
             q_col, a_col = two_col
+            if debug:
+                print(f"  Found Q/A header columns {q_col}/{a_col}")
             # start from the row after the header
             for r in range(2, ws.max_row + 1):
                 qv = ws.cell(r, q_col).value
                 av = ws.cell(r, a_col).value
                 qtxt = str(qv).strip() if qv is not None else ""
+                if debug:
+                    print(f"    Row {r}: Q='{qtxt}' A='{av}'")
                 if not qtxt:
                     continue
                 if not _looks_like_question_text(qtxt):
                     # still allow explicit Q column phrasing
                     if not re.search(r"[.?]$", qtxt) and not any(p in qtxt.lower() for p in QUESTION_PHRASES):
+                        if debug:
+                            print("      Not a question – skipping")
                         continue
                 # Only create a slot if the answer cell is empty/blank
                 if av is None or (isinstance(av, str) and av.strip() == ""):
+                    if debug:
+                        print(f"      Added slot at {_addr(q_col, r)}->{_addr(a_col, r)}")
                     schema.append({
                         "sheet": ws.title,
                         "question_cell": _addr(q_col, r),
@@ -129,6 +148,8 @@ def extract_schema_from_xlsx(path: str) -> List[Dict[str, Any]]:
                         "detector": "two_col_header",
                         "confidence": 0.85,
                     })
+        elif debug:
+            print("  No two-column header found")
 
         # 2) Heuristic scan: single question cell with blank neighbor right/below
         #    (skip rows already captured by the header scan)
@@ -141,9 +162,13 @@ def extract_schema_from_xlsx(path: str) -> List[Dict[str, Any]]:
                 txt = val.strip()
                 if not _looks_like_question_text(txt):
                     continue
+                if debug:
+                    print(f"    Question-like cell {ws.title}:{_addr(c, r)} -> '{txt}'")
 
                 # (a) Prefer right neighbor if blank
                 if c + 1 <= ws.max_column and _is_blank_cell(ws.cell(r, c + 1)):
+                    if debug:
+                        print(f"      Right neighbor {_addr(c+1, r)} is blank")
                     schema.append({
                         "sheet": ws.title,
                         "question_cell": _addr(c, r),
@@ -156,6 +181,8 @@ def extract_schema_from_xlsx(path: str) -> List[Dict[str, Any]]:
 
                 # (b) Otherwise choose cell below if blank
                 if r + 1 <= ws.max_row and _is_blank_cell(ws.cell(r + 1, c)):
+                    if debug:
+                        print(f"      Below neighbor {_addr(c, r+1)} is blank")
                     schema.append({
                         "sheet": ws.title,
                         "question_cell": _addr(c, r),
@@ -170,6 +197,8 @@ def extract_schema_from_xlsx(path: str) -> List[Dict[str, Any]]:
                 if c + 1 <= ws.max_column:
                     nxt = ws.cell(r, c + 1).value
                     if isinstance(nxt, str) and nxt.strip() == "":
+                        if debug:
+                            print(f"      Inline pair with empty cell {_addr(c+1, r)}")
                         schema.append({
                             "sheet": ws.title,
                             "question_cell": _addr(c, r),
@@ -179,12 +208,26 @@ def extract_schema_from_xlsx(path: str) -> List[Dict[str, Any]]:
                             "confidence": 0.65,
                         })
 
+        if debug:
+            print(f"Finished sheet '{ws.title}', total slots: {len(schema)}")
+
+    if debug:
+        print(f"Done. Found {len(schema)} slots")
     return schema
 
 
 # Back‑compat alias so the CLI can import ask_sheet_schema from rfp
-def ask_sheet_schema(xlsx_path: str) -> List[Dict[str, Any]]:
-    return extract_schema_from_xlsx(xlsx_path)
+def ask_sheet_schema(xlsx_path: str, debug: bool = True) -> List[Dict[str, Any]]:
+    """Compatibility wrapper for :func:`extract_schema_from_xlsx`.
+
+    Parameters
+    ----------
+    xlsx_path:
+        Path to the workbook to analyze.
+    debug:
+        Pass ``True`` to enable verbose debugging output (default).
+    """
+    return extract_schema_from_xlsx(xlsx_path, debug=debug)
 
 
 def extract_slots_from_xlsx(path: str) -> Dict[str, Any]:
