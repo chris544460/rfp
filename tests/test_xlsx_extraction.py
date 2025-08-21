@@ -30,7 +30,7 @@ def test_extract_slots_from_xlsx(tmp_path):
     assert data_cells["B2"]["value"] == "Answer"
 
 
-def test_question_without_answer_slot(tmp_path, capsys):
+def test_question_without_answer_slot(monkeypatch, tmp_path, capsys):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Sheet1"
@@ -38,6 +38,36 @@ def test_question_without_answer_slot(tmp_path, capsys):
     ws["B1"] = "n/a"  # not blank
     in_path = tmp_path / "in.xlsx"
     wb.save(in_path)
+
+    # Provide fake API key and stub the LLM pipeline to return a schema
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    import rfp_xlsx_slot_finder as finder
+
+    def fake_macro(profile, *, model):
+        return [{"sheet": "Sheet1"}]
+
+    def fake_zone(profile, regions, *, model):
+        return [{"sheet": "Sheet1"}]
+
+    def fake_extract(profile, zones, *, model):
+        return [
+            {
+                "sheet": "Sheet1",
+                "question_cell": "A1",
+                "question_text": "What is your name?",
+                "answer_cell": None,
+                "question_id": "A1",
+            }
+        ]
+
+    def fake_score(candidates, *, model):
+        return candidates
+
+    monkeypatch.setattr(finder, "_llm_macro_regions", fake_macro)
+    monkeypatch.setattr(finder, "_llm_zone_refinement", fake_zone)
+    monkeypatch.setattr(finder, "_llm_extract_candidates", fake_extract)
+    monkeypatch.setattr(finder, "_llm_score_and_assign", fake_score)
 
     schema = extract_schema_from_xlsx(str(in_path), debug=False)
     assert schema and schema[0]["question_text"].startswith("What is")
