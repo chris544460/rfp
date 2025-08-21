@@ -49,3 +49,31 @@ def test_question_without_answer_slot(tmp_path, capsys):
     assert res["skipped"] == 1
     captured = capsys.readouterr()
     assert "no answer slot" in captured.out.lower()
+
+
+def test_comment_formats_citations(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "Question?"
+    in_path = tmp_path / "in.xlsx"
+    wb.save(in_path)
+
+    schema = [
+        {
+            "sheet": "Sheet1",
+            "question_cell": "A1",
+            "answer_cell": "B1",
+            "question_text": "Question?",
+        }
+    ]
+    answers = [{"text": "Ans", "citations": {1: "First", 2: "Second"}}]
+    out_path = tmp_path / "out.xlsx"
+    write_excel_answers(schema, answers, str(in_path), str(out_path))
+
+    wb2 = openpyxl.load_workbook(out_path)
+    c = wb2["Sheet1"]["B1"]
+    assert c.comment is not None
+    txt = c.comment.text
+    assert "[1] First" in txt
+    assert "[2] Second" in txt
