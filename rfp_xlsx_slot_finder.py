@@ -104,7 +104,10 @@ def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, An
     list[dict]
         Each entry contains ``sheet``, ``question_cell``, ``question_text``,
         ``answer_cell``, ``detector`` and ``confidence`` keys describing a
-        potential question/answer pair.
+        potential question/answer pair.  If no empty answer cell is
+        detected next to a question, an entry is still produced with
+        ``answer_cell`` set to ``None`` so that callers may decide how to
+        handle it downstream.
     """
     if debug:
         print(f"Opening workbook: {path}")
@@ -136,7 +139,11 @@ def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, An
                         if debug:
                             print("      Not a question – skipping")
                         continue
-                # Only create a slot if the answer cell is empty/blank
+                # Record the question even if the answer cell already
+                # contains text so we can surface it to downstream
+                # components.  When the answer cell is blank we point to it;
+                # otherwise ``answer_cell`` is ``None`` and writers should
+                # skip filling.
                 if av is None or (isinstance(av, str) and av.strip() == ""):
                     if debug:
                         print(f"      Added slot at {_addr(q_col, r)}->{_addr(a_col, r)}")
@@ -148,6 +155,21 @@ def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, An
                         "detector": "two_col_header",
                         "confidence": 0.85,
                     })
+                else:
+                    if debug:
+                        print(
+                            f"      Answer cell {_addr(a_col, r)} is not blank; recording question without slot"
+                        )
+                    schema.append(
+                        {
+                            "sheet": ws.title,
+                            "question_cell": _addr(q_col, r),
+                            "question_text": qtxt,
+                            "answer_cell": None,
+                            "detector": "two_col_header",
+                            "confidence": 0.5,
+                        }
+                    )
         elif debug:
             print("  No two-column header found")
 
@@ -165,6 +187,8 @@ def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, An
                 if debug:
                     print(f"    Question-like cell {ws.title}:{_addr(c, r)} -> '{txt}'")
 
+                matched = False
+
                 # (a) Prefer right neighbor if blank
                 if c + 1 <= ws.max_column and _is_blank_cell(ws.cell(r, c + 1)):
                     if debug:
@@ -177,10 +201,10 @@ def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, An
                         "detector": "right_blank",
                         "confidence": 0.75,
                     })
-                    continue
+                    matched = True
 
                 # (b) Otherwise choose cell below if blank
-                if r + 1 <= ws.max_row and _is_blank_cell(ws.cell(r + 1, c)):
+                elif r + 1 <= ws.max_row and _is_blank_cell(ws.cell(r + 1, c)):
                     if debug:
                         print(f"      Below neighbor {_addr(c, r+1)} is blank")
                     schema.append({
@@ -191,10 +215,10 @@ def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, An
                         "detector": "below_blank",
                         "confidence": 0.7,
                     })
-                    continue
+                    matched = True
 
                 # (c) Inline pairs like "Question:" in one cell and "Answer:" next cell
-                if c + 1 <= ws.max_column:
+                elif c + 1 <= ws.max_column:
                     nxt = ws.cell(r, c + 1).value
                     if isinstance(nxt, str) and nxt.strip() == "":
                         if debug:
@@ -207,6 +231,23 @@ def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, An
                             "detector": "inline_pair",
                             "confidence": 0.65,
                         })
+                        matched = True
+
+                if not matched:
+                    if debug:
+                        print(
+                            "      No adjacent blank cell found; recording question without answer slot"
+                        )
+                    schema.append(
+                        {
+                            "sheet": ws.title,
+                            "question_cell": _addr(c, r),
+                            "question_text": txt,
+                            "answer_cell": None,
+                            "detector": "question_only",
+                            "confidence": 0.5,
+                        }
+                    )
 
         if debug:
             print(f"Finished sheet '{ws.title}', total slots: {len(schema)}")
