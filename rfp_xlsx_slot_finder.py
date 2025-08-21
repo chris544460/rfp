@@ -88,8 +88,13 @@ def _two_col_header(ws) -> Optional[Tuple[int, int]]:
     return None
 
 
-def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, Any]]:
-    """Scan an XLSX workbook for question/answer slots.
+def _extract_schema_from_xlsx_heuristic(path: str, debug: bool = True) -> List[Dict[str, Any]]:
+    """Heuristic XLSX question/answer slot detection.
+
+    This is the original implementation that scans for question cells and
+    adjacent blank cells using pattern matching and positional heuristics.
+    The function is kept for backwards compatibility and as a fallback when
+    the LLM based pipeline is unavailable.
 
     Parameters
     ----------
@@ -255,6 +260,170 @@ def extract_schema_from_xlsx(path: str, debug: bool = True) -> List[Dict[str, An
     if debug:
         print(f"Done. Found {len(schema)} slots")
     return schema
+
+
+# ---------------------------------------------------------------------------
+# LLM driven pipeline
+# ---------------------------------------------------------------------------
+
+
+def profile_workbook(path: str) -> Dict[str, Any]:
+    """Create a profile of every cell in the workbook.
+
+    The profile captures basic style information so that subsequent LLM calls
+    have rich context about how cells are formatted.  The structure returned is
+    a ``dict`` mapping sheet names to a ``dict`` with ``max_row``, ``max_col``
+    and a ``cells`` list containing the per-cell details.
+    """
+
+    wb = load_workbook(path, data_only=True)
+    profile: Dict[str, Any] = {}
+    for ws in wb.worksheets:
+        cells: List[Dict[str, Any]] = []
+        merged: set[Tuple[int, int]] = set()
+        for rng in ws.merged_cells.ranges:
+            merged.update({(r, c) for r, c in rng.cells})
+        for row in ws.iter_rows():
+            for cell in row:
+                cells.append(
+                    {
+                        "row": cell.row,
+                        "col": cell.column,
+                        "value": cell.value,
+                        "bold": bool(cell.font and cell.font.bold),
+                        "italic": bool(cell.font and cell.font.italic),
+                        "font": getattr(cell.font, "name", None),
+                        "fill": _color_to_hex(cell.fill.start_color),
+                        "border": {
+                            "left": bool(cell.border.left.style),
+                            "right": bool(cell.border.right.style),
+                            "top": bool(cell.border.top.style),
+                            "bottom": bool(cell.border.bottom.style),
+                        },
+                        "alignment": getattr(cell.alignment, "horizontal", None),
+                        "locked": bool(getattr(cell.protection, "locked", False)),
+                        "merged": (cell.row, cell.column) in merged,
+                    }
+                )
+        profile[ws.title] = {
+            "max_row": ws.max_row,
+            "max_col": ws.max_column,
+            "cells": cells,
+        }
+    return profile
+
+
+def _call_llm(prompt_file: str, payload: dict, *, model: str) -> Any:
+    """Helper to invoke the LLM with a prompt template and JSON payload."""
+
+    from answer_composer import get_openai_completion
+
+    prompt_path = os.path.join(os.path.dirname(__file__), "prompts", prompt_file)
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        template = f.read()
+    prompt = template.replace("{{data}}", json.dumps(payload))
+    content, _ = get_openai_completion(prompt, model, json_output=True)
+    return json.loads(content)
+
+
+def _llm_macro_regions(profile: Dict[str, Any], *, model: str) -> List[Dict[str, Any]]:
+    """LLM step #1 – identify large rectangular regions in each sheet."""
+
+    summaries = []
+    for sheet, info in profile.items():
+        summaries.append(
+            {
+                "sheet": sheet,
+                "max_row": info["max_row"],
+                "max_col": info["max_col"],
+            }
+        )
+    try:
+        return _call_llm("xlsx_macro_regions.txt", summaries, model=model)
+    except Exception:
+        return []
+
+
+def _llm_zone_refinement(
+    profile: Dict[str, Any], regions: List[Dict[str, Any]], *, model: str
+) -> List[Dict[str, Any]]:
+    """LLM step #2 – refine macro regions into potential answer zones."""
+
+    zones: List[Dict[str, Any]] = []
+    for region in regions:
+        sheet_profile = profile.get(region.get("sheet"), {})
+        payload = {"region": region, "cells": sheet_profile.get("cells", [])}
+        try:
+            zones.extend(
+                _call_llm("xlsx_zone_refinement.txt", payload, model=model)
+            )
+        except Exception:
+            continue
+    return zones
+
+
+def _llm_extract_candidates(
+    profile: Dict[str, Any], zones: List[Dict[str, Any]], *, model: str
+) -> List[Dict[str, Any]]:
+    """LLM step #3 – from each zone extract candidate answer slots."""
+
+    candidates: List[Dict[str, Any]] = []
+    for zone in zones:
+        sheet_profile = profile.get(zone.get("sheet"), {})
+        payload = {"zone": zone, "cells": sheet_profile.get("cells", [])}
+        try:
+            candidates.extend(
+                _call_llm("xlsx_slot_candidates.txt", payload, model=model)
+            )
+        except Exception:
+            continue
+    return candidates
+
+
+def _llm_score_and_assign(
+    candidates: List[Dict[str, Any]], *, model: str
+) -> List[Dict[str, Any]]:
+    """LLM steps #4 and #5 – score candidates and pick winners."""
+
+    if not candidates:
+        return []
+    try:
+        scored = _call_llm("xlsx_slot_scoring.txt", candidates, model=model)
+    except Exception:
+        return []
+
+    chosen: Dict[str, Dict[str, Any]] = {}
+    for cand in scored:
+        qid = cand.get("question_id") or cand.get("question_cell")
+        best = chosen.get(qid)
+        if not best or cand.get("score", 0) > best.get("score", 0):
+            chosen[qid] = cand
+    return list(chosen.values())
+
+
+def extract_schema_from_xlsx(
+    path: str,
+    debug: bool = True,
+    *,
+    use_llm: bool = True,
+    model: str = "gpt-4o-mini",
+) -> List[Dict[str, Any]]:
+    """Public entry point selecting the LLM pipeline or heuristic fallback."""
+
+    if use_llm and os.getenv("OPENAI_API_KEY"):
+        try:
+            profile = profile_workbook(path)
+            regions = _llm_macro_regions(profile, model=model)
+            zones = _llm_zone_refinement(profile, regions, model=model)
+            candidates = _llm_extract_candidates(profile, zones, model=model)
+            final = _llm_score_and_assign(candidates, model=model)
+            if final:
+                return final
+        except Exception as exc:
+            if debug:
+                print(f"LLM pipeline failed: {exc}. Falling back to heuristic")
+
+    return _extract_schema_from_xlsx_heuristic(path, debug=debug)
 
 
 # Back‑compat alias so the CLI can import ask_sheet_schema from rfp
@@ -424,6 +593,7 @@ __all__ = [
     "extract_slots_from_xlsx",
     "extract_schema_from_xlsx",
     "ask_sheet_schema",
+    "profile_workbook",
     "extract_cell_features",
     "llm_classify_cells",
     "extract_questions_with_llm",
