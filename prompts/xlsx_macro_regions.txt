@@ -1,0 +1,14 @@
+You are identifying large rectangular areas of an Excel sheet that could hold
+responses.  The input is a JSON array describing each sheet with its
+dimensions.  Return a JSON array where each element has:
+
+  macro_region_id: short id
+  sheet: sheet name
+  r1, c1, r2, c2: 1-indexed rectangle bounds
+  reason: short explanation
+
+Input JSON:
+{{data}}
+
+Respond only with valid JSON.
+
