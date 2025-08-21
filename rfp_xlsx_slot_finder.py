@@ -267,7 +267,7 @@ def _extract_schema_from_xlsx_heuristic(path: str, debug: bool = True) -> List[D
 # ---------------------------------------------------------------------------
 
 
-def profile_workbook(path: str) -> Dict[str, Any]:
+def profile_workbook(path: str, debug: bool = False) -> Dict[str, Any]:
     """Create a profile of every cell in the workbook.
 
     The profile captures basic style information so that subsequent LLM calls
@@ -276,9 +276,13 @@ def profile_workbook(path: str) -> Dict[str, Any]:
     and a ``cells`` list containing the per-cell details.
     """
 
+    if debug:
+        print(f"Loading workbook for profiling: {path}")
     wb = load_workbook(path, data_only=True)
     profile: Dict[str, Any] = {}
     for ws in wb.worksheets:
+        if debug:
+            print(f"  Profiling sheet '{ws.title}'")
         cells: List[Dict[str, Any]] = []
         merged: set[Tuple[int, int]] = set()
         for rng in ws.merged_cells.ranges:
@@ -310,6 +314,8 @@ def profile_workbook(path: str) -> Dict[str, Any]:
             "max_col": ws.max_column,
             "cells": cells,
         }
+    if debug:
+        print(f"Profiled workbook with {len(profile)} sheets")
     return profile
 
 
@@ -326,9 +332,13 @@ def _call_llm(prompt_file: str, payload: dict, *, model: str) -> Any:
     return json.loads(content)
 
 
-def _llm_macro_regions(profile: Dict[str, Any], *, model: str) -> List[Dict[str, Any]]:
+def _llm_macro_regions(
+    profile: Dict[str, Any], *, model: str, debug: bool = False
+) -> List[Dict[str, Any]]:
     """LLM step #1 – identify large rectangular regions in each sheet."""
 
+    if debug:
+        print(f"Identifying macro regions for {len(profile)} sheets")
     summaries = []
     for sheet, info in profile.items():
         summaries.append(
@@ -339,57 +349,84 @@ def _llm_macro_regions(profile: Dict[str, Any], *, model: str) -> List[Dict[str,
             }
         )
     try:
-        return _call_llm("xlsx_macro_regions.txt", summaries, model=model)
-    except Exception:
+        res = _call_llm("xlsx_macro_regions.txt", summaries, model=model)
+        if debug:
+            print(f"  Macro region LLM returned {len(res)} regions")
+        return res
+    except Exception as exc:
+        if debug:
+            print(f"  Macro region detection failed: {exc}")
         return []
 
 
 def _llm_zone_refinement(
-    profile: Dict[str, Any], regions: List[Dict[str, Any]], *, model: str
+    profile: Dict[str, Any], regions: List[Dict[str, Any]], *, model: str, debug: bool = False
 ) -> List[Dict[str, Any]]:
     """LLM step #2 – refine macro regions into potential answer zones."""
 
+    if debug:
+        print(f"Refining {len(regions)} regions into zones")
     zones: List[Dict[str, Any]] = []
     for region in regions:
         sheet_profile = profile.get(region.get("sheet"), {})
         payload = {"region": region, "cells": sheet_profile.get("cells", [])}
         try:
-            zones.extend(
-                _call_llm("xlsx_zone_refinement.txt", payload, model=model)
-            )
-        except Exception:
+            res = _call_llm("xlsx_zone_refinement.txt", payload, model=model)
+            zones.extend(res)
+            if debug:
+                print(f"  Region {region.get('sheet')} -> {len(res)} zones")
+        except Exception as exc:
+            if debug:
+                print(f"  Zone refinement failed for {region}: {exc}")
             continue
+    if debug:
+        print(f"Total zones: {len(zones)}")
     return zones
 
 
 def _llm_extract_candidates(
-    profile: Dict[str, Any], zones: List[Dict[str, Any]], *, model: str
+    profile: Dict[str, Any], zones: List[Dict[str, Any]], *, model: str, debug: bool = False
 ) -> List[Dict[str, Any]]:
     """LLM step #3 – from each zone extract candidate answer slots."""
 
+    if debug:
+        print(f"Extracting candidates from {len(zones)} zones")
     candidates: List[Dict[str, Any]] = []
     for zone in zones:
         sheet_profile = profile.get(zone.get("sheet"), {})
         payload = {"zone": zone, "cells": sheet_profile.get("cells", [])}
         try:
-            candidates.extend(
-                _call_llm("xlsx_slot_candidates.txt", payload, model=model)
-            )
-        except Exception:
+            res = _call_llm("xlsx_slot_candidates.txt", payload, model=model)
+            candidates.extend(res)
+            if debug:
+                print(f"  Zone {zone.get('sheet')} -> {len(res)} candidates")
+        except Exception as exc:
+            if debug:
+                print(f"  Candidate extraction failed for {zone}: {exc}")
             continue
+    if debug:
+        print(f"Total candidates: {len(candidates)}")
     return candidates
 
 
 def _llm_score_and_assign(
-    candidates: List[Dict[str, Any]], *, model: str
+    candidates: List[Dict[str, Any]], *, model: str, debug: bool = False
 ) -> List[Dict[str, Any]]:
     """LLM steps #4 and #5 – score candidates and pick winners."""
 
+    if debug:
+        print(f"Scoring {len(candidates)} candidates")
     if not candidates:
+        if debug:
+            print("No candidates to score")
         return []
     try:
         scored = _call_llm("xlsx_slot_scoring.txt", candidates, model=model)
-    except Exception:
+        if debug:
+            print(f"  Scoring step returned {len(scored)} entries")
+    except Exception as exc:
+        if debug:
+            print(f"  Scoring failed: {exc}")
         return []
 
     chosen: Dict[str, Dict[str, Any]] = {}
@@ -398,6 +435,8 @@ def _llm_score_and_assign(
         best = chosen.get(qid)
         if not best or cand.get("score", 0) > best.get("score", 0):
             chosen[qid] = cand
+    if debug:
+        print(f"Selected {len(chosen)} final slots")
     return list(chosen.values())
 
 
@@ -421,11 +460,55 @@ def extract_schema_from_xlsx(
         raise RuntimeError(msg)
 
     try:
-        profile = profile_workbook(path)
-        regions = _llm_macro_regions(profile, model=model)
-        zones = _llm_zone_refinement(profile, regions, model=model)
-        candidates = _llm_extract_candidates(profile, zones, model=model)
-        final = _llm_score_and_assign(candidates, model=model)
+        if debug:
+            print(f"Profiling workbook '{path}'")
+        profile = (
+            profile_workbook(path, debug=True)
+            if debug
+            else profile_workbook(path)
+        )
+        if debug:
+            print(f"Workbook profile complete: {len(profile)} sheets")
+
+        if debug:
+            print("Running macro region detection")
+        regions = (
+            _llm_macro_regions(profile, model=model, debug=True)
+            if debug
+            else _llm_macro_regions(profile, model=model)
+        )
+        if debug:
+            print(f"Macro regions found: {len(regions)}")
+
+        if debug:
+            print("Refining regions into zones")
+        zones = (
+            _llm_zone_refinement(profile, regions, model=model, debug=True)
+            if debug
+            else _llm_zone_refinement(profile, regions, model=model)
+        )
+        if debug:
+            print(f"Zones produced: {len(zones)}")
+
+        if debug:
+            print("Extracting candidate slots")
+        candidates = (
+            _llm_extract_candidates(profile, zones, model=model, debug=True)
+            if debug
+            else _llm_extract_candidates(profile, zones, model=model)
+        )
+        if debug:
+            print(f"Candidates extracted: {len(candidates)}")
+
+        if debug:
+            print("Scoring candidates")
+        final = (
+            _llm_score_and_assign(candidates, model=model, debug=True)
+            if debug
+            else _llm_score_and_assign(candidates, model=model)
+        )
+        if debug:
+            print(f"Selected {len(final)} final slots")
         return final
     except Exception as exc:
         if debug:
