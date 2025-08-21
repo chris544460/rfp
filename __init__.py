@@ -1,4 +1,6 @@
 # Marks rfp_utils as a package
+from .rfp_xlsx_apply_answers import write_excel_answers
+
 __all__ = [
     "qa_core",
     "my_module",
@@ -11,3 +13,5 @@ __all__ = [
     "answer_composer",
     "word_comments",
 ]
+
+__all__.extend(["write_excel_answers"])
