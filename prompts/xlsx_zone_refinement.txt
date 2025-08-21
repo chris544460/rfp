@@ -1,0 +1,15 @@
+Given a macro-region from an Excel sheet and the list of cells in that region,
+identify sub-rectangles that look like answer areas (e.g. bordered, blank
+blocks).  The input is a JSON object with keys "region" and "cells".  Return a
+JSON array of zones where each zone has:
+
+  zone_id: short id
+  sheet: sheet name (copy from region)
+  r1, c1, r2, c2: bounds of the sub-rectangle
+  reason: brief justification
+
+Input JSON:
+{{data}}
+
+Respond only with valid JSON.
+

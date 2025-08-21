@@ -1,0 +1,14 @@
+Score and select answer slot candidates for Excel questions.  The input is a
+JSON array of candidate objects, each with at least ``slot_id`` and
+``question_cell``.  For each candidate return:
+
+  slot_id: same as input
+  question_cell: same as input
+  score: 0-1 floating point
+  reason: brief explanation
+
+Input JSON:
+{{data}}
+
+Respond only with valid JSON.
+
