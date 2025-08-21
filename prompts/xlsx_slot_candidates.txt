@@ -1,0 +1,15 @@
+For a potential answer zone in an Excel sheet, list all cells or merged areas
+that could serve as answer slots.  The input JSON has keys "zone" and "cells".
+Return a JSON array with one object per candidate:
+
+  slot_id: short id
+  sheet: sheet name
+  cell: A1-style cell or range
+  question_cell (optional): address of the related question
+  reason: short explanation
+
+Input JSON:
+{{data}}
+
+Respond only with valid JSON.
+
