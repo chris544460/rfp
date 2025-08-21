@@ -405,25 +405,32 @@ def extract_schema_from_xlsx(
     path: str,
     debug: bool = True,
     *,
-    use_llm: bool = True,
     model: str = "gpt-4o-mini",
 ) -> List[Dict[str, Any]]:
-    """Public entry point selecting the LLM pipeline or heuristic fallback."""
+    """Public entry point using only the LLM driven pipeline.
 
-    if use_llm and os.getenv("OPENAI_API_KEY"):
-        try:
-            profile = profile_workbook(path)
-            regions = _llm_macro_regions(profile, model=model)
-            zones = _llm_zone_refinement(profile, regions, model=model)
-            candidates = _llm_extract_candidates(profile, zones, model=model)
-            final = _llm_score_and_assign(candidates, model=model)
-            if final:
-                return final
-        except Exception as exc:
-            if debug:
-                print(f"LLM pipeline failed: {exc}. Falling back to heuristic")
+    The heuristic fallback has been removed.  If the LLM cannot be used (for
+    example, when ``OPENAI_API_KEY`` is missing) or any step in the pipeline
+    fails, a ``RuntimeError`` is raised and no schema is returned.
+    """
 
-    return _extract_schema_from_xlsx_heuristic(path, debug=debug)
+    if not os.getenv("OPENAI_API_KEY"):
+        msg = "OPENAI_API_KEY is required for LLM-based XLSX parsing"
+        if debug:
+            print(msg)
+        raise RuntimeError(msg)
+
+    try:
+        profile = profile_workbook(path)
+        regions = _llm_macro_regions(profile, model=model)
+        zones = _llm_zone_refinement(profile, regions, model=model)
+        candidates = _llm_extract_candidates(profile, zones, model=model)
+        final = _llm_score_and_assign(candidates, model=model)
+        return final
+    except Exception as exc:
+        if debug:
+            print(f"LLM pipeline failed: {exc}")
+        raise
 
 
 # Back‑compat alias so the CLI can import ask_sheet_schema from rfp
