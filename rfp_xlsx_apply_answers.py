@@ -38,7 +38,8 @@ def write_excel_answers(
 
     schema[i] is expected to include:
       - 'sheet' (or 'sheet_name')
-      - 'answer_cell' (fallback: 'question_cell' / 'cell' / 'address')
+      - 'answer_cell' (if omitted we fall back to 'question_cell'; if set to
+        ``None`` the answer will be skipped)
       - 'question_text' (used only if we need to generate a missing answer)
 
     answers[i] can be a string or a dict like:
@@ -62,14 +63,17 @@ def write_excel_answers(
 
     for idx, ent in enumerate(schema):
         sheet_name = ent.get("sheet") or ent.get("sheet_name")
-        addr = (
-            ent.get("answer_cell")
-            or ent.get("question_cell")
-            or ent.get("cell")
-            or ent.get("address")
-        )
+        if "answer_cell" in ent:
+            addr = ent.get("answer_cell")
+        else:
+            addr = ent.get("question_cell") or ent.get("cell") or ent.get("address")
 
         if not sheet_name or not addr:
+            if sheet_name and ent.get("answer_cell") is None:
+                qtxt = (ent.get("question_text") or "").strip()
+                print(
+                    f"Skipping answer for '{qtxt}' on sheet '{sheet_name}': no answer slot"
+                )
             skipped += 1
             continue
 

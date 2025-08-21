@@ -1,5 +1,6 @@
 import openpyxl
-from rfp_xlsx_slot_finder import extract_slots_from_xlsx
+from rfp_xlsx_slot_finder import extract_slots_from_xlsx, extract_schema_from_xlsx
+from rfp_xlsx_apply_answers import write_excel_answers
 
 
 def test_extract_slots_from_xlsx(tmp_path):
@@ -27,3 +28,24 @@ def test_extract_slots_from_xlsx(tmp_path):
     assert sheet1_cells["A1"]["font_color"].upper().endswith("FF0000")
     data_cells = {cell["address"]: cell for cell in sheets["Data"]["cells"]}
     assert data_cells["B2"]["value"] == "Answer"
+
+
+def test_question_without_answer_slot(tmp_path, capsys):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "What is your name?"
+    ws["B1"] = "n/a"  # not blank
+    in_path = tmp_path / "in.xlsx"
+    wb.save(in_path)
+
+    schema = extract_schema_from_xlsx(str(in_path), debug=False)
+    assert schema and schema[0]["question_text"].startswith("What is")
+    assert schema[0]["answer_cell"] is None
+
+    out_path = tmp_path / "out.xlsx"
+    res = write_excel_answers(schema, ["Alice"], str(in_path), str(out_path))
+    assert res["applied"] == 0
+    assert res["skipped"] == 1
+    captured = capsys.readouterr()
+    assert "no answer slot" in captured.out.lower()
