@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -225,4 +226,121 @@ def extract_slots_from_xlsx(path: str) -> Dict[str, Any]:
     return {"doc_type": "xlsx", "file": os.path.basename(path), "sheets": sheets}
 
 
-__all__ = ["extract_slots_from_xlsx", "extract_schema_from_xlsx", "ask_sheet_schema"]
+def extract_cell_features(path: str) -> List[Dict[str, Any]]:
+    """Flatten a workbook into a feature table for LLM classification.
+
+    Each returned row has ``sheet``, ``row``, ``col``, ``cell`` address, the
+    raw ``text`` value and a ``features`` dictionary containing simple style
+    and text markers that may hint at questions.
+    """
+    wb = load_workbook(path, data_only=True)
+    rows: List[Dict[str, Any]] = []
+    interrogatives = (
+        "who",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "do",
+        "does",
+        "can",
+        "is",
+        "are",
+        "will",
+        "should",
+        "please",
+    )
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value is None:
+                    continue
+                text = str(cell.value)
+                low = text.strip().lower()
+                features = {
+                    "has_question_mark": "?" in text,
+                    "starts_with_interrogative": bool(
+                        re.match(rf"^({'|'.join(interrogatives)})\b", low)
+                    ),
+                    "bold": bool(cell.font and cell.font.bold),
+                    "font_size": getattr(cell.font, "sz", None),
+                    "fill_color": _color_to_hex(cell.fill.start_color),
+                }
+                rows.append(
+                    {
+                        "sheet": ws.title,
+                        "row": cell.row,
+                        "col": cell.column,
+                        "cell": cell.coordinate,
+                        "text": text,
+                        "features": features,
+                    }
+                )
+    return rows
+
+
+def llm_classify_cells(
+    cells: List[Dict[str, Any]], *, model: str = "gpt-4o-mini", batch_size: int = 8
+) -> List[Dict[str, Any]]:
+    """Classify cell schemas using an LLM.
+
+    ``cells`` is expected to be the output of :func:`extract_cell_features`.
+    The function batches the payload to reduce round trips.  Each batch is
+    sent to an LLM prompt that labels the cells as ``QUESTION_HEADER``,
+    ``QUESTION_BODY`` or ``NOT_QUESTION`` and returns a confidence score.
+    """
+    from answer_composer import get_openai_completion
+
+    prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "xlsx_classify_cells.txt")
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        template = f.read()
+
+    results: List[Dict[str, Any]] = []
+    for i in range(0, len(cells), batch_size):
+        batch = cells[i : i + batch_size]
+        payload = json.dumps(
+            [
+                {"cell": c["cell"], "text": c["text"], "features": c["features"]}
+                for c in batch
+            ]
+        )
+        prompt = template.replace("{{cells}}", payload)
+        content, _ = get_openai_completion(prompt, model, json_output=True)
+        try:
+            classified = json.loads(content)
+        except Exception:
+            continue
+        results.extend(classified)
+
+    # merge classifications back into the original structures
+    by_cell = {r.get("cell"): r for r in results}
+    for row in cells:
+        r = by_cell.get(row["cell"])
+        if r:
+            row["label"] = r.get("label")
+            row["confidence"] = r.get("confidence")
+    return cells
+
+
+def extract_questions_with_llm(path: str, model: str = "gpt-4o-mini") -> List[Dict[str, Any]]:
+    """High level convenience wrapper combining feature extraction and LLM
+    classification.
+
+    The function returns rows labelled as question headers or bodies.  It does
+    not attempt sophisticated block assembly but provides a foundation for
+    downstream clustering.
+    """
+    table = extract_cell_features(path)
+    classified = llm_classify_cells(table, model=model)
+    return [row for row in classified if row.get("label") in {"QUESTION_HEADER", "QUESTION_BODY"}]
+
+
+__all__ = [
+    "extract_slots_from_xlsx",
+    "extract_schema_from_xlsx",
+    "ask_sheet_schema",
+    "extract_cell_features",
+    "llm_classify_cells",
+    "extract_questions_with_llm",
+]

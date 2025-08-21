@@ -1,0 +1,6 @@
+You are classifying spreadsheet cells.
+Each item below is a JSON object with keys `cell`, `text`, and `features`.
+Label each as `QUESTION_HEADER`, `QUESTION_BODY`, or `NOT_QUESTION`.
+Return only JSON: a list like [{"cell": "A1", "label": "QUESTION_BODY", "confidence": 0.9}, ...].
+Cells:
+{{cells}}
