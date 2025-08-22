@@ -196,12 +196,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--framework",
         choices=["openai", "aladdin"],
-        default=os.getenv("ANSWER_FRAMEWORK", "openai"),
+        default=os.getenv("ANSWER_FRAMEWORK", "aladdin"),
         help="Which completion framework to use",
     )
     parser.add_argument(
         "--model",
-        default="gpt-5-nano",
+        default=os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14_research"),
         help="Model name for the chosen framework",
     )
     parser.add_argument(

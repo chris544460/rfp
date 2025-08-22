@@ -39,8 +39,9 @@ def test_question_without_answer_slot(monkeypatch, tmp_path, capsys):
     in_path = tmp_path / "in.xlsx"
     wb.save(in_path)
 
-    # Provide fake API key and stub the LLM pipeline to return a schema
+    # Provide fake API key and force OpenAI framework for this test
     monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("ANSWER_FRAMEWORK", "openai")
 
     import rfp_xlsx_slot_finder as finder
 
