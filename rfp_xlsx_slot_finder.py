@@ -11,6 +11,11 @@ from openpyxl.styles import Color
 from openpyxl.utils import get_column_letter
 
 
+# Framework and model selection
+FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "aladdin")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14_research")
+
+
 def _color_to_hex(color: Optional[Color]) -> Optional[str]:
     """Convert an openpyxl Color to a RGB hex string.
 
@@ -320,15 +325,20 @@ def profile_workbook(path: str, debug: bool = False) -> Dict[str, Any]:
 
 
 def _call_llm(prompt_file: str, payload: dict, *, model: str) -> Any:
-    """Helper to invoke the LLM with a prompt template and JSON payload."""
+    """Helper to invoke the selected LLM with a prompt template."""
 
-    from answer_composer import get_openai_completion
+    from answer_composer import CompletionsClient, get_openai_completion
 
     prompt_path = os.path.join(os.path.dirname(__file__), "prompts", prompt_file)
     with open(prompt_path, "r", encoding="utf-8") as f:
         template = f.read()
     prompt = template.replace("{{data}}", json.dumps(payload))
-    content, _ = get_openai_completion(prompt, model, json_output=True)
+
+    if FRAMEWORK == "aladdin":
+        resp = CompletionsClient(model=model).get_completion(prompt, json_output=True)
+        content = resp[0] if isinstance(resp, tuple) else resp
+    else:
+        content, _ = get_openai_completion(prompt, model, json_output=True)
     return json.loads(content)
 
 
@@ -444,7 +454,7 @@ def extract_schema_from_xlsx(
     path: str,
     debug: bool = True,
     *,
-    model: str = "gpt-4o-mini",
+    model: str = MODEL,
 ) -> List[Dict[str, Any]]:
     """Public entry point using only the LLM driven pipeline.
 
@@ -453,11 +463,27 @@ def extract_schema_from_xlsx(
     fails, a ``RuntimeError`` is raised and no schema is returned.
     """
 
-    if not os.getenv("OPENAI_API_KEY"):
-        msg = "OPENAI_API_KEY is required for LLM-based XLSX parsing"
-        if debug:
-            print(msg)
-        raise RuntimeError(msg)
+    if FRAMEWORK == "openai":
+        if not os.getenv("OPENAI_API_KEY"):
+            msg = "OPENAI_API_KEY is required for LLM-based XLSX parsing"
+            if debug:
+                print(msg)
+            raise RuntimeError(msg)
+    else:
+        required = [
+            "aladdin_studio_api_key",
+            "defaultWebServer",
+            "aladdin_user",
+            "aladdin_passwd",
+        ]
+        missing = [v for v in required if not os.getenv(v)]
+        if missing:
+            msg = (
+                f"Missing environment variables for aladdin framework: {', '.join(missing)}"
+            )
+            if debug:
+                print(msg)
+            raise RuntimeError(msg)
 
     try:
         if debug:
