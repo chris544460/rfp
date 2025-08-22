@@ -20,6 +20,7 @@ TOTAL_COST_USD = 0.0
 MODEL_PRICING = {
     # $0.05 input / $0.005 cached input / $0.40 output per million tokens
     "gpt-5-nano": {"in": 0.00005, "out": 0.0004, "cached_in": 0.000005},
+    "gpt-4.1-nano-2025-04-14_research": {"in": 0.00005, "out": 0.0004, "cached_in": 0.000005},
     "gpt-4o": {"in": 0.005, "out": 0.015},          # $5 / $15 per million
     "gpt-4o-mini": {"in": 0.003, "out": 0.009},     # hypothetical mini tier
     "gpt-4o-max": {"in": 0.007, "out": 0.021},      # hypothetical tier
@@ -61,8 +62,8 @@ from answer_composer import CompletionsClient, get_openai_completion
 from prompts import read_prompt
 
 # Framework and model selection
-FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "openai")
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "aladdin")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14_research")
 
 
 def _call_llm(prompt: str, json_output: bool = False) -> str:
@@ -1423,12 +1424,12 @@ def main():
     ap.add_argument(
         "--framework",
         choices=["openai", "aladdin"],
-        default=os.getenv("ANSWER_FRAMEWORK", "openai"),
+        default=os.getenv("ANSWER_FRAMEWORK", "aladdin"),
         help="Which completion framework to use",
     )
     ap.add_argument(
         "--model",
-        default=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
+        default=os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14_research"),
         help="Model name for the chosen framework",
     )
     if len(sys.argv) == 1:
