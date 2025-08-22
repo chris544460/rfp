@@ -439,12 +439,26 @@ def _llm_score_and_assign(
             print(f"  Scoring failed: {exc}")
         return []
 
+    # Index original candidates by ``slot_id`` so we can merge their richer
+    # metadata (e.g. ``question_text`` or ``cell``) back into the scored
+    # results.  The scoring prompt only returns a minimal subset of fields,
+    # which previously caused that extra information to be dropped.
+    by_slot: Dict[str, Dict[str, Any]] = {
+        c.get("slot_id"): c for c in candidates if c.get("slot_id")
+    }
+
     chosen: Dict[str, Dict[str, Any]] = {}
     for cand in scored:
-        qid = cand.get("question_id") or cand.get("question_cell")
+        slot_id = cand.get("slot_id")
+        merged = {**by_slot.get(slot_id, {}), **cand}
+        # ``cell`` from the candidate is the answer location; expose it as
+        # ``answer_cell`` unless already provided.
+        if "cell" in merged and "answer_cell" not in merged:
+            merged["answer_cell"] = merged.pop("cell")
+        qid = merged.get("question_id") or merged.get("question_cell")
         best = chosen.get(qid)
-        if not best or cand.get("score", 0) > best.get("score", 0):
-            chosen[qid] = cand
+        if not best or merged.get("score", 0) > best.get("score", 0):
+            chosen[qid] = merged
     if debug:
         print(f"Selected {len(chosen)} final slots")
     return list(chosen.values())
