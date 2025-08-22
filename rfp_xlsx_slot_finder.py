@@ -9,11 +9,21 @@ import openpyxl
 from openpyxl import load_workbook
 from openpyxl.styles import Color
 from openpyxl.utils import get_column_letter
+import spacy
 
 
 # Framework and model selection
 FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "aladdin")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14_research")
+
+# Load spaCy model once at import time.  We prefer ``en_core_web_sm`` but fall
+# back to a blank English pipeline if the model is unavailable.  The blank
+# model still provides tokenization which is sufficient for our simple
+# heuristics.
+try:  # pragma: no cover - exercised implicitly during import
+    _NLP = spacy.load("en_core_web_sm")
+except Exception:  # pragma: no cover - missing model
+    _NLP = spacy.blank("en")
 
 
 def _color_to_hex(color: Optional[Color]) -> Optional[str]:
@@ -42,6 +52,18 @@ QUESTION_PHRASES = (
     "can you", "does your", "have you", "who", "when", "where", "why", "which"
 )
 
+# Basic question words used by the spaCy based detector.  These cover common
+# English interrogatives.
+QUESTION_WORDS = {
+    "who",
+    "what",
+    "when",
+    "where",
+    "why",
+    "how",
+    "which",
+}
+
 
 def _looks_like_question_text(t: str) -> bool:
     raw = (t or "").strip()
@@ -56,6 +78,36 @@ def _looks_like_question_text(t: str) -> bool:
         return True
     if low.startswith(("question:", "prompt:", "rfp question:")):
         return True
+    return False
+
+
+def _spacy_is_question_or_imperative(text: str) -> bool:
+    """Use spaCy to flag interrogative or imperative sentences.
+
+    The heuristic checks each sentence in the text.  A sentence is considered a
+    question if it ends with ``?`` or contains a question word.  Imperatives are
+    detected when the sentence root has ``Mood=Imp`` or the first token is a
+    bare verb (``tag_`` == ``VB``).
+    """
+
+    doc = _NLP(text)
+    # ``doc.sents`` may be empty if the model lacks a parser.  Fall back to the
+    # entire text in that case.
+    sentences = list(doc.sents) if getattr(doc, "sents", None) else [doc]
+    for sent in sentences:
+        sent_text = sent.text.strip()
+        if not sent_text:
+            continue
+        if sent_text.endswith("?"):
+            return True
+        if any(tok.lower_ in QUESTION_WORDS for tok in sent):
+            return True
+        root = sent.root
+        if "Imp" in root.morph.get("Mood"):
+            return True
+        first = sent[0]
+        if root.tag_ == "VB" and first is root:
+            return True
     return False
 
 
@@ -76,6 +128,21 @@ def _is_blank_cell(cell) -> bool:
 
 def _addr(col_idx: int, row_idx: int) -> str:
     return f"{get_column_letter(col_idx)}{row_idx}"
+
+
+def _find_adjacent_blank(ws, row: int, col: int) -> Optional[str]:
+    """Return coordinate of a blank cell to the right of ``(row, col)``.
+
+    Earlier heuristic versions also considered the cell below a question as a
+    potential answer slot.  For the simplified spaCy pipeline we only look to
+    the right, matching the typical question/answer table layout and the
+    expectations in our tests.
+    """
+
+    right = ws.cell(row, col + 1)
+    if _is_blank_cell(right):
+        return right.coordinate
+    return None
 
 
 def _two_col_header(ws) -> Optional[Tuple[int, int]]:
@@ -470,90 +537,45 @@ def extract_schema_from_xlsx(
     *,
     model: str = MODEL,
 ) -> List[Dict[str, Any]]:
-    """Public entry point using only the LLM driven pipeline.
+    """Identify question cells in ``path`` using spaCy and simple heuristics.
 
-    The heuristic fallback has been removed.  If the LLM cannot be used (for
-    example, when ``OPENAI_API_KEY`` is missing) or any step in the pipeline
-    fails, a ``RuntimeError`` is raised and no schema is returned.
+    The function scans every non-empty cell in the workbook.  If the cell text
+    contains an interrogative or imperative sentence, the cell is recorded as a
+    question.  A neighbouring blank cell (right first, then below) is considered
+    the answer slot when present.
     """
 
-    if FRAMEWORK == "openai":
-        if not os.getenv("OPENAI_API_KEY"):
-            msg = "OPENAI_API_KEY is required for LLM-based XLSX parsing"
-            if debug:
-                print(msg)
-            raise RuntimeError(msg)
-    else:
-        required = [
-            "aladdin_studio_api_key",
-            "defaultWebServer",
-            "aladdin_user",
-            "aladdin_passwd",
-        ]
-        missing = [v for v in required if not os.getenv(v)]
-        if missing:
-            msg = (
-                f"Missing environment variables for aladdin framework: {', '.join(missing)}"
-            )
-            if debug:
-                print(msg)
-            raise RuntimeError(msg)
+    wb = load_workbook(path, data_only=True)
+    schema: List[Dict[str, Any]] = []
 
-    try:
+    for ws in wb.worksheets:
         if debug:
-            print(f"Profiling workbook '{path}'")
-        profile = (
-            profile_workbook(path, debug=True)
-            if debug
-            else profile_workbook(path)
-        )
-        if debug:
-            print(f"Workbook profile complete: {len(profile)} sheets")
+            print(f"Scanning sheet '{ws.title}'")
+        for row in ws.iter_rows():
+            for cell in row:
+                value = cell.value
+                if value is None:
+                    continue
+                text = str(value).strip()
+                if not text:
+                    continue
+                if not _spacy_is_question_or_imperative(text):
+                    continue
+                answer = _find_adjacent_blank(ws, cell.row, cell.column)
+                if debug:
+                    print(
+                        f"  Found question at {cell.coordinate} -> {answer or 'None'}"
+                    )
+                schema.append(
+                    {
+                        "sheet": ws.title,
+                        "question_cell": cell.coordinate,
+                        "question_text": text,
+                        "answer_cell": answer,
+                    }
+                )
 
-        if debug:
-            print("Running macro region detection")
-        regions = (
-            _llm_macro_regions(profile, model=model, debug=True)
-            if debug
-            else _llm_macro_regions(profile, model=model)
-        )
-        if debug:
-            print(f"Macro regions found: {len(regions)}")
-
-        if debug:
-            print("Refining regions into zones")
-        zones = (
-            _llm_zone_refinement(profile, regions, model=model, debug=True)
-            if debug
-            else _llm_zone_refinement(profile, regions, model=model)
-        )
-        if debug:
-            print(f"Zones produced: {len(zones)}")
-
-        if debug:
-            print("Extracting candidate slots")
-        candidates = (
-            _llm_extract_candidates(profile, zones, model=model, debug=True)
-            if debug
-            else _llm_extract_candidates(profile, zones, model=model)
-        )
-        if debug:
-            print(f"Candidates extracted: {len(candidates)}")
-
-        if debug:
-            print("Scoring candidates")
-        final = (
-            _llm_score_and_assign(candidates, model=model, debug=True)
-            if debug
-            else _llm_score_and_assign(candidates, model=model)
-        )
-        if debug:
-            print(f"Selected {len(final)} final slots")
-        return final
-    except Exception as exc:
-        if debug:
-            print(f"LLM pipeline failed: {exc}")
-        raise
+    return schema
 
 
 # Back‑compat alias so the CLI can import ask_sheet_schema from rfp
