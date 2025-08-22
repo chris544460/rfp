@@ -25,6 +25,14 @@ try:  # pragma: no cover - exercised implicitly during import
 except Exception:  # pragma: no cover - missing model
     _NLP = spacy.blank("en")
 
+# ``doc.sents`` requires sentence boundaries.  ``en_core_web_sm`` provides a
+# dependency parser which sets them automatically.  The blank fallback pipeline
+# only tokenizes text, so we add a simple ``sentencizer`` component that marks
+# sentence starts from punctuation.  This mirrors spaCy's recommended fix for
+# ``E030: sentence boundaries unset``.
+if "parser" not in _NLP.pipe_names and "senter" not in _NLP.pipe_names:
+    _NLP.add_pipe("sentencizer")
+
 
 def _color_to_hex(color: Optional[Color]) -> Optional[str]:
     """Convert an openpyxl Color to a RGB hex string.
@@ -91,9 +99,10 @@ def _spacy_is_question_or_imperative(text: str) -> bool:
     """
 
     doc = _NLP(text)
-    # ``doc.sents`` may be empty if the model lacks a parser.  Fall back to the
-    # entire text in that case.
-    sentences = list(doc.sents) if getattr(doc, "sents", None) else [doc]
+    # ``doc.sents`` raises ``E030`` if no component sets sentence boundaries.
+    # ``has_annotation("SENT_START")`` lets us cheaply check and fall back to the
+    # whole doc when boundaries are missing.
+    sentences = list(doc.sents) if doc.has_annotation("SENT_START") else [doc]
     for sent in sentences:
         sent_text = sent.text.strip()
         if not sent_text:
