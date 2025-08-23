@@ -14,7 +14,14 @@ import spacy
 
 # Framework and model selection
 FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "aladdin")
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14_research")
+
+# Spreadsheet questions can benefit from a larger reasoning model.  Allow the
+# Excel slot finder to use a dedicated model via ``OPENAI_MODEL_EXCEL_UNDERSTANDING``
+# while leaving ``OPENAI_MODEL`` (used by other modules) at its usual default of
+# ``gpt-4.1-nano-2025-04-14_research``.
+EXCEL_MODEL = os.getenv(
+    "OPENAI_MODEL_EXCEL_UNDERSTANDING", "o3-2025-04-16_research"
+)
 
 # Load spaCy model once at import time.  We prefer ``en_core_web_sm`` but fall
 # back to a blank English pipeline if the model is unavailable.  The blank
@@ -137,6 +144,96 @@ def _is_blank_cell(cell) -> bool:
 
 def _addr(col_idx: int, row_idx: int) -> str:
     return f"{get_column_letter(col_idx)}{row_idx}"
+
+
+def _cell_info(cell) -> Dict[str, Any]:
+    """Serialize a worksheet cell with basic formatting."""
+
+    return {
+        "address": cell.coordinate,
+        "row": cell.row,
+        "column": get_column_letter(cell.column),
+        "value": None if cell.value is None else str(cell.value),
+        "font_color": _color_to_hex(cell.font.color),
+        "bold": bool(cell.font.bold),
+        "italic": bool(cell.font.italic),
+        "bg_color": _color_to_hex(cell.fill.start_color),
+        "border": {
+            "left": cell.border.left.style,
+            "right": cell.border.right.style,
+            "top": cell.border.top.style,
+            "bottom": cell.border.bottom.style,
+        },
+    }
+
+
+def _row_context(ws, row_idx: int) -> List[Dict[str, Any]]:
+    """Return serialized cells for the entire ``row_idx`` of ``ws``."""
+
+    return [_cell_info(ws.cell(row_idx, c)) for c in range(1, ws.max_column + 1)]
+
+
+def _rect_context(ws, row_idx: int, col_idx: int, size: int = 10) -> List[Dict[str, Any]]:
+    """Return serialized cells for a ``size``×``size`` box around (row, col).
+
+    The box is clipped to the worksheet bounds when the question cell is near an
+    edge so that we always return at most ``size``×``size`` cells.
+    """
+
+    half = size // 2
+    start_row = max(1, row_idx - half)
+    end_row = start_row + size - 1
+    if end_row > ws.max_row:
+        end_row = ws.max_row
+        start_row = max(1, end_row - size + 1)
+
+    start_col = max(1, col_idx - half)
+    end_col = start_col + size - 1
+    if end_col > ws.max_column:
+        end_col = ws.max_column
+        start_col = max(1, end_col - size + 1)
+
+    rect: List[Dict[str, Any]] = []
+    for r in range(start_row, end_row + 1):
+        for c in range(start_col, end_col + 1):
+            rect.append(_cell_info(ws.cell(r, c)))
+    return rect
+
+
+def _sheet_to_json(ws) -> Dict[str, Any]:
+    """Serialize an entire worksheet to JSON-friendly structures."""
+
+    cells: List[Dict[str, Any]] = []
+    for r in range(1, ws.max_row + 1):
+        for c in range(1, ws.max_column + 1):
+            cells.append(_cell_info(ws.cell(r, c)))
+    return {"name": ws.title, "max_row": ws.max_row, "max_col": ws.max_column, "cells": cells}
+
+
+def _question_context(ws, cell) -> Dict[str, Any]:
+    """Build the question context used as LLM hints."""
+
+    return {
+        "question": str(cell.value).strip(),
+        "cell": cell.coordinate,
+        "row": _row_context(ws, cell.row),
+        "rect": _rect_context(ws, cell.row, cell.column),
+    }
+
+
+def _llm_find_answer_cell(question_ctx: Dict[str, Any], sheet: Dict[str, Any], *, model: str) -> Optional[str]:
+    """Invoke the LLM to choose an answer cell for ``question_ctx`` in ``sheet``."""
+
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    payload = {"question": question_ctx, "sheet": sheet}
+    try:
+        res = _call_llm("xlsx_sheet_answer_slot.txt", payload, model=model)
+    except Exception:
+        return None
+    if isinstance(res, dict):
+        return res.get("answer_cell")
+    return None
 
 
 def _find_adjacent_blank(
@@ -567,17 +664,23 @@ def extract_schema_from_xlsx(
     path: str,
     debug: bool = True,
     *,
-    model: str = MODEL,
+    model: str = EXCEL_MODEL,
 ) -> List[Dict[str, Any]]:
-    """Identify question cells in ``path`` using spaCy and simple heuristics.
+    """Identify question cells in ``path`` and locate their answer slots via LLM.
 
-    The function scans every non-empty cell in the workbook.  If the cell text
-    contains an interrogative or imperative sentence, the cell is recorded as a
-    question.  A neighbouring blank cell (right first, then below) is considered
-    the answer slot when present.
+    Each non-empty cell is examined with spaCy to determine whether it reads
+    like a question or imperative.  For every such cell a context package is
+    assembled consisting of the entire row and a 10×10 rectangle around the
+    cell.  That context is provided, sheet by sheet, to an LLM which selects the
+    most appropriate answer cell.  If the model is unavailable or declines to
+    pick a location, ``answer_cell`` is ``None``.
     """
 
     wb = load_workbook(path, data_only=True)
+
+    # Pre-serialize all sheets so we can present them to the model.
+    sheet_profiles = {ws.title: _sheet_to_json(ws) for ws in wb.worksheets}
+
     schema: List[Dict[str, Any]] = []
 
     for ws in wb.worksheets:
@@ -593,13 +696,18 @@ def extract_schema_from_xlsx(
                     continue
                 if not _spacy_is_question_or_imperative(text):
                     continue
-                answer = _find_adjacent_blank(
-                    ws, cell.row, cell.column, debug=debug
-                )
-                if debug:
-                    print(
-                        f"  Found question at {cell.coordinate} -> {answer or 'None'}"
-                    )
+
+                qctx = _question_context(ws, cell)
+                answer: Optional[str] = None
+                for sheet_name, profile in sheet_profiles.items():
+                    if debug:
+                        print(f"    LLM scan against sheet '{sheet_name}'")
+                    chosen = _llm_find_answer_cell(qctx, profile, model=model)
+                    if chosen:
+                        answer = chosen
+                        if debug:
+                            print(f"      -> chose {sheet_name}!{chosen}")
+                        break
                 schema.append(
                     {
                         "sheet": ws.title,

@@ -1,0 +1,6 @@
+You are given a question cell with surrounding context and a worksheet's cell
+layout. Decide which cell in the sheet should hold the answer.
+Return a JSON object with a single key `answer_cell` set to the cell address
+(e.g. "B12"). Use `null` if no suitable answer location exists.
+
+{{data}}
