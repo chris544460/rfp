@@ -1,4 +1,6 @@
 from datetime import datetime
+from typing import Optional
+
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
@@ -36,7 +38,7 @@ def add_comment_to_run(
     comment_text,
     author="RFPBot",
     bold_prefix=None,
-    source_file: str | None = None,
+    source_file: Optional[str] = None,
 ):
     part = ensure_comments_part(document)
 
