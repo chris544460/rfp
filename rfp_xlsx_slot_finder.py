@@ -25,8 +25,7 @@ EXCEL_MODEL = os.getenv(
 
 # Load spaCy model once at import time.  We prefer ``en_core_web_sm`` but fall
 # back to a blank English pipeline if the model is unavailable.  The blank
-# model still provides tokenization which is sufficient for our simple
-# heuristics.
+# model still provides tokenization which is sufficient for our simple checks.
 try:  # pragma: no cover - exercised implicitly during import
     _NLP = spacy.load("en_core_web_sm")
 except Exception:  # pragma: no cover - missing model
@@ -61,12 +60,6 @@ def _color_to_hex(color: Optional[Color]) -> Optional[str]:
     return rgb
 
 
-QUESTION_PHRASES = (
-    "please describe", "please provide", "explain", "detail", "outline",
-    "how do you", "how will you", "what is your", "what are your", "do you",
-    "can you", "does your", "have you", "who", "when", "where", "why", "which"
-)
-
 # Basic question words used by the spaCy based detector.  These cover common
 # English interrogatives.
 QUESTION_WORDS = {
@@ -80,29 +73,12 @@ QUESTION_WORDS = {
 }
 
 
-def _looks_like_question_text(t: str) -> bool:
-    raw = (t or "").strip()
-    if not raw:
-        return False
-    if "?" in raw:
-        return True
-    low = raw.lower()
-    if any(low.startswith(p) for p in QUESTION_PHRASES):
-        return True
-    if any(p in low for p in QUESTION_PHRASES):
-        return True
-    if low.startswith(("question:", "prompt:", "rfp question:")):
-        return True
-    return False
-
-
 def _spacy_is_question_or_imperative(text: str) -> bool:
     """Use spaCy to flag interrogative or imperative sentences.
 
-    The heuristic checks each sentence in the text.  A sentence is considered a
-    question if it ends with ``?`` or contains a question word.  Imperatives are
-    detected when the sentence root has ``Mood=Imp`` or the first token is a
-    bare verb (``tag_`` == ``VB``).
+    Each sentence is checked and considered a question if it ends with ``?`` or
+    contains a question word.  Imperatives are detected when the sentence root
+    has ``Mood=Imp`` or the first token is a bare verb (``tag_`` == ``VB``).
     """
 
     doc = _NLP(text)
@@ -125,25 +101,6 @@ def _spacy_is_question_or_imperative(text: str) -> bool:
         if root.tag_ == "VB" and first is root:
             return True
     return False
-
-
-def _is_blank_cell(cell) -> bool:
-    v = cell.value
-    if v is None:
-        return True
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return True
-        if re.fullmatch(r"_+\s*", s):
-            return True
-        if re.fullmatch(r"\[(?:insert|enter|provide)[^\]]*\]", s.lower()):
-            return True
-    return False
-
-
-def _addr(col_idx: int, row_idx: int) -> str:
-    return f"{get_column_letter(col_idx)}{row_idx}"
 
 
 def _cell_info(cell) -> Dict[str, Any]:
@@ -234,218 +191,6 @@ def _llm_find_answer_cell(question_ctx: Dict[str, Any], sheet: Dict[str, Any], *
     if isinstance(res, dict):
         return res.get("answer_cell")
     return None
-
-
-def _find_adjacent_blank(
-    ws, row: int, col: int, *, debug: bool = False
-) -> Optional[str]:
-    """Return coordinate of a blank cell to the right of ``(row, col)``.
-
-    Earlier heuristic versions also considered the cell below a question as a
-    potential answer slot.  For the simplified spaCy pipeline we only look to
-    the right, matching the typical question/answer table layout and the
-    expectations in our tests.
-
-    When ``debug`` is true, a message describing the neighbour check is printed
-    so callers can trace how the answer cell was chosen.
-    """
-
-    right = ws.cell(row, col + 1)
-    if debug:
-        status = "blank" if _is_blank_cell(right) else f"not blank ({right.value!r})"
-        print(f"    Checking right neighbour {right.coordinate}: {status}")
-    if _is_blank_cell(right):
-        return right.coordinate
-    return None
-
-
-def _two_col_header(ws) -> Optional[Tuple[int, int]]:
-    """Return (q_col, a_col) if we detect a 'Question'/'Answer' header row."""
-    if ws.max_row < 2 or ws.max_column < 2:
-        return None
-    # Scan first 5 rows for headers
-    scan_rows = min(ws.max_row, 5)
-    for r in range(1, scan_rows + 1):
-        for c in range(1, ws.max_column):
-            left = (ws.cell(r, c).value or "").strip().lower() if isinstance(ws.cell(r, c).value, str) else str(ws.cell(r, c).value or "").lower()
-            right = (ws.cell(r, c + 1).value or "").strip().lower() if isinstance(ws.cell(r, c + 1).value, str) else str(ws.cell(r, c + 1).value or "").lower()
-            if ("question" in left and "answer" in right) or ("prompt" in left and "response" in right):
-                return (c, c + 1)
-    return None
-
-
-def _extract_schema_from_xlsx_heuristic(path: str, debug: bool = True) -> List[Dict[str, Any]]:
-    """Heuristic XLSX question/answer slot detection.
-
-    This is the original implementation that scans for question cells and
-    adjacent blank cells using pattern matching and positional heuristics.
-    The function is kept for backwards compatibility and as a fallback when
-    the LLM based pipeline is unavailable.
-
-    Parameters
-    ----------
-    path:
-        Path to the workbook on disk.
-    debug:
-        When ``True`` (the default) verbose status messages are printed
-        describing how questions are detected.
-
-    Returns
-    -------
-    list[dict]
-        Each entry contains ``sheet``, ``question_cell``, ``question_text``,
-        ``answer_cell``, ``detector`` and ``confidence`` keys describing a
-        potential question/answer pair.  If no empty answer cell is
-        detected next to a question, an entry is still produced with
-        ``answer_cell`` set to ``None`` so that callers may decide how to
-        handle it downstream.
-    """
-    if debug:
-        print(f"Opening workbook: {path}")
-    wb = load_workbook(path, data_only=True)
-    schema: List[Dict[str, Any]] = []
-
-    for ws in wb.worksheets:
-        if debug:
-            print(f"Scanning sheet '{ws.title}'")
-
-        # 1) Prefer 2‑column Q/A tables with headers
-        two_col = _two_col_header(ws)
-        if two_col:
-            q_col, a_col = two_col
-            if debug:
-                print(f"  Found Q/A header columns {q_col}/{a_col}")
-            # start from the row after the header
-            for r in range(2, ws.max_row + 1):
-                qv = ws.cell(r, q_col).value
-                av = ws.cell(r, a_col).value
-                qtxt = str(qv).strip() if qv is not None else ""
-                if debug:
-                    print(f"    Row {r}: Q='{qtxt}' A='{av}'")
-                if not qtxt:
-                    continue
-                if not _looks_like_question_text(qtxt):
-                    # still allow explicit Q column phrasing
-                    if not re.search(r"[.?]$", qtxt) and not any(p in qtxt.lower() for p in QUESTION_PHRASES):
-                        if debug:
-                            print("      Not a question – skipping")
-                        continue
-                # Record the question even if the answer cell already
-                # contains text so we can surface it to downstream
-                # components.  When the answer cell is blank we point to it;
-                # otherwise ``answer_cell`` is ``None`` and writers should
-                # skip filling.
-                if av is None or (isinstance(av, str) and av.strip() == ""):
-                    if debug:
-                        print(f"      Added slot at {_addr(q_col, r)}->{_addr(a_col, r)}")
-                    schema.append({
-                        "sheet": ws.title,
-                        "question_cell": _addr(q_col, r),
-                        "question_text": qtxt,
-                        "answer_cell": _addr(a_col, r),
-                        "detector": "two_col_header",
-                        "confidence": 0.85,
-                    })
-                else:
-                    if debug:
-                        print(
-                            f"      Answer cell {_addr(a_col, r)} is not blank; recording question without slot"
-                        )
-                    schema.append(
-                        {
-                            "sheet": ws.title,
-                            "question_cell": _addr(q_col, r),
-                            "question_text": qtxt,
-                            "answer_cell": None,
-                            "detector": "two_col_header",
-                            "confidence": 0.5,
-                        }
-                    )
-        elif debug:
-            print("  No two-column header found")
-
-        # 2) Heuristic scan: single question cell with blank neighbor right/below
-        #    (skip rows already captured by the header scan)
-        for r in range(1, ws.max_row + 1):
-            for c in range(1, ws.max_column + 1):
-                cell = ws.cell(r, c)
-                val = cell.value
-                if not isinstance(val, str):
-                    continue
-                txt = val.strip()
-                if not _looks_like_question_text(txt):
-                    continue
-                if debug:
-                    print(f"    Question-like cell {ws.title}:{_addr(c, r)} -> '{txt}'")
-
-                matched = False
-
-                # (a) Prefer right neighbor if blank
-                if c + 1 <= ws.max_column and _is_blank_cell(ws.cell(r, c + 1)):
-                    if debug:
-                        print(f"      Right neighbor {_addr(c+1, r)} is blank")
-                    schema.append({
-                        "sheet": ws.title,
-                        "question_cell": _addr(c, r),
-                        "question_text": txt,
-                        "answer_cell": _addr(c + 1, r),
-                        "detector": "right_blank",
-                        "confidence": 0.75,
-                    })
-                    matched = True
-
-                # (b) Otherwise choose cell below if blank
-                elif r + 1 <= ws.max_row and _is_blank_cell(ws.cell(r + 1, c)):
-                    if debug:
-                        print(f"      Below neighbor {_addr(c, r+1)} is blank")
-                    schema.append({
-                        "sheet": ws.title,
-                        "question_cell": _addr(c, r),
-                        "question_text": txt,
-                        "answer_cell": _addr(c, r + 1),
-                        "detector": "below_blank",
-                        "confidence": 0.7,
-                    })
-                    matched = True
-
-                # (c) Inline pairs like "Question:" in one cell and "Answer:" next cell
-                elif c + 1 <= ws.max_column:
-                    nxt = ws.cell(r, c + 1).value
-                    if isinstance(nxt, str) and nxt.strip() == "":
-                        if debug:
-                            print(f"      Inline pair with empty cell {_addr(c+1, r)}")
-                        schema.append({
-                            "sheet": ws.title,
-                            "question_cell": _addr(c, r),
-                            "question_text": txt,
-                            "answer_cell": _addr(c + 1, r),
-                            "detector": "inline_pair",
-                            "confidence": 0.65,
-                        })
-                        matched = True
-
-                if not matched:
-                    if debug:
-                        print(
-                            "      No adjacent blank cell found; recording question without answer slot"
-                        )
-                    schema.append(
-                        {
-                            "sheet": ws.title,
-                            "question_cell": _addr(c, r),
-                            "question_text": txt,
-                            "answer_cell": None,
-                            "detector": "question_only",
-                            "confidence": 0.5,
-                        }
-                    )
-
-        if debug:
-            print(f"Finished sheet '{ws.title}', total slots: {len(schema)}")
-
-    if debug:
-        print(f"Done. Found {len(schema)} slots")
-    return schema
 
 
 # ---------------------------------------------------------------------------
