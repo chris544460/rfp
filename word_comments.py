@@ -62,6 +62,8 @@ def add_comment_to_run(
         r2_pr.append(b2)
         r2.append(r2_pr)
         t2 = OxmlElement("w:t")
+        # preserve trailing space in Source File text
+        t2.set(qn("xml:space"), "preserve")
         t2.text = "Source File: "
         r2.append(t2)
         p.append(r2)
