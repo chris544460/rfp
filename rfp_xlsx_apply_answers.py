@@ -26,18 +26,19 @@ def _sanitize_comment_text(text: str) -> str:
     return clean
 
 
-def _to_text_and_citations(ans: object) -> tuple[str, Dict[str, str]]:
-    """Normalize answer objects to (text, {cit_num -> snippet})."""
+def _to_text_and_citations(ans: object) -> tuple[str, Dict[str, object]]:
+    """Normalize answer objects to (text, {cit_num -> data})."""
     if isinstance(ans, dict):
         text = str(ans.get("text", ""))
         raw = ans.get("citations") or {}
-        cits: Dict[str, str] = {}
+        cits: Dict[str, object] = {}
         for k, v in raw.items():
             key = str(k)
             if isinstance(v, dict):
-                cits[key] = v.get("text") or v.get("snippet") or v.get("content") or str(v)
+                snippet = v.get("text") or v.get("snippet") or v.get("content") or ""
+                cits[key] = {"text": str(snippet), "source_file": v.get("source_file")}
             else:
-                cits[key] = str(v)
+                cits[key] = {"text": str(v)}
         return text, cits
     return str(ans or ""), {}
 
@@ -147,7 +148,18 @@ def write_excel_answers(
                 )
             else:
                 try:
-                    parts = [f"[{k}] Source Text: {v}" for k, v in citations.items()]
+                    parts = []
+                    for k, v in citations.items():
+                        if isinstance(v, dict):
+                            txt = v.get("text") or ""
+                            src = v.get("source_file")
+                        else:
+                            txt = str(v)
+                            src = None
+                        part = f"[{k}] Source Text: {txt}"
+                        if src:
+                            part += f"\nSource File: {src}"
+                        parts.append(part)
                     comment_txt = _sanitize_comment_text("\n\n".join(parts))
                     if comment_txt:
                         cell.comment = Comment(comment_txt, "RFPBot")
@@ -175,9 +187,18 @@ def write_excel_answers(
                         p.add_run(t[pos:match.start()])
                     num = match.group(1)
                     run = p.add_run(match.group(0))
-                    snippet = cits.get(num) or cits.get(int(num)) or cits.get(str(num))
+                    data = cits.get(num) or cits.get(int(num)) or cits.get(str(num))
+                    snippet = None
+                    src_file = None
+                    if isinstance(data, dict):
+                        snippet = data.get("text") or data.get("snippet") or data.get("content")
+                        src_file = data.get("source_file")
+                    elif data is not None:
+                        snippet = str(data)
                     if snippet:
-                        add_comment_to_run(doc, run, str(snippet), bold_prefix="Source Text: ")
+                        add_comment_to_run(
+                            doc, run, str(snippet), bold_prefix="Source Text: ", source_file=src_file
+                        )
                     pos = match.end()
                 if pos < len(t):
                     p.add_run(t[pos:])

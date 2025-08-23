@@ -37,7 +37,9 @@ def _format_with_or_without_comments(ans: str, cmts):
     """Return answer text plus optional citation metadata."""
     if INCLUDE_COMMENTS:
         # cmts: List[(label(str-no-brackets), src, snippet, score, date)]
-        citations = {i + 1: c[2] for i, c in enumerate(cmts)}  # map 1→snippet, 2→snippet …
+        citations = {
+            i + 1: {"text": c[2], "source_file": c[1]} for i, c in enumerate(cmts)
+        }
         return {"text": ans, "citations": citations}
     # strip [n] if comments are off
     return re.sub(r"\[\d+\]", "", ans)

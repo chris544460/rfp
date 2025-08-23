@@ -31,4 +31,4 @@ def test_gen_answer_returns_text(monkeypatch):
     monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
     res = my_module.gen_answer("Which option?", ["Option1", "Option2"])
     assert res["text"] == "The correct answer is: Option1. A. Because it's correct [1]"
-    assert res["citations"] == {1: "snippet"}
+    assert res["citations"] == {1: {"text": "snippet", "source_file": "src.txt"}}
