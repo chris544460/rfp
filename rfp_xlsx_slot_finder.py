@@ -139,16 +139,24 @@ def _addr(col_idx: int, row_idx: int) -> str:
     return f"{get_column_letter(col_idx)}{row_idx}"
 
 
-def _find_adjacent_blank(ws, row: int, col: int) -> Optional[str]:
+def _find_adjacent_blank(
+    ws, row: int, col: int, *, debug: bool = False
+) -> Optional[str]:
     """Return coordinate of a blank cell to the right of ``(row, col)``.
 
     Earlier heuristic versions also considered the cell below a question as a
     potential answer slot.  For the simplified spaCy pipeline we only look to
     the right, matching the typical question/answer table layout and the
     expectations in our tests.
+
+    When ``debug`` is true, a message describing the neighbour check is printed
+    so callers can trace how the answer cell was chosen.
     """
 
     right = ws.cell(row, col + 1)
+    if debug:
+        status = "blank" if _is_blank_cell(right) else f"not blank ({right.value!r})"
+        print(f"    Checking right neighbour {right.coordinate}: {status}")
     if _is_blank_cell(right):
         return right.coordinate
     return None
@@ -533,9 +541,24 @@ def _llm_score_and_assign(
             merged["answer_cell"] = merged.pop("cell")
         qid = merged.get("question_id") or merged.get("question_cell")
         best = chosen.get(qid)
+        if debug:
+            print(
+                f"  Candidate {slot_id} for {qid}: score={merged.get('score')} cell={merged.get('answer_cell')}"
+            )
+            if best:
+                print(
+                    f"    Current best score={best.get('score')} cell={best.get('answer_cell')}"
+                )
         if not best or merged.get("score", 0) > best.get("score", 0):
+            if debug:
+                action = "replacing best" if best else "initial best"
+                print(f"    -> {action}")
             chosen[qid] = merged
     if debug:
+        for qid, slot in chosen.items():
+            print(
+                f"  Final choice for {qid}: cell={slot.get('answer_cell')} score={slot.get('score')}"
+            )
         print(f"Selected {len(chosen)} final slots")
     return list(chosen.values())
 
@@ -570,7 +593,9 @@ def extract_schema_from_xlsx(
                     continue
                 if not _spacy_is_question_or_imperative(text):
                     continue
-                answer = _find_adjacent_blank(ws, cell.row, cell.column)
+                answer = _find_adjacent_blank(
+                    ws, cell.row, cell.column, debug=debug
+                )
                 if debug:
                     print(
                         f"  Found question at {cell.coordinate} -> {answer or 'None'}"
