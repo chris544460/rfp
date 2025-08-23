@@ -67,13 +67,26 @@ def test_comment_formats_citations(tmp_path):
             "question_text": "Question?",
         }
     ]
-    answers = [{"text": "Ans", "citations": {1: "First", 2: "Second"}}]
+    answers = [{"text": "Ans [1] [2]", "citations": {1: "First", 2: "Second"}}]
     out_path = tmp_path / "out.xlsx"
-    write_excel_answers(schema, answers, str(in_path), str(out_path))
+    comments_path = tmp_path / "comments.docx"
+    write_excel_answers(
+        schema,
+        answers,
+        str(in_path),
+        str(out_path),
+        comments_docx_path=str(comments_path),
+    )
 
     wb2 = openpyxl.load_workbook(out_path)
     c = wb2["Sheet1"]["B1"]
-    assert c.comment is not None
-    txt = c.comment.text
-    assert "[1] First" in txt
-    assert "[2] Second" in txt
+    assert c.comment is None
+
+    import docx
+    from word_comments import ensure_comments_part
+
+    doc = docx.Document(comments_path)
+    part = ensure_comments_part(doc)
+    xml = part._element.xml
+    assert "First" in xml
+    assert "Second" in xml

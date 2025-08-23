@@ -7,11 +7,15 @@ from typing import List, Dict, Any, Optional, Callable
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
 
+import docx
+from word_comments import add_comment_to_run
+
 
 # Excel comments are XML strings and must avoid control characters.
 # Additionally, Excel limits comment text to 32k characters.
 _INVALID_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 _MAX_COMMENT_LEN = 32000
+_CITATION_RE = re.compile(r"\[(\d+)\]")
 
 
 def _sanitize_comment_text(text: str) -> str:
@@ -47,6 +51,7 @@ def write_excel_answers(
     mode: str = "fill",  # "fill" | "replace" | "append"
     generator: Optional[Callable[..., object]] = None,
     include_comments: Optional[bool] = None,  # defaults to env RFP_INCLUDE_COMMENTS
+    comments_docx_path: Optional[str] = None,
 ) -> Dict[str, int]:
     """
     Drop‑in replacement for the old CLI helper. Applies answers into the Excel file.
@@ -59,6 +64,8 @@ def write_excel_answers(
 
     answers[i] can be a string or a dict like:
       {"text": "...", "citations": {1: "snippet", 2: "snippet", ...}}
+    If ``comments_docx_path`` is provided, citation snippets will be written to
+    a separate Word document instead of Excel cell comments.
     """
     inc_comments = (
         (os.getenv("RFP_INCLUDE_COMMENTS", "1") == "1")
@@ -71,6 +78,8 @@ def write_excel_answers(
 
     applied = 0
     skipped = 0
+
+    doc_entries: List[Dict[str, Any]] = []
 
     # Ensure answers aligns with schema (allow None entries and generate if a generator is provided)
     if len(answers) < len(schema):
@@ -120,20 +129,56 @@ def write_excel_answers(
         except Exception:
             pass
 
-        # Put citations into a single Excel comment
+        # Put citations into a single Excel comment or collect for DOCX
         if inc_comments and citations:
-            try:
-                parts = [f"[{k}] {v}" for k, v in citations.items()]
-                comment_txt = _sanitize_comment_text("\n\n".join(parts))
-                if comment_txt:
-                    cell.comment = Comment(comment_txt, "RFPBot")
-            except Exception:
-                pass
+            if comments_docx_path:
+                doc_entries.append(
+                    {
+                        "question": ent.get("question_text") or "",
+                        "text": text,
+                        "citations": citations,
+                    }
+                )
+            else:
+                try:
+                    parts = [f"[{k}] {v}" for k, v in citations.items()]
+                    comment_txt = _sanitize_comment_text("\n\n".join(parts))
+                    if comment_txt:
+                        cell.comment = Comment(comment_txt, "RFPBot")
+                except Exception:
+                    pass
 
         applied += 1
 
     wb.save(out_xlsx_path)
     wb.close()
+
+    if inc_comments and comments_docx_path and doc_entries:
+        try:
+            doc = docx.Document()
+            for entry in doc_entries:
+                q = entry["question"]
+                t = entry["text"]
+                cits = entry["citations"]
+                if q:
+                    doc.add_paragraph(q)
+                p = doc.add_paragraph()
+                pos = 0
+                for match in _CITATION_RE.finditer(t):
+                    if match.start() > pos:
+                        p.add_run(t[pos:match.start()])
+                    num = match.group(1)
+                    run = p.add_run(match.group(0))
+                    snippet = cits.get(num) or cits.get(int(num)) or cits.get(str(num))
+                    if snippet:
+                        add_comment_to_run(doc, run, str(snippet))
+                    pos = match.end()
+                if pos < len(t):
+                    p.add_run(t[pos:])
+            doc.save(comments_docx_path)
+        except Exception:
+            pass
+
     return {"applied": applied, "skipped": skipped, "total": len(schema)}
 
 
