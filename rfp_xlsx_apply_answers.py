@@ -157,7 +157,7 @@ def write_excel_answers(
                             txt = str(v)
                             src = None
                         if src:
-                            part = f"[{k}] Source File: {src}\nSource Text: {txt}"
+                            part = f"[{k}] Source File:\n {src}\n\nSource Text:\n {txt}"
                         else:
                             part = f"[{k}] Source Text: {txt}"
                         parts.append(part)

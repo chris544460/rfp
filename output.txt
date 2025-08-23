@@ -1,0 +1,3385 @@
+=== ./my_module.py ===
+# my_module.py (Utilities-owned generator)
+import os, re, json
+from typing import Optional, List, Dict
+
+from answer_composer import CompletionsClient
+from qa_core import answer_question  # <<— now comes from Utilities core
+from prompts import read_prompt
+
+# Defaults (overridable via env vars)
+MODEL            = os.getenv("OPENAI_MODEL", "gpt-4o")
+SEARCH_MODE      = os.getenv("RFP_SEARCH_MODE", "both")      # "answer"|"question"|"blend"|"dual"|"both"
+K                = int(os.getenv("RFP_K", "6"))
+FUND_TAG         = os.getenv("RFP_FUND_TAG") or None
+MIN_CONFIDENCE   = float(os.getenv("RFP_MIN_CONFIDENCE", "0.0"))
+LENGTH_PRESET    = os.getenv("RFP_LENGTH") or "medium"       # "short"|"medium"|"long"
+APPROX_WORDS_ENV = os.getenv("RFP_APPROX_WORDS")             # if set, overrides LENGTH
+INCLUDE_COMMENTS = os.getenv("RFP_INCLUDE_COMMENTS", "1") == "1"  # "0" to disable
+
+_llm_client = CompletionsClient(model=MODEL)
+
+# Maintain history of previous questions so follow-ups can pull context.
+QUESTION_HISTORY: List[str] = []
+
+# Prompt template for deciding whether a question depends on prior ones.
+FOLLOWUP_PROMPT = read_prompt(
+    "followup_detect",
+    (
+        "Given a current question and a list of previous questions, "
+        "return JSON with keys 'follow_up' (true/false) and 'indices' (list of "
+        "integers of prior questions that provide necessary context)."
+    ),
+)
+
+DEBUG = True
+
+def _format_with_or_without_comments(ans: str, cmts):
+    """Return answer text plus optional citation metadata."""
+    if INCLUDE_COMMENTS:
+        # cmts: List[(label(str-no-brackets), src, snippet, score, date)]
+        citations = {i + 1: c[2] for i, c in enumerate(cmts)}  # map 1→snippet, 2→snippet …
+        return {"text": ans, "citations": citations}
+    # strip [n] if comments are off
+    return re.sub(r"\[\d+\]", "", ans)
+
+
+def _format_mc_answer(ans: str, choices: List[str]) -> str:
+    """Rewrite LLM output so choices are named up front.
+
+    The language model is expected to return JSON of the form::
+
+        {"correct": ["A", ...], "explanations": {"A": "why", ...}}
+
+    This function parses that structure and converts it into a human-readable
+    sentence such as ``"The correct answers are: Option1, Option2."`` followed
+    by per-option explanations (e.g. ``"A. because..."``). If JSON parsing
+    fails, it falls back to a best-effort regex that looks for leading option
+    letters in the raw text.
+    """
+
+    try:
+        data = json.loads(ans)
+        letters = [str(l).strip().upper() for l in data.get("correct", [])]
+        if letters:
+            explanations: Dict[str, str] = data.get("explanations", {}) or {}
+            names: List[str] = []
+            details: List[str] = []
+            for l in letters:
+                idx = ord(l) - ord("A")
+                if 0 <= idx < len(choices):
+                    names.append(choices[idx])
+                    expl = explanations.get(l, "").strip()
+                    if expl:
+                        details.append(f"{l}. {expl}")
+            if names:
+                intro = (
+                    f"The correct answer is: {names[0]}."
+                    if len(names) == 1
+                    else "The correct answers are: " + ", ".join(names) + "."
+                )
+                tail = " ".join(details)
+                return f"{intro} {tail}".strip()
+    except Exception:
+        pass
+
+    # Fallback: look for leading letters in free-form text
+    match = re.match(r"([A-Z](?:\s*,\s*[A-Z])*)[\.\)]\s*", ans)
+    if not match:
+        return ans
+
+    letters = [l.strip() for l in match.group(1).split(",")]
+    explanation = ans[match.end():].lstrip()
+
+    names: List[str] = []
+    for l in letters:
+        idx = ord(l) - ord("A")
+        if 0 <= idx < len(choices):
+            names.append(choices[idx])
+
+    if not names:
+        return ans
+
+    if len(names) == 1:
+        intro = f"The correct answer is: {names[0]}."
+    else:
+        intro = "The correct answers are: " + ", ".join(names) + "."
+
+    return f"{intro} {explanation}" if explanation else intro
+
+def _detect_followup(question: str, history: List[str]) -> List[int]:
+    """Use the LLM to determine which previous questions provide context."""
+    if not history:
+        return []
+    history_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(history))
+    prompt = FOLLOWUP_PROMPT.format(question=question, history=history_block)
+    if DEBUG:
+        print("[my_module] checking if question is follow-up")
+    try:
+        content, _ = _llm_client.get_completion(prompt)
+        data = json.loads(content or "{}")
+    except Exception:
+        return []
+    if not isinstance(data, dict) or not data.get("follow_up"):
+        return []
+    indices = []
+    for i in data.get("indices", []):
+        try:
+            idx = int(i)
+            if 1 <= idx <= len(history):
+                indices.append(idx)
+        except Exception:
+            continue
+    if DEBUG and indices:
+        ctx = " | ".join(history[i - 1] for i in indices)
+        print(
+            f"[my_module] follow-up detected; using context from questions {indices}: {ctx}"
+        )
+    return indices
+
+def gen_answer(
+    question: str,
+    choices: Optional[List[str]] = None,
+    choice_meta: Optional[List[Dict[str, object]]] = None
+):
+    """Generate an answer. Handles both open and multiple-choice questions."""
+    # Determine if this question relies on previous ones
+    indices = _detect_followup(question, QUESTION_HISTORY)
+    question_with_ctx = question
+    if indices:
+        ctx_text = " ".join(QUESTION_HISTORY[i - 1] for i in indices)
+        question_with_ctx = f"{ctx_text}\n\n{question}"
+
+    # Multiple-choice: provide textual explanation with citations
+    if choices:
+        opt_lines = "\n".join(f"{chr(65+i)}. {c}" for i, c in enumerate(choices))
+        mc_question = (
+            f"{question_with_ctx}\n\nOptions:\n{opt_lines}\n\n"
+            "Identify the correct option letter(s). For each correct option, provide a brief explanation "
+            "with citations in square brackets like [1]. Return the result as JSON with keys "
+            "'correct' (list of letters) and 'explanations' (mapping letters to explanations)."
+        )
+        ans, cmts = answer_question(
+            mc_question,
+            SEARCH_MODE,
+            FUND_TAG,
+            K,
+            None,
+            None,
+            MIN_CONFIDENCE,
+            _llm_client,
+        )
+        ans = _format_mc_answer(ans, choices)
+        QUESTION_HISTORY.append(question)
+        return _format_with_or_without_comments(ans, cmts)
+
+    # Free-text: call core QA
+    approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
+    length = None if approx_words is not None else LENGTH_PRESET
+
+    ans, cmts = answer_question(
+        question_with_ctx,
+        SEARCH_MODE,
+        FUND_TAG,
+        K,
+        length,
+        approx_words,
+        MIN_CONFIDENCE,
+        _llm_client,
+    )
+    QUESTION_HISTORY.append(question)
+    return _format_with_or_without_comments(ans, cmts)
+=== ./rfp_docx_slot_finder.py ===
+#!/usr/bin/env python3
+from __future__ import annotations
+# rfp_docx_slot_finder.py
+#
+# Requires environment variables for the chosen framework:
+#   • Framework selection: ANSWER_FRAMEWORK=openai|aladdin
+#   • OpenAI: set OPENAI_API_KEY (and optional OPENAI_MODEL)
+#   • Aladdin: set aladdin_studio_api_key, defaultWebServer, aladdin_user, aladdin_passwd
+
+DEBUG = True
+SHOW_TEXT = False  # when True, print full prompt/completion payloads
+
+# ────────────── Token/cost tracking and pricing map ──────────────
+TOTAL_INPUT_TOKENS = 0
+TOTAL_OUTPUT_TOKENS = 0
+TOTAL_COST_USD = 0.0
+
+# very approximate per‑1K‑token costs in USD (Aug 2025 public pricing)
+# GPT-5 nano: the fastest, cheapest version of GPT-5—great for summarization and classification tasks
+MODEL_PRICING = {
+    # $0.05 input / $0.005 cached input / $0.40 output per million tokens
+    "gpt-5-nano": {"in": 0.00005, "out": 0.0004, "cached_in": 0.000005},
+    "gpt-4o": {"in": 0.005, "out": 0.015},          # $5 / $15 per million
+    "gpt-4o-mini": {"in": 0.003, "out": 0.009},     # hypothetical mini tier
+    "gpt-4o-max": {"in": 0.007, "out": 0.021},      # hypothetical tier
+}
+
+def _record_usage(model: str, usage: Dict[str, int]):
+    """Accumulate token usage and cost into globals."""
+    global TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_COST_USD
+    prompt_toks = usage.get("prompt_tokens", 0)
+    compl_toks = usage.get("completion_tokens", 0)
+    TOTAL_INPUT_TOKENS += prompt_toks
+    TOTAL_OUTPUT_TOKENS += compl_toks
+    price = MODEL_PRICING.get(model, MODEL_PRICING.get("gpt-5-nano"))
+    cost = (prompt_toks / 1000) * price["in"] + (compl_toks / 1000) * price["out"]
+    TOTAL_COST_USD += cost
+    if DEBUG:
+        dbg(f"Cost for call [{model}]: input {prompt_toks} tok, output {compl_toks} tok → ${cost:.6f}")
+
+def dbg(msg: str):
+    if DEBUG:
+        print(f"[DEBUG] {msg}")
+import os, re, json, uuid, argparse
+import sys
+import math
+import asyncio
+from dataclasses import dataclass, asdict
+from typing import List, Optional, Dict, Any, Tuple, Union, Set
+from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
+
+# Load environment variables from a .env file if present
+load_dotenv(override=True)
+
+import docx
+from docx.text.paragraph import Paragraph
+from docx.table import Table
+from docx.oxml.ns import qn
+from answer_composer import CompletionsClient, get_openai_completion
+from prompts import read_prompt
+
+# Framework and model selection
+FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "openai")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+
+
+def _call_llm(prompt: str, json_output: bool = False) -> str:
+    """Call the selected LLM framework and record usage."""
+    if FRAMEWORK == "aladdin":
+        client = CompletionsClient(model=MODEL)
+        resp = client.get_completion(prompt, json_output=json_output)
+    else:
+        resp = get_openai_completion(prompt, MODEL, json_output=json_output)
+    if isinstance(resp, tuple):
+        content, usage = resp
+    else:
+        content, usage = resp, {}
+    try:
+        _record_usage(MODEL, usage)
+    except Exception:
+        pass
+    return content
+
+# ───────────────────────── models ─────────────────────────
+
+@dataclass
+class AnswerLocator:
+    type: str  # "paragraph_after" | "paragraph" | "table_cell"
+    paragraph_index: Optional[int] = None   # for paragraph / paragraph_after
+    offset: int = 0                         # how many paragraphs after the anchor
+    table_index: Optional[int] = None       # for table_cell
+    row: Optional[int] = None
+    col: Optional[int] = None
+
+@dataclass
+class QASlot:
+    id: str
+    question_text: str
+    answer_locator: AnswerLocator
+    answer_type: str = "text"  # text | multiple_choice | file | table | checkbox | multi-select | date | number
+    confidence: float = 0.5
+    meta: Dict[str, Any] = None
+
+# ───────────────────────── utils ─────────────────────────
+
+def _iter_block_items(doc: docx.document.Document):
+    """Yield paragraphs and tables in document order."""
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    parent = doc.element.body
+    for child in parent.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, doc)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, doc)
+
+def _is_blank_para(p: Paragraph) -> bool:
+    t = (p.text or "").strip()
+    if t == "":
+        return True
+    # underscore lines or placeholders like [Insert response]
+    if re.fullmatch(r"_+\s*", t):
+        return True
+    if re.fullmatch(r"\[(?:insert|enter|provide)[^\]]*\]", t.lower()):
+        return True
+    # check if any run is explicitly underlined without real text
+    if any(r.text and r.underline for r in p.runs) and len(t.replace("_","").strip()) == 0:
+        return True
+    return False
+
+QUESTION_PHRASES = (
+    "please describe", "please provide", "explain", "detail", "outline",
+    "how do you", "how will you", "what is your", "what are your", "do you",
+    "can you", "does your", "have you", "who", "when", "where", "why", "which"
+)
+
+# ─────────────────── outline / context helpers ───────────────────
+_ENUM_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:\(?\d+(?:\.\d+)*\)?[.)]?)|"     # 1   1.1   2.3.4   (1)   1)
+    r"(?:[A-Za-z][.)])|"                      # a)   A)   a.   A.
+    r"(?:\([A-Za-z0-9]+\))"                 # (a)  (A)  (i)  (1)
+    r")\s+"
+)
+
+def strip_enum_prefix(text: str) -> str:
+    """Remove a single leading enumeration token like '1.1 ', '(a) ', 'A) '."""
+    return _ENUM_PREFIX_RE.sub("", (text or ""), count=1)
+
+def derive_outline_hint_and_level(text: str):
+    """
+    Return (hint, level) derived from visible enumeration.
+    Examples: '1.1'→('1.1',2) ; '3)'→('3',1) ; '(a)'→('a',1)
+    """
+    t = (text or "").strip()
+    m = re.match(r"^\s*(\d+(?:\.\d+)+)[.)]?\s+", t)
+    if m:
+        num = m.group(1)
+        return num, num.count(".") + 1
+    m = re.match(r"^\s*\(?(\d+)\)?[.)]?\s+", t)
+    if m:
+        return m.group(1), 1
+    m = re.match(r"^\s*\(?([A-Za-z])\)?[.)]?\s+", t)
+    if m:
+        return m.group(1), 1
+    return None, None
+
+def paragraph_level_from_numbering(p: Paragraph):
+    """Return Word automatic numbering level (1‑based) if present."""
+    try:
+        numPr = p._p.pPr.numPr
+        if numPr is None:
+            return None
+        ilvl = numPr.ilvl.val if numPr.ilvl is not None else None
+        if ilvl is None:
+            return None
+        return int(ilvl) + 1
+    except Exception:
+        return None
+
+def heading_chain(blocks, upto_block, max_back=80):
+    """Return list of Heading‑style texts (top→nearest) above a block index."""
+    chain = []
+    for bi in range(max(0, upto_block - max_back), upto_block):
+        b = blocks[bi]
+        if isinstance(b, Paragraph):
+            try:
+                style = (b.style.name or "").lower()
+            except Exception:
+                style = ""
+            if style.startswith("heading"):
+                txt = (b.text or "").strip()
+                if txt:
+                    chain.append(txt)
+    return chain
+
+def _looks_like_question(text: str) -> bool:
+    t_raw = (text or "").strip()
+    if not t_raw:
+        return False
+
+    # Presence of a question mark anywhere is a strong signal
+    if "?" in t_raw:
+        return True
+
+    # Remove enumeration prefix (e.g. '1.1 ', '(a) ') before heuristic checks
+    t = strip_enum_prefix(t_raw).strip()
+    t_lower = t.lower()
+
+    # Question/request cues at the start of the text
+    if any(t_lower.startswith(phrase) for phrase in QUESTION_PHRASES):
+        return True
+
+    # Question/request cues appearing anywhere in the text
+    if any(phrase in t_lower for phrase in QUESTION_PHRASES):
+        return True
+
+    if t_raw.lower().startswith(("question:", "prompt:", "rfp question:")):
+        return True
+
+    # If original had an enumeration token and contains a cue anywhere
+    if _ENUM_PREFIX_RE.match(t_raw) and any(phrase in t_lower for phrase in QUESTION_PHRASES):
+        return True
+
+    return False
+
+def _para_style_name(p: Paragraph) -> str:
+    try:
+        return p.style.name or ""
+    except Exception:
+        return ""
+
+def _table_cell_text(table: Table, r: int, c: int) -> str:
+    try:
+        return (table.cell(r, c).text or "").strip()
+    except Exception:
+        return ""
+
+# ─────────────────── rich extraction helpers (format-aware) ───────────────────
+
+def _run_to_markup(r) -> str:
+    t = (r.text or "")
+    if not t:
+        return ""
+    # Wrap with simple tags to preserve formatting signal
+    if r.underline:
+        t = f"<u>{t}</u>"
+    if r.italic:
+        t = f"<i>{t}</i>"
+    if r.bold:
+        t = f"<b>{t}</b>"
+    return t
+
+def _paragraph_rich_text(p: Paragraph) -> str:
+    if not p.runs:
+        return (p.text or "")
+    parts = []
+    for r in p.runs:
+        parts.append(_run_to_markup(r))
+    return "".join(parts) or (p.text or "")
+
+def _cell_rich_text(cell) -> str:
+    # Join paragraphs inside a cell, preserving run markup
+    lines = []
+    for par in cell.paragraphs:
+        lines.append(_paragraph_rich_text(par))
+    return "\n".join(lines).strip()
+
+def _para_alignment(p: Paragraph) -> str:
+    try:
+        al = p.alignment
+        if al is None:
+            return "NONE"
+        return str(al)  # Enum repr is fine
+    except Exception:
+        return "NONE"
+
+def _para_num_info(p: Paragraph) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Returns (numId, ilvl) if numbering is present, else (None, None).
+    """
+    try:
+        numPr = p._p.pPr.numPr  # type: ignore
+        if numPr is None:
+            return (None, None)
+        numId = numPr.numId.val if numPr.numId is not None else None
+        ilvl = numPr.ilvl.val if numPr.ilvl is not None else None
+        return (numId, ilvl)
+    except Exception:
+        return (None, None)
+
+def _para_indent_info(p: Paragraph) -> Tuple[int, int]:
+    """Return left and first-line indent in points (0 if absent)."""
+    try:
+        pf = p.paragraph_format
+        left = int(pf.left_indent.pt) if pf.left_indent else 0
+        first = int(pf.first_line_indent.pt) if pf.first_line_indent else 0
+        return left, first
+    except Exception:
+        return 0, 0
+
+def _render_rich_excerpt(blocks: List[Union[Paragraph, Table]], start_index: int = 0) -> Tuple[str, Dict[int, int]]:
+    """
+    Produce a linearized, format-aware representation with global block indices.
+    For tables, also return a map {global_block_index -> 0-based table_index}.
+    """
+    lines: List[str] = []
+    table_idx_map: Dict[int, int] = {}
+    running_table_index = 0
+    for gi, b in enumerate(blocks, start=start_index):
+        if isinstance(b, Paragraph):
+            style = _para_style_name(b)
+            align = _para_alignment(b)
+            numId, ilvl = _para_num_info(b)
+            left, first = _para_indent_info(b)
+            raw = b.text or ""
+            leading_ws = len(raw) - len(raw.lstrip(" \t"))
+            rich = _paragraph_rich_text(b)
+            lines.append(
+                f"B[{gi}] PARAGRAPH style='{style}' align={align} numId={numId} ilvl={ilvl} "
+                f"left={left} first={first} leading_ws={leading_ws}"
+            )
+            lines.append(f"B[{gi}] TEXT: {rich if rich else raw}")
+        elif isinstance(b, Table):
+            # Table header line
+            try:
+                rows = len(b.rows)
+                cols = len(b.columns)
+            except Exception:
+                rows, cols = 0, 0
+            table_idx_map[gi] = running_table_index
+            lines.append(f"B[{gi}] TABLE rows={rows} cols={cols} (table_index={running_table_index})")
+            for r in range(rows):
+                row_line = []
+                for c in range(cols):
+                    try:
+                        cell_text = _cell_rich_text(b.cell(r, c))
+                    except Exception:
+                        cell_text = ""
+                    lines.append(f"B[{gi}] [{r},{c}] TEXT: {cell_text}")
+            running_table_index += 1
+    excerpt = "\n".join(lines)
+    return excerpt, table_idx_map
+
+
+def _render_structured_excerpt(blocks: List[Union[Paragraph, Table]], start_index: int = 0) -> str:
+    """Return JSON string describing blocks for precise LLM inspection."""
+    items: List[Dict[str, Any]] = []
+    for gi, b in enumerate(blocks, start=start_index):
+        if isinstance(b, Paragraph):
+            style = _para_style_name(b)
+            numId, ilvl = _para_num_info(b)
+            left, first = _para_indent_info(b)
+            items.append(
+                {
+                    "index": gi,
+                    "type": "paragraph",
+                    "text": b.text or "",
+                    "style": style,
+                    "numId": numId,
+                    "ilvl": ilvl,
+                    "left": left,
+                    "first": first,
+                }
+            )
+        elif isinstance(b, Table):
+            try:
+                rows = len(b.rows)
+                cols = len(b.columns)
+            except Exception:
+                rows, cols = 0, 0
+            cells: List[Dict[str, Any]] = []
+            for r in range(rows):
+                for c in range(cols):
+                    try:
+                        cell_text = _cell_rich_text(b.cell(r, c))
+                    except Exception:
+                        cell_text = ""
+                    cells.append({"r": r, "c": c, "text": cell_text})
+            items.append(
+                {
+                    "index": gi,
+                    "type": "table",
+                    "rows": rows,
+                    "cols": cols,
+                    "cells": cells,
+                }
+            )
+    return json.dumps({"blocks": items}, ensure_ascii=False)
+
+# ─────────────────── answer-type heuristics ───────────────────
+
+_FILE_KWS = (
+    "attach",
+    "attachment",
+    "upload",
+    "enclose",
+    "file",
+    "document",
+)
+_TABLE_KWS = (
+    "table",
+    "spreadsheet",
+    "complete the table",
+    "fill in the table",
+    "table below",
+)
+_MC_KWS = (
+    "select",
+    "choose",
+    "check the box",
+    "checkbox",
+    "tick",
+    "multiple choice",
+    "which of the following",
+)
+_CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
+
+
+def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
+    """Use an LLM to guess multiple-choice options when heuristics fail."""
+    if FRAMEWORK == "openai":
+        if not os.getenv("OPENAI_API_KEY"):
+            dbg("llm_extract_mc_choices unavailable: missing OPENAI_API_KEY")
+            return []
+    elif FRAMEWORK == "aladdin":
+        required = [
+            "aladdin_studio_api_key",
+            "defaultWebServer",
+            "aladdin_user",
+            "aladdin_passwd",
+        ]
+        missing = [v for v in required if not os.getenv(v)]
+        if missing:
+            dbg(
+                "llm_extract_mc_choices unavailable: missing environment variables for aladdin: "
+                + ", ".join(missing)
+            )
+            return []
+    else:
+        dbg(f"llm_extract_mc_choices unavailable: unsupported framework {FRAMEWORK}")
+        return []
+
+    question = ""
+    if isinstance(blocks[q_block], Paragraph):
+        question = blocks[q_block].text or ""
+    dbg(f"llm_extract_mc_choices for q_block {q_block}: '{question}'")
+
+    following: List[str] = []
+    for nb in blocks[q_block + 1 : q_block + 10]:
+        if isinstance(nb, Paragraph):
+            txt = nb.text or ""
+            if _looks_like_question(txt):
+                break
+            following.append(txt)
+        else:
+            break
+    context = "\n".join(following)
+    dbg(f"Context lines after question: {len(following)}")
+
+    template = read_prompt("mc_llm_scan")
+    prompt = template.format(question=question, context=context)
+    if SHOW_TEXT:
+        print("\n--- PROMPT (llm_extract_mc_choices) ---")
+        print(prompt)
+        print("--- END PROMPT ---\n")
+    try:
+        resp = _call_llm(prompt, json_output=True)
+        if SHOW_TEXT:
+            print("\n--- COMPLETION (llm_extract_mc_choices) ---")
+            print(resp)
+            print("--- END COMPLETION ---\n")
+        options = json.loads(resp)
+        dbg(f"LLM suggested options: {options}")
+    except Exception as e:
+        dbg(f"llm_extract_mc_choices error: {e}")
+        return []
+
+    if not isinstance(options, list):
+        dbg("LLM response was not a list of options")
+        return []
+
+    choices: List[Dict[str, object]] = []
+    for opt in options:
+        if not isinstance(opt, str):
+            continue
+        # try to locate paragraph containing this option text
+        opt_low = opt.lower()
+        for offset, nb in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
+            if not isinstance(nb, Paragraph):
+                break
+            nb_text = nb.text or ""
+            if _looks_like_question(nb_text):
+                break
+            if opt_low in nb_text.lower():
+                choices.append({"text": opt.strip(), "prefix": "", "block_index": q_block + offset})
+                dbg(
+                    f"Matched option '{opt.strip()}' to block {q_block + offset}"
+                )
+                break
+    dbg(f"Final choices from LLM: {choices}")
+    return choices
+
+
+def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
+    """Collect multiple choice options appearing after the question block.
+
+    Each choice is returned as a dict with:
+      - text:       cleaned option text
+      - prefix:     leading marker/prefix (checkbox, enumeration, etc.)
+      - block_index:index of the paragraph containing the option
+    """
+    choices: List[Dict[str, object]] = []
+    for offset, nb in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
+        if not isinstance(nb, Paragraph):
+            break
+        txt = (nb.text or "").strip()
+        if not txt:
+            continue
+        if _looks_like_question(txt):
+            # Stop before we spill into the next question's territory
+            break
+        prefix = ""
+        cleaned = txt
+        if any(ch in txt for ch in _CHECKBOX_CHARS):
+            m = re.match(rf"^[{_CHECKBOX_CHARS}]\s*", txt)
+            if m:
+                prefix = m.group(0)
+                cleaned = txt[m.end():].strip()
+        elif re.match(r"^\(\s*\)\s*", txt):
+            m = re.match(r"^\(\s*\)\s*", txt)
+            prefix = m.group(0)
+            cleaned = txt[m.end():].strip()
+        elif re.match(r"^\[\s*\]\s*", txt):
+            m = re.match(r"^\[\s*\]\s*", txt)
+            prefix = m.group(0)
+            cleaned = txt[m.end():].strip()
+        elif re.match(_ENUM_PREFIX_RE, txt):
+            m = _ENUM_PREFIX_RE.match(txt)
+            if m:
+                prefix = m.group(0)
+                cleaned = txt[m.end():].strip()
+        else:
+            break
+        choices.append({
+            "text": cleaned,
+            "prefix": prefix,
+            "block_index": q_block + offset,
+        })
+    if not choices:
+        dbg("Heuristic MC extraction found no choices; invoking LLM")
+        choices = llm_extract_mc_choices(blocks, q_block)
+        dbg(f"LLM returned choices: {choices}")
+    return choices
+
+
+def llm_infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]], q_block: int) -> str:
+    """Use an LLM to classify the expected answer type for a question."""
+    if FRAMEWORK == "openai":
+        if not os.getenv("OPENAI_API_KEY"):
+            dbg("llm_infer_answer_type unavailable: missing OPENAI_API_KEY")
+            return "text"
+    elif FRAMEWORK == "aladdin":
+        required = [
+            "aladdin_studio_api_key",
+            "defaultWebServer",
+            "aladdin_user",
+            "aladdin_passwd",
+        ]
+        missing = [v for v in required if not os.getenv(v)]
+        if missing:
+            dbg(
+                "llm_infer_answer_type unavailable: missing environment variables for aladdin: "
+                + ", ".join(missing)
+            )
+            return "text"
+    else:
+        dbg(f"llm_infer_answer_type unavailable: unsupported framework {FRAMEWORK}")
+        return "text"
+
+    context_lines: List[str] = []
+    for nb in blocks[max(0, q_block - 2) : q_block]:
+        if isinstance(nb, Paragraph):
+            context_lines.append(nb.text or "")
+    for nb in blocks[q_block + 1 : q_block + 10]:
+        if isinstance(nb, Paragraph):
+            txt = nb.text or ""
+            if _looks_like_question(txt):
+                break
+            context_lines.append(txt)
+        else:
+            break
+    context = "\n".join(context_lines)
+
+    template = read_prompt("answer_type_llm_scan")
+    prompt = template.format(question=question_text, context=context)
+    if SHOW_TEXT:
+        print("\n--- PROMPT (llm_infer_answer_type) ---")
+        print(prompt)
+        print("--- END PROMPT ---\n")
+    try:
+        resp = _call_llm(prompt)
+        if SHOW_TEXT:
+            print("\n--- COMPLETION (llm_infer_answer_type) ---")
+            print(resp)
+            print("--- END COMPLETION ---\n")
+        atype = resp.strip().lower()
+        if atype in {"text", "multiple_choice", "file", "table"}:
+            return atype
+    except Exception as e:
+        dbg(f"llm_infer_answer_type error: {e}")
+    return "text"
+
+
+def infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]], q_block: int) -> str:
+    """Guess the expected answer format for a question.
+
+    The heuristic uses keywords in the question text and looks ahead a few
+    blocks to inspect formatting cues such as checkboxes or tables. If the
+    heuristics are inconclusive, an LLM is consulted using nearby context.
+    """
+
+    t = (question_text or "").strip().lower()
+    # Keyword-based checks first
+    if any(kw in t for kw in _FILE_KWS):
+        return "file"
+    if any(kw in t for kw in _TABLE_KWS):
+        return "table"
+    if any(kw in t for kw in _MC_KWS):
+        return "multiple_choice"
+
+    # Look ahead at subsequent blocks for visual cues
+    for nb in blocks[q_block + 1 : q_block + 6]:
+        if isinstance(nb, Table):
+            try:
+                if len(nb.rows) > 1 and len(nb.columns) > 1:
+                    return "table"
+            except Exception:
+                pass
+            break
+        elif isinstance(nb, Paragraph):
+            txt = (nb.text or "").strip()
+            if _looks_like_question(txt):
+                break
+            low = txt.lower()
+            if any(ch in txt for ch in _CHECKBOX_CHARS):
+                return "multiple_choice"
+            if re.search(r"\[[x ]\]|\([x ]\)", txt):
+                return "multiple_choice"
+            if re.match(_ENUM_PREFIX_RE, txt) and not _looks_like_question(txt):
+                return "multiple_choice"
+            if "yes" in low and "no" in low and len(low.split()) <= 4:
+                return "multiple_choice"
+        else:
+            break
+    return llm_infer_answer_type(question_text, blocks, q_block)
+
+# ─────────────────── rule-based detectors ───────────────────
+
+def detect_para_question_with_blank(blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
+    slots: List[QASlot] = []
+    p_index = -1  # count paragraphs so we can locate
+    for i, b in enumerate(blocks):
+        if isinstance(b, Paragraph):
+            p_index += 1
+            text = (b.text or "").strip()
+            if not _looks_like_question(text):
+                continue
+
+            # Look ahead up to 3 blocks for blank area or underscores or a 1x1 empty table
+            conf_base = 0.6
+            style = _para_style_name(b)
+            if "Question" in style:
+                conf_base += 0.1
+
+            # 1) blank paragraphs
+            for j in range(1, 4):
+                if i + j >= len(blocks):
+                    break
+                nb = blocks[i + j]
+                if isinstance(nb, Paragraph):
+                    nb_text = (nb.text or "").strip()
+                    if _looks_like_question(nb_text):
+                        break
+                    if _is_blank_para(nb):
+                        lvl_num = paragraph_level_from_numbering(b)
+                        hint, hint_level = derive_outline_hint_and_level(text)
+                        ctx_level = lvl_num or hint_level
+                        slots.append(QASlot(
+                            id=f"slot_{uuid.uuid4().hex[:8]}",
+                            question_text=text,
+                            answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
+                            answer_type=infer_answer_type(text, blocks, i),
+                            confidence=min(0.95, conf_base + 0.2),
+                            meta={
+                                "detector": "para_blank_after",
+                                "q_paragraph_index": p_index,
+                                "q_block": i,
+                                "q_style": style,
+                                "outline": {"level": ctx_level, "hint": hint}
+                            }
+                        ))
+                        break
+                if isinstance(nb, Table):
+                    try:
+                        if len(nb.rows) == 1 and len(nb.columns) == 1:
+                            cell_text = (nb.cell(0, 0).text or "").strip()
+                            if cell_text == "":
+                                t_idx = _running_table_index(blocks, i + j)
+                                lvl_num = paragraph_level_from_numbering(b)
+                                hint, hint_level = derive_outline_hint_and_level(text)
+                                ctx_level = lvl_num or hint_level
+                                slots.append(QASlot(
+                                    id=f"slot_{uuid.uuid4().hex[:8]}",
+                                    question_text=text,
+                                    answer_locator=AnswerLocator(
+                                        type="table_cell", table_index=t_idx, row=0, col=0
+                                    ),
+                                    answer_type=infer_answer_type(text, blocks, i),
+                                    confidence=min(0.9, conf_base + 0.15),
+                                    meta={
+                                        "detector": "para_then_empty_1x1_table",
+                                        "q_paragraph_index": p_index,
+                                        "q_block": i,
+                                        "outline": {"level": ctx_level, "hint": hint}
+                                    }
+                                ))
+                                break
+                    except Exception:
+                        pass
+    return slots
+
+def _running_table_index(blocks: List[Union[Paragraph, Table]], upto: int) -> int:
+    """Return table index counting from 0 in document order up to position `upto`."""
+    t = 0
+    for k, b in enumerate(blocks[:upto+1]):
+        if isinstance(b, Table):
+            if k == upto:
+                return t
+            t += 1
+    return t
+
+def detect_two_col_table_q_blank(blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
+    slots: List[QASlot] = []
+    table_counter = -1
+    for i, b in enumerate(blocks):
+        if isinstance(b, Table):
+            table_counter += 1
+            if len(b.columns) != 2:
+                continue
+            # Header detection
+            header_left = _table_cell_text(b, 0, 0).lower()
+            header_right = _table_cell_text(b, 0, 1).lower()
+            has_header = any(k in header_left for k in ("question", "prompt")) or any(k in header_right for k in ("answer", "response"))
+            start_row = 1 if has_header else 0
+
+            for r in range(start_row, len(b.rows)):
+                left = _table_cell_text(b, r, 0)
+                right = _table_cell_text(b, r, 1)
+                if not left:
+                    continue
+                # Question-like left, empty right
+                if _looks_like_question(left) and right == "":
+                    conf = 0.8 if has_header else 0.7
+                    slots.append(QASlot(
+                        id=f"slot_{uuid.uuid4().hex[:8]}",
+                        question_text=left.strip(),
+                        answer_locator=AnswerLocator(type="table_cell", table_index=table_counter, row=r, col=1),
+                        answer_type=infer_answer_type(left, blocks, i),
+                        confidence=conf,
+                        meta={"detector": "table_2col_q_left_blank_right", "has_header": has_header}
+                    ))
+    return slots
+
+def detect_response_label_then_blank(blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
+    slots: List[QASlot] = []
+    p_index = -1
+    for i, b in enumerate(blocks):
+        if isinstance(b, Paragraph):
+            p_index += 1
+            t = (b.text or "").strip()
+            # Match patterns like "Response:" or "Answer:"
+            if re.match(r"^(Response|Answer)\s*:\s*$", t, flags=re.IGNORECASE):
+                # backtrack to find nearest prior question paragraph within 3 items
+                q_text, q_idx = None, None
+                back_p_idx = p_index
+                for k in range(1, 4):
+                    j = i - k
+                    if j < 0: break
+                    prev = blocks[j]
+                    if isinstance(prev, Paragraph):
+                        back_p_idx -= 1
+                        if _looks_like_question((prev.text or "").strip()):
+                            q_text = (prev.text or "").strip()
+                            q_idx = back_p_idx
+                            break
+                # look forward to find first blank paragraph
+                if q_text is not None:
+                    for j in range(1, 4):
+                        if i + j >= len(blocks): break
+                        nb = blocks[i + j]
+                        if isinstance(nb, Paragraph):
+                            nb_text = (nb.text or "").strip()
+                            if _looks_like_question(nb_text):
+                                break
+                            if _is_blank_para(nb):
+                                lvl_num = paragraph_level_from_numbering(prev) if isinstance(prev, Paragraph) else None
+                                hint, hint_level = derive_outline_hint_and_level(q_text)
+                                ctx_level = lvl_num or hint_level
+                                slots.append(QASlot(
+                                    id=f"slot_{uuid.uuid4().hex[:8]}",
+                                    question_text=q_text,
+                                    answer_locator=AnswerLocator(type="paragraph", paragraph_index=p_index + j),
+                                    answer_type=infer_answer_type(q_text, blocks, i - k),
+                                    confidence=0.75,
+                                    meta={
+                                        "detector": "response_label_then_blank",
+                                        "q_paragraph_index": q_idx,
+                                        "q_block": (i - k),
+                                        "outline": {"level": ctx_level, "hint": hint}
+                                    }
+                                ))
+                                break
+    return slots
+
+# ─────────────────── optional LLM refiner ───────────────────
+
+USE_LLM = True  # default is ON; can be disabled with --no-ai
+
+def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
+    """
+    Stub that could call an LLM to confirm/adjust low-confidence slots.
+    Keep as no-op unless USE_LLM=True and you implement it.
+    """
+    if not USE_LLM:
+        return slots
+
+    refined: List[QASlot] = []
+    for s, ctx in zip(slots, context_windows):
+        if s.confidence >= 0.8:
+            refined.append(s)
+            continue
+        template = read_prompt("docx_llm_refine")
+        prompt = template.format(ctx=ctx)
+        try:
+            content = _call_llm(prompt, json_output=True)
+            if SHOW_TEXT:
+                print("\n--- PROMPT (llm_refine) ---")
+                print(prompt)
+                print("--- COMPLETION (llm_refine) ---")
+                print(content)
+                print("--- END COMPLETION ---\n")
+            js = json.loads(content)
+            if js.get("is_question"):
+                s.confidence = max(s.confidence, 0.85)
+        except Exception:
+            pass
+        refined.append(s)
+    return refined
+
+# ─────────────────── LLM paragraph‑scan fallback ───────────────────
+
+def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -> List[QASlot]:
+    """If rule‑based detectors find nothing, let an LLM propose Q→A blanks."""
+    excerpt, table_idx_map = _render_rich_excerpt(blocks)
+    dbg(f"llm_scan_blocks (rich): {len(excerpt)} chars, model={model}")
+    dbg(f"Sending prompt to LLM (first 400 chars): {excerpt[:400]}...")
+
+    template = read_prompt("docx_llm_scan_blocks")
+    prompt = template.format(doc=excerpt)
+    if SHOW_TEXT:
+        print("\n--- PROMPT (llm_scan_blocks) ---")
+        print(prompt)
+        print("--- END PROMPT ---\n")
+    try:
+        content = _call_llm(
+            prompt,
+            json_output=True,
+        )
+        js = json.loads(content)
+        cand = js.get("slots", []) or []
+        if SHOW_TEXT:
+            print("\n--- COMPLETION (llm_scan_blocks) ---")
+            print(content)
+            print("--- END COMPLETION ---\n")
+        dbg(f"LLM returned {len(cand)} slot candidates")
+        dbg(f"LLM raw slot candidates: {cand}")
+    except Exception as e:
+        dbg(f"LLM error: {e}")
+        return []
+
+    results: List[QASlot] = []
+    for it in cand:
+        dbg(f"Processing candidate: {it}")
+        try:
+            kind = (it.get("kind") or "").strip()
+            if kind == "paragraph_after":
+                q_block = int(it["question"]["block"])
+                offset = max(1, min(3, int(it["answer"]["offset"])))
+                # derive question text if possible
+                if 0 <= q_block < len(blocks) and isinstance(blocks[q_block], Paragraph):
+                    q_text = (blocks[q_block].text or "").strip()
+                else:
+                    q_text = ""
+                results.append(QASlot(
+                    id=f"slot_{uuid.uuid4().hex[:8]}",
+                    question_text=q_text,
+                    answer_locator=AnswerLocator(type="paragraph_after", paragraph_index=q_block, offset=offset),
+                    answer_type=infer_answer_type(q_text, blocks, q_block),
+                    confidence=0.6,
+                    meta={"detector": "llm_rich", "block": q_block, "offset": offset}
+                ))
+                dbg(f"Appended slot from candidate: {results[-1]}")
+            elif kind == "table_cell":
+                q_block = int(it["question"]["block"])
+                qr = int(it["question"]["row"])
+                qc = int(it["question"]["col"])
+                ab = int(it["answer"]["block"])
+                ar = int(it["answer"]["row"])
+                ac = int(it["answer"]["col"])
+                # table index mapping
+                t_index = table_idx_map.get(q_block)
+                if t_index is None:
+                    # if the model referenced a table block incorrectly, skip
+                    continue
+                # derive question text if possible
+                q_text = ""
+                try:
+                    tbl = blocks[q_block]
+                    if isinstance(tbl, Table):
+                        q_text = (tbl.cell(qr, qc).text or "").strip()
+                except Exception:
+                    pass
+                results.append(QASlot(
+                    id=f"slot_{uuid.uuid4().hex[:8]}",
+                    question_text=q_text,
+                    answer_locator=AnswerLocator(type="table_cell", table_index=t_index, row=ar, col=ac),
+                    answer_type=infer_answer_type(q_text, blocks, q_block),
+                    confidence=0.65,
+                    meta={"detector": "llm_rich", "q_block": q_block, "answer_block": ab, "row": ar, "col": ac}
+                ))
+                dbg(f"Appended slot from candidate: {results[-1]}")
+        except Exception as e:
+            dbg(f"Parse candidate error: {e}")
+            continue
+    return results
+
+# ─────────────────── 2‑stage LLM helpers ───────────────────
+
+def llm_detect_questions(
+    blocks: List[Union[Paragraph, Table]],
+    model: str = MODEL,
+    chunk_size: int = 10,
+) -> List[int]:
+    """Return global block indices that look like questions using only the LLM."""
+    # Pre-filter: remove empty blocks or paragraphs with fewer than 4 words
+    filtered: List[Union[Paragraph, Table]] = []
+    for b in blocks:
+        if isinstance(b, Paragraph):
+            # skip paragraphs with less than 4 words
+            if len((b.text or "").split()) < 4:
+                continue
+        filtered.append(b)
+    blocks = filtered
+    found: List[int] = []
+    for start in range(0, len(blocks), chunk_size):
+        end = min(len(blocks), start + chunk_size)
+        excerpt = _render_structured_excerpt(blocks[start:end], start_index=start)
+        detect_template = read_prompt("docx_detect_questions")
+        prompt = detect_template.format(excerpt=excerpt)
+        if SHOW_TEXT:
+            print("\n--- PROMPT (detect_questions) ---\n" + prompt + "\n--- END PROMPT ---\n")
+        try:
+            content = _call_llm(prompt, json_output=True)
+            if SHOW_TEXT:
+                print("\n--- COMPLETION (detect_questions) ---\n" + content + "\n--- END COMPLETION ---\n")
+            js = json.loads(content)
+            questions = [int(i) for i in js.get("questions", [])]
+            dbg(f"Model returned JSON (detect_questions) chunk {start}-{end}: {js}")
+            # --- Begin debug print for each block ---
+            flagged = set(questions)
+            for rel_idx, b in enumerate(blocks[start:end]):
+                gi = start + rel_idx
+                if isinstance(b, Paragraph):
+                    text = b.text or ""
+                elif isinstance(b, Table):
+                    # Combine all cell texts
+                    cell_texts = []
+                    try:
+                        for row in b.rows:
+                            for cell in row.cells:
+                                cell_texts.append(_cell_rich_text(cell))
+                        text = " | ".join(cell_texts)
+                    except Exception:
+                        text = ""
+                else:
+                    text = ""
+                if gi in flagged:
+                    dbg(f"Block {gi}: FLAGGED as question -> {text}")
+                else:
+                    dbg(f"Block {gi}: skipped -> {text}")
+            # --- End debug print for each block ---
+            found.extend(questions)
+        except Exception as e:
+            dbg(f"Error parsing detect_questions response (chunk {start}-{end}): {e}")
+
+    unique_sorted = sorted(set(found))
+    dbg(f"Questions indices extracted: {unique_sorted}")
+    return unique_sorted
+
+
+def _para_has_page_break(p: Paragraph) -> bool:
+    """Return True if paragraph contains a hard page break."""
+    for r in p.runs:
+        try:
+            for br in r._r.findall('.//' + qn('w:br')):
+                if br.get(qn('w:type')) == 'page':
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _blocks_to_text_pages(blocks: List[Union[Paragraph, Table]]) -> List[str]:
+    """Convert DOCX blocks into a list of page-level plain-text strings."""
+    pages: List[str] = []
+    current: List[str] = []
+    for b in blocks:
+        if isinstance(b, Paragraph):
+            current.append(b.text or "")
+            if _para_has_page_break(b):
+                pages.append("\n".join(current).strip())
+                current = []
+        elif isinstance(b, Table):
+            rows = []
+            for row in b.rows:
+                row_text = "\t".join((cell.text or "").strip() for cell in row.cells)
+                rows.append(row_text)
+            current.append("\n".join(rows))
+    if current or not pages:
+        pages.append("\n".join(current).strip())
+    return pages
+
+
+def _find_block_index_for_question(q: str, blocks: List[Union[Paragraph, Table]]) -> Optional[int]:
+    """Find the global block index whose text contains the question string."""
+    norm = re.sub(r"\s+", " ", q.lower().strip())
+    for idx, b in enumerate(blocks):
+        if isinstance(b, Paragraph):
+            txt = re.sub(r"\s+", " ", (b.text or "").lower())
+            if norm and norm in txt:
+                return idx
+        elif isinstance(b, Table):
+            try:
+                for row in b.rows:
+                    for cell in row.cells:
+                        txt = re.sub(r"\s+", " ", (cell.text or "").lower())
+                        if norm and norm in txt:
+                            return idx
+            except Exception:
+                continue
+    return None
+
+
+def llm_detect_questions_raw_text(
+    blocks: List[Union[Paragraph, Table]],
+    existing_questions: Set[str],
+    model: str = MODEL,
+    buffer: int = 200,
+) -> List[int]:
+    """Use page-level plain text to find additional question block indices."""
+    pages = _blocks_to_text_pages(blocks)
+    extra_blocks: List[int] = []
+    for i, page in enumerate(pages):
+        context = page
+        if i > 0:
+            context = pages[i - 1][-buffer:] + "\n" + context
+        if i + 1 < len(pages):
+            context = context + "\n" + pages[i + 1][:buffer]
+        template = read_prompt("extract_questions")
+        prompt = template.format(context=context)
+        try:
+            content = _call_llm(prompt)
+            lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        except Exception as e:
+            dbg(f"Error in raw text detection page {i}: {e}")
+            continue
+        for q in lines:
+            norm = q.lower().strip()
+            if not norm or norm in existing_questions:
+                continue
+            idx = _find_block_index_for_question(q, blocks)
+            if idx is not None:
+                extra_blocks.append(idx)
+                existing_questions.add(norm)
+    return sorted(set(extra_blocks))
+
+
+async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int, window: int = 3, model: str = MODEL) -> Optional[AnswerLocator]:
+    """Given a question block index, ask the LLM to pick best answer location within ±window."""
+
+    # Build context window
+    start = max(0, q_block - window)
+    end = min(len(blocks), q_block + window + 1)
+    for i in range(q_block + 1, end):
+        b = blocks[i]
+        if isinstance(b, Paragraph) and _looks_like_question((b.text or "").strip()):
+            end = i
+            break
+    local_blocks = blocks[start:end]
+    excerpt, table_idx_map = _render_rich_excerpt(local_blocks)
+    template = read_prompt("docx_locate_answer")
+    prompt = template.format(start=start, excerpt=excerpt)
+    if SHOW_TEXT:
+        print(f"\n--- PROMPT (locate_answer q_block={q_block}) ---\n" + prompt + "\n--- END PROMPT ---\n")
+    try:
+        content = await asyncio.to_thread(_call_llm, prompt, True)
+    except Exception as e:
+        dbg(f"LLM error (locate_answer q_block={q_block}): {e}")
+        return None
+    if SHOW_TEXT:
+        print(
+            f"\n--- COMPLETION (locate_answer q_block={q_block}) ---\n" + content + "\n--- END COMPLETION ---\n"
+        )
+    try:
+        js = json.loads(content)
+        dbg(f"Model returned JSON (locate_answer q_block={q_block}): {js}")
+        kind = js.get("kind")
+        if kind == "paragraph_after":
+            offset = max(1, min(3, int(js.get("offset", 1))))
+            locator = AnswerLocator(type="paragraph_after", paragraph_index=q_block, offset=offset)
+            dbg(f"Mapped model response to AnswerLocator (paragraph_after): {locator}")
+            return locator
+        elif kind == "table_cell":
+            row = int(js.get("row", 0))
+            col = int(js.get("col", 0))
+            # map local q_block (0) back to global q_block to get table index
+            global_block_index = q_block
+            _, table_idx_map_global = _render_rich_excerpt(blocks)
+            t_index = table_idx_map_global.get(global_block_index)
+            locator = AnswerLocator(type="table_cell", table_index=t_index, row=row, col=col)
+            dbg(f"Mapped model response to AnswerLocator (table_cell): {locator}")
+            return locator
+    except Exception as e:
+        dbg(f"Error parsing locate_answer for q_block {q_block}: {e}")
+        return None
+
+
+async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = MODEL) -> bool:
+    """Return True if the question likely depends on previous context."""
+
+    start = max(0, q_block - 2)
+    end = min(len(blocks), q_block + 1)
+    local_blocks = blocks[start:end]
+    excerpt, _ = _render_rich_excerpt(local_blocks)
+    template = read_prompt("docx_assess_context")
+    prompt = template.format(local_index=q_block - start, excerpt=excerpt)
+    try:
+        content = await asyncio.to_thread(_call_llm, prompt, True)
+    except Exception as e:
+        dbg(f"LLM error (assess_context q_block={q_block}): {e}")
+        return False
+    try:
+        js = json.loads(content)
+        return bool(js.get("needs_context"))
+    except Exception:
+        return False
+
+# ───────────────────────── pipeline ─────────────────────────
+
+def extract_slots_from_docx(path: str) -> Dict[str, Any]:
+    doc = docx.Document(path)
+    blocks = list(_iter_block_items(doc))
+
+    # Split any Paragraph with explicit line breaks into separate blocks
+    expanded_blocks: List[Union[Paragraph, Table]] = []
+    for b in blocks:
+        if isinstance(b, Paragraph) and "\n" in (b.text or ""):
+            for line in b.text.splitlines():
+                # Clone the XML element and create a new Paragraph for each line
+                p = Paragraph(b._p, doc)
+                # Remove all existing runs from the clone
+                for r in list(p.runs):
+                    p._p.remove(r._r)
+                # Add a single run containing just this line
+                p.add_run(line)
+                expanded_blocks.append(p)
+        else:
+            expanded_blocks.append(b)
+    blocks = expanded_blocks
+
+    dbg(f"extract_slots_from_docx: USE_LLM={USE_LLM}")
+    dbg(f"Total blocks: {len(blocks)}")
+
+    # If LLM mode (USE_LLM) is active, skip all rule-based detectors entirely.
+    if USE_LLM:
+        if FRAMEWORK == "openai" and not os.getenv("OPENAI_API_KEY"):
+            raise RuntimeError("OPENAI_API_KEY not set; cannot run in pure AI mode.")
+        if FRAMEWORK == "aladdin":
+            required = [
+                "aladdin_studio_api_key",
+                "defaultWebServer",
+                "aladdin_user",
+                "aladdin_passwd",
+            ]
+            missing = [v for v in required if not os.getenv(v)]
+            if missing:
+                raise RuntimeError(
+                    f"Missing environment variables for aladdin framework: {', '.join(missing)}"
+                )
+        llm_model = MODEL
+
+        # Heuristic first: flag paragraphs containing '?' or the word 'please'
+        q_indices_heur: List[int] = []
+        for i, b in enumerate(blocks):
+            if isinstance(b, Paragraph) and b.text:
+                raw = b.text.strip()
+                low = raw.lower()
+                reason = None
+                if '?' in raw:
+                    reason = "contains '?'"
+                elif 'please' in low:
+                    reason = "contains 'please'"
+                if reason:
+                    dbg(f"Heuristic flagged block {i}: {reason} -> {raw}")
+                    q_indices_heur.append(i)
+
+        # Prepare blocks for LLM: those not already flagged
+        remaining_blocks = []
+        global_to_local = {}
+        for gi, b in enumerate(blocks):
+            if gi not in q_indices_heur:
+                local_idx = len(remaining_blocks)
+                remaining_blocks.append(b)
+                global_to_local[local_idx] = gi
+
+        # LLM detection on remaining blocks (chunk size default)
+        local_q_indices = llm_detect_questions(remaining_blocks, model=llm_model)
+
+        # Map local indices back to global
+        q_indices_llm = [global_to_local[l] for l in local_q_indices if l in global_to_local]
+
+        # Combine heuristic and LLM results
+        q_indices = sorted(set(q_indices_heur + q_indices_llm))
+
+        async def process_q_block(qb: int) -> Optional[QASlot]:
+            try:
+                loc = await llm_locate_answer(blocks, qb, window=3, model=llm_model)
+                if loc is None:
+                    return None
+                q_text = (blocks[qb].text if isinstance(blocks[qb], Paragraph) else "").strip()
+                slot_obj = QASlot(
+                    id=f"slot_{uuid.uuid4().hex[:8]}",
+                    question_text=q_text,
+                    answer_locator=loc,
+                    answer_type=infer_answer_type(q_text, blocks, qb),
+                    confidence=0.6,
+                    meta={"detector": "two_stage", "q_block": qb}
+                )
+                # Enrich slot_obj.meta with outline
+                q_par = blocks[qb] if isinstance(blocks[qb], Paragraph) else None
+                lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
+                hint, hint_level = derive_outline_hint_and_level(q_text)
+                slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
+                slot_obj.meta["needs_context"] = await llm_assess_context(blocks, qb, model=llm_model)
+                dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
+                return slot_obj
+            except Exception as e:
+                dbg(f"Error processing q_block {qb}: {e}")
+                return None
+
+        async def gather_slots() -> List[Optional[QASlot]]:
+            tasks = [asyncio.create_task(process_q_block(qb)) for qb in q_indices]
+            return await asyncio.gather(*tasks)
+
+        slots = [s for s in asyncio.run(gather_slots()) if s]
+        existing_qtexts = {s.question_text.strip().lower() for s in slots}
+        extra_q_blocks = llm_detect_questions_raw_text(blocks, existing_qtexts, model=llm_model)
+        for qb in extra_q_blocks:
+            extra_slot = asyncio.run(process_q_block(qb))
+            if extra_slot:
+                if extra_slot.meta is None:
+                    extra_slot.meta = {}
+                extra_slot.meta["detector"] = "raw_text"
+                slots.append(extra_slot)
+        if not slots:  # fallback to legacy single scan
+            slots = llm_scan_blocks(blocks, model=llm_model)
+    else:
+        # Fallback legacy rule‑based path (only when LLM explicitly disabled)
+        slots: List[QASlot] = []
+        for detector in (detect_para_question_with_blank,
+                         detect_two_col_table_q_blank,
+                         detect_response_label_then_blank):
+            slots.extend(detector(blocks))
+        # optional: refine if we still want refinement when LLM disabled (keep off)
+    
+    for s in slots:
+        if s.answer_type == "multiple_choice":
+            qb = (s.meta or {}).get("q_block")
+            if qb is not None:
+                choices = extract_mc_choices(blocks, qb)
+                if choices:
+                    if s.meta is None:
+                        s.meta = {}
+                    s.meta["choices"] = choices
+
+    attach_context(slots, blocks)
+    dbg(f"Slot count: {len(slots)}")
+    dbg(f"Final payload preview: {json.dumps({'doc_type': 'docx', 'file': os.path.basename(path), 'slots': [asdict(s) for s in dedupe_slots(slots)]}, indent=2)[:1000]}")
+    payload = {
+        "doc_type": "docx",
+        "file": os.path.basename(path),
+        "slots": [asdict(s) for s in dedupe_slots(slots)]
+    }#
+    return payload
+
+# ─────────────────── context attachment ───────────────────
+def attach_context(slots: List[QASlot], blocks):
+    """
+    Populate slot.meta['context'] with: level, heading_chain and optional parent_*.
+    """
+    ordered = sorted(slots, key=lambda s: (s.meta or {}).get("q_block", 0))
+    last_at_level = {}
+    for s in ordered:
+        qb = (s.meta or {}).get("q_block", 0)
+        level = (s.meta or {}).get("outline", {}).get("level") or 1
+        heads = heading_chain(blocks, qb)
+
+        parent = None
+        for l in range(level - 1, 0, -1):
+            if l in last_at_level:
+                parent = last_at_level[l]
+                break
+
+        ctx = {"level": int(level), "heading_chain": heads}
+        if parent:
+            ctx["parent_slot_id"] = parent.id
+            ctx["parent_question_text"] = parent.question_text
+
+        if s.meta is None:
+            s.meta = {}
+        s.meta["context"] = ctx
+        last_at_level[level] = s
+
+def dedupe_slots(slots: List[QASlot]) -> List[QASlot]:
+    """Collapse slots with identical questions and overlapping locator ranges."""
+
+    def norm_q(text: str) -> str:
+        return strip_enum_prefix(text or "").strip().lower()
+
+    def loc_range(slot: QASlot):
+        loc = slot.answer_locator
+        if loc.type == "table_cell":
+            return ("cell", loc.table_index, loc.row, loc.col)
+        if loc.type == "paragraph":
+            return (loc.paragraph_index, loc.paragraph_index)
+        if loc.type == "paragraph_after":
+            start = (loc.paragraph_index or 0) + 1
+            end = (loc.paragraph_index or 0) + loc.offset
+            return (start, end)
+        return None
+
+    def more_specific(a: QASlot, b: QASlot) -> QASlot:
+        ra, rb = loc_range(a), loc_range(b)
+        if ra is None or rb is None:
+            return a
+        if len(ra) == 4 and len(rb) == 4:
+            return a  # same cell → keep first
+        la = ra[1] - ra[0]
+        lb = rb[1] - rb[0]
+        if la != lb:
+            return a if la < lb else b
+        pr = {"paragraph": 2, "paragraph_after": 1}
+        return a if pr.get(a.answer_locator.type, 0) >= pr.get(b.answer_locator.type, 0) else b
+
+    out: List[QASlot] = []
+    for s in slots:
+        nq = norm_q(s.question_text)
+        r = loc_range(s)
+        dup_idx = None
+        for i, ex in enumerate(out):
+            if norm_q(ex.question_text) != nq:
+                continue
+            er = loc_range(ex)
+            if r is None or er is None:
+                continue
+            if len(r) == 4 and len(er) == 4:
+                if r == er:
+                    dup_idx = i
+                    break
+            elif len(r) == 2 and len(er) == 2:
+                if not (r[1] < er[0] or r[0] > er[1]):
+                    dup_idx = i
+                    break
+        if dup_idx is not None:
+            out[dup_idx] = more_specific(out[dup_idx], s)
+        else:
+            out.append(s)
+    return out
+
+# ───────────────────────── CLI ─────────────────────────
+
+def main():
+    ap = argparse.ArgumentParser(description="Detect QA slots in a DOCX RFP.")
+    ap.add_argument("docx_path", help="Path to .docx")
+    ap.add_argument("-o", "--out", default=None, help="Write JSON to this path")
+    ap.add_argument("--ai", action="store_true", help="(deprecated) AI mode is always on; flag kept for backward compatibility")
+    ap.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=True,
+        help="Print verbose debug info (default on)",
+    )
+    ap.add_argument(
+        "--no-debug",
+        dest="debug",
+        action="store_false",
+        help="Disable debug info",
+    )
+    ap.add_argument("--show-text", action="store_true", help="Dump full prompt and completion text for each API call (verbose)")
+    ap.add_argument(
+        "--framework",
+        choices=["openai", "aladdin"],
+        default=os.getenv("ANSWER_FRAMEWORK", "openai"),
+        help="Which completion framework to use",
+    )
+    ap.add_argument(
+        "--model",
+        default=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
+        help="Model name for the chosen framework",
+    )
+    if len(sys.argv) == 1:
+        ap.print_help()
+        sys.exit(1)
+    args = ap.parse_args()
+
+    # Set debug global
+    global DEBUG
+    DEBUG = args.debug
+    if DEBUG:
+        print("### DEBUG MODE ON ###")
+        print(f"[slot_finder] processing {args.docx_path}")
+
+    global SHOW_TEXT
+    SHOW_TEXT = args.show_text
+
+    # AI is always enabled; --ai is legacy, --no-ai removed.
+    global USE_LLM
+    USE_LLM = True  # AI is always on; --ai is optional/legacy
+
+    global FRAMEWORK, MODEL
+    FRAMEWORK = args.framework
+    MODEL = args.model
+
+    if FRAMEWORK == "openai" and not os.getenv("OPENAI_API_KEY"):
+        print("Error: OPENAI_API_KEY is not set (required for openai framework).", file=sys.stderr)
+        sys.exit(1)
+    if FRAMEWORK == "aladdin":
+        required = ["aladdin_studio_api_key", "defaultWebServer", "aladdin_user", "aladdin_passwd"]
+        missing = [v for v in required if not os.getenv(v)]
+        if missing:
+            print(
+                f"Error: Missing environment variables for aladdin framework: {', '.join(missing)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Validate file existence
+    if not os.path.isfile(args.docx_path):
+        print(f"Error: File '{args.docx_path}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+    # Validate .docx extension
+    if not args.docx_path.lower().endswith(".docx"):
+        print(f"Error: File '{args.docx_path}' does not have a .docx extension.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        if DEBUG:
+            print("[slot_finder] extracting slots from DOCX")
+        result = extract_slots_from_docx(args.docx_path)
+        if DEBUG:
+            print(f"[slot_finder] found {len(result.get('slots', []))} slots")
+    except Exception as e:
+        print(f"Error: Failed to process DOCX file '{args.docx_path}'. The file may be invalid or corrupted.\nDetails: {e}", file=sys.stderr)
+        sys.exit(1)
+    # Print token/cost summary if debug enabled
+    if DEBUG:
+        print("--- TOKEN / COST SUMMARY ---")
+        print(f"Prompt tokens:  {TOTAL_INPUT_TOKENS}")
+        print(f"Completion tokens: {TOTAL_OUTPUT_TOKENS}")
+        print(f"Total estimated cost: ${TOTAL_COST_USD:.4f}")
+    js = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(js)
+        if DEBUG:
+            print(f"[slot_finder] wrote output to {args.out}")
+        else:
+            print(f"Wrote {args.out}")
+    else:
+        print(js)
+
+if __name__ == "__main__":
+    main()
+=== ./qa_core.py ===
+#!/usr/bin/env python3
+"""
+qa_core.py
+Home of `answer_question(...)` and its prompt plumbing.
+
+This module centralizes the RAG→LLM answer generation so both the CLI and
+other pipelines can reuse it without circular imports.
+"""
+from __future__ import annotations
+
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+# Your vector search — keep the original import path you already use.
+# If your project uses a different path, update this import accordingly.
+from search.vector_search import search
+
+# Use the Utilities' client; typically returns (text, usage)
+from answer_composer import CompletionsClient
+from prompts import load_prompts
+
+
+# Default debug flag; always on unless caller toggles.
+DEBUG = True
+
+
+# ───────────────────────── Prompt loading ─────────────────────────
+
+PROMPTS = load_prompts({name: "" for name in ("extract_questions", "answer_search_context", "answer_llm")})
+
+PRESET_INSTRUCTIONS: Dict[str, str] = {
+    "short": "Answer briefly in 1–2 sentences.",
+    "medium": "Answer in one concise paragraph.",
+    "long": "Answer in detail (up to one page).",
+}
+
+
+# ───────────────────────── Core answering ─────────────────────────
+
+def answer_question(
+    q: str,
+    mode: str,
+    fund: Optional[str],
+    k: int,
+    length: Optional[str],
+    approx_words: Optional[int],
+    min_confidence: float,
+    llm: CompletionsClient,
+) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
+    """
+    Return (answer_text, comments) where comments is a list of:
+    (new_label_without_brackets, source_name, snippet, score, date_str)
+
+    The answer contains bracket markers like [1], [2], ... which we re-number
+    to match the order of comments we return.
+    If no search results meet the confidence threshold, the function returns
+    "No relevant information found." and an empty comments list without calling
+    the language model.
+    """
+    if DEBUG:
+        print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
+    # 1) Retrieve candidate context snippets
+    if DEBUG:
+        print("[qa_core] searching for context snippets")
+    if mode == "both":
+        # Back-compat: treat "both" as blend + dual
+        hits = search(q, k=k, mode="blend", fund_filter=fund) + search(q, k=k, mode="dual", fund_filter=fund)
+    else:
+        hits = search(q, k=k, mode=mode, fund_filter=fund)
+    if DEBUG:
+        print(f"[qa_core] retrieved {len(hits)} hits")
+        top_n = min(len(hits), k)
+        print(f"[qa_core] top {top_n} hits:")
+        for i, h in enumerate(hits[:top_n], 1):
+            meta = h.get("meta", {}) or {}
+            src = meta.get("source", "unknown")
+            doc_id = h.get("id", "unknown")
+            score = float(h.get("cosine", 0.0))
+            snippet = (h.get("text") or "").strip().replace("\n", " ")
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            print(
+                f"    {i}. id={doc_id} score={score:.3f} source={src} text='{snippet}'"
+            )
+
+    seen_snippets = set()
+    rows: List[Tuple[str, str, str, float, str]] = []  # (lbl, src, snippet, score, date)
+    for h in hits:
+        score = float(h.get("cosine", 0.0))
+        if score < min_confidence:
+            if DEBUG:
+                print(f"[qa_core] skip hit below confidence {score:.3f}")
+            continue
+        txt = (h.get("text") or "").strip()
+        if not txt or txt in seen_snippets:
+            if DEBUG:
+                print("[qa_core] skip empty/duplicate snippet")
+            continue
+        meta = h.get("meta", {}) or {}
+        src_path = str(meta.get("source", "")) or "unknown"
+        src_name = Path(src_path).name if src_path else "unknown"
+        try:
+            mtime = Path(src_path).stat().st_mtime if src_path and Path(src_path).exists() else None
+            date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d") if mtime else "unknown"
+        except Exception:
+            date_str = "unknown"
+
+        lbl = f"[{len(rows)+1}]"
+        rows.append((lbl, src_name, txt, score, date_str))
+        seen_snippets.add(txt)
+        if DEBUG:
+            print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
+
+    if not rows:
+        if DEBUG:
+            print("[qa_core] no relevant context found; returning fallback answer")
+        return "No relevant information found.", []
+
+    # Build the context block presented to the model
+    ctx_block = "\n\n".join(f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows)
+    if DEBUG:
+        print(f"[qa_core] built context with {len(rows)} snippets")
+
+    # 2) Compose the prompt with a length instruction
+    if approx_words is not None:
+        length_instr = f"Please aim for approximately {approx_words} words."
+    else:
+        length_instr = PRESET_INSTRUCTIONS.get(length or "medium", "")
+
+    prompt = f"{length_instr}\n\n{PROMPTS['answer_llm'].format(context=ctx_block, question=q)}"
+
+    # 3) Call the model
+    if DEBUG:
+        print("[qa_core] calling language model")
+        print(f"[qa_core] prompt:\n{prompt}")
+        print(f"[qa_core] llm type: {type(llm)}")
+
+    raw_response = llm.get_completion(prompt)
+    if DEBUG:
+        print(f"[qa_core] raw response: {raw_response!r}")
+    if isinstance(raw_response, tuple):
+        content = raw_response[0]
+    else:
+        content = raw_response
+    ans = (content or "").strip()
+
+    # 4) Re-number bracket markers [n] in the answer to reflect the order they first appear
+    order: List[str] = []
+    for m in re.finditer(r"\[(\d+)\]", ans):
+        tok = m.group(0)  # like "[3]"
+        if tok not in order:
+            order.append(tok)
+
+    mapping = {old: f"[{i+1}]" for i, old in enumerate(order)}
+    for old, new in mapping.items():
+        ans = ans.replace(old, new)
+    if DEBUG:
+        print("[qa_core] renumbered citations")
+
+    # 5) Build comments in that order
+    comments: List[Tuple[str, str, str, float, str]] = []
+    for old in order:
+        try:
+            idx = int(old.strip("[]")) - 1
+        except Exception:
+            continue
+        if 0 <= idx < len(rows):
+            lbl, src, snippet, score, date_str = rows[idx]
+            new_lbl = mapping.get(old, lbl).strip("[]")  # "1", "2", ...
+            comments.append((new_lbl, src, snippet, score, date_str))
+
+    if DEBUG:
+        print(f"[qa_core] returning answer with {len(comments)} comments")
+    return ans, comments
+=== ./rfp_docx_apply_answers.py ===
+#!/usr/bin/env python3
+# rfp_docx_apply_answers.py
+# Apply answers into a DOCX according to slots.json produced by rfp_docx_slot_finder.py
+
+import argparse, json, os, sys, re, asyncio
+import importlib
+import traceback
+from types import ModuleType
+from typing import List, Union, Optional, Dict, Tuple, Callable
+
+import docx
+from docx.text.paragraph import Paragraph
+from docx.table import Table
+from docx.oxml import OxmlElement
+from docx.enum.text import WD_COLOR_INDEX
+from rfp_docx_slot_finder import _looks_like_question
+
+# NEW: real comment helper
+from word_comments import add_comment_to_run
+
+# ---------------------------- Debug helpers ----------------------------
+DEBUG = True
+def dbg(msg: str):
+    if DEBUG:
+        print(f"[APPLY-DEBUG] {msg}")
+
+# ---------------------------- DOC iteration ----------------------------
+def iter_block_items(doc: docx.document.Document) -> List[Union[Paragraph, Table]]:
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    blocks: List[Union[Paragraph, Table]] = []
+    parent = doc.element.body
+    for child in parent.iterchildren():
+        if isinstance(child, CT_P):
+            blocks.append(Paragraph(child, doc))
+        elif isinstance(child, CT_Tbl):
+            blocks.append(Table(child, doc))
+    return blocks
+
+def build_indexes(doc: docx.document.Document) -> Tuple[
+    List[Union[Paragraph, Table]],
+    List[Paragraph],
+    Dict[int, int],
+    Dict[int, int]
+]:
+    blocks = iter_block_items(doc)
+    paragraphs: List[Paragraph] = []
+    block_to_para: Dict[int, int] = {}
+    block_to_table: Dict[int, int] = {}
+    running_table_index = 0
+    for bi, b in enumerate(blocks):
+        if isinstance(b, Paragraph):
+            block_to_para[bi] = len(paragraphs)
+            paragraphs.append(b)
+        elif isinstance(b, Table):
+            block_to_table[bi] = running_table_index
+            running_table_index += 1
+    return blocks, paragraphs, block_to_para, block_to_table
+
+# ---------------------------- Utilities ----------------------------
+_BLANK_RE = re.compile(r"_+\s*$")
+_CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
+_CITATION_RE = re.compile(r"\[(\d+)\]")
+
+def is_blank_para(p: Paragraph) -> bool:
+    t = (p.text or "").strip()
+    if t == "":
+        return True
+    if _BLANK_RE.match(t):
+        return True
+    if re.fullmatch(r"\[(?:insert|enter|provide)[^\]]*\]", t.lower()):
+        return True
+    try:
+        if any(r.text and r.underline for r in p.runs) and len(t.replace("_","").strip()) == 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
+    new_p_elm = OxmlElement("w:p")
+    paragraph._element.addnext(new_p_elm)
+    new_p = Paragraph(new_p_elm, paragraph._parent)
+    if text:
+        new_p.add_run(text)
+    return new_p
+
+def normalize_question(q: str) -> str:
+    return " ".join((q or "").strip().lower().split())
+
+def _normalize_citations(raw: object) -> Dict[str, str]:
+    if not raw:
+        return {}
+    result: Dict[str, str] = {}
+    if isinstance(raw, dict):
+        items = raw.items()
+    elif isinstance(raw, list):
+        items = []
+        for i, item in enumerate(raw, 1):
+            key = getattr(item, "get", lambda *_: None)("id") or getattr(item, "get", lambda *_: None)("num") or i
+            items.append((key, item))
+    else:
+        return {}
+    for key, val in items:
+        if isinstance(val, dict):
+            snippet = val.get("text") or val.get("snippet") or val.get("source_text") or val.get("content") or ""
+        else:
+            snippet = str(val)
+        result[str(key)] = str(snippet)
+    return result
+
+def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, str]) -> None:
+    """Write text and attach Word comments to each [n] marker using Utilities helper."""
+    doc = paragraph.part.document
+    parts = text.split("\n")
+    for li, line in enumerate(parts):
+        pos = 0
+        for match in _CITATION_RE.finditer(line):
+            if match.start() > pos:
+                paragraph.add_run(line[pos:match.start()])
+            num = match.group(1)
+            run = paragraph.add_run(match.group(0))  # "[n]"
+            snippet = citations.get(num) or citations.get(int(num))
+            if isinstance(snippet, dict):
+                snippet = snippet.get("text") or snippet.get("snippet") or snippet.get("content")
+            if snippet:
+                add_comment_to_run(doc, run, str(snippet))
+            pos = match.end()
+        if pos < len(line):
+            paragraph.add_run(line[pos:])
+        if li < len(parts) - 1:
+            paragraph.add_run().add_break()
+
+# ---------------------------- Answers loader ----------------------------
+def load_answers(answers_path: str) -> Tuple[Dict[str, object], Dict[str, object]]:
+    with open(answers_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    by_id: Dict[str, object] = {}
+    by_q: Dict[str, object] = {}
+    if isinstance(data, dict):
+        if "by_id" in data or "by_question" in data:
+            for k, v in (data.get("by_id") or {}).items():
+                by_id[str(k)] = v
+            for k, v in (data.get("by_question") or {}).items():
+                by_q[normalize_question(k)] = v
+        else:
+            for k, v in data.items():
+                kstr = str(k)
+                if kstr.startswith("slot_"):
+                    by_id[kstr] = v
+                else:
+                    by_q[normalize_question(kstr)] = v
+    elif isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if "slot_id" in item:
+                by_id[str(item["slot_id"])] = item.get("answer", "")
+            elif "question_text" in item:
+                by_q[normalize_question(str(item["question_text"]))] = item.get("answer", "")
+    else:
+        raise ValueError("Unsupported answers JSON structure.")
+    return by_id, by_q
+
+# ---------------------------- Locator resolution ----------------------------
+def resolve_anchor_paragraph(
+    doc: docx.document.Document,
+    blocks: List[Union[Paragraph, Table]],
+    paragraphs: List[Paragraph],
+    block_to_para: Dict[int, int],
+    locator: Dict[str, object],
+    meta: Optional[Dict[str, object]]
+) -> Optional[Paragraph]:
+    ltype = str(locator.get("type", ""))
+    p_idx = locator.get("paragraph_index")
+    p_idx = int(p_idx) if p_idx is not None else None
+    if ltype == "paragraph":
+        if p_idx is None:
+            return None
+        if 0 <= p_idx < len(paragraphs):
+            return paragraphs[p_idx]
+        return None
+    if ltype == "paragraph_after":
+        qb = None
+        if isinstance(meta, dict) and "q_block" in meta:
+            try:
+                qb = int(meta["q_block"])
+            except Exception:
+                qb = None
+        if qb is not None and 0 <= qb < len(blocks) and isinstance(blocks[qb], Paragraph):
+            return blocks[qb]  # type: ignore
+        if p_idx is not None and 0 <= p_idx < len(blocks) and isinstance(blocks[p_idx], Paragraph):
+            return blocks[p_idx]  # type: ignore
+        if p_idx is not None and 0 <= p_idx < len(paragraphs):
+            return paragraphs[p_idx]
+    return None
+
+def get_target_paragraph_after_anchor(
+    blocks: List[Union[Paragraph, Table]],
+    block_to_para: Dict[int, int],
+    paragraphs: List[Paragraph],
+    anchor_para: Paragraph,
+    offset: int
+) -> Paragraph:
+    anchor_para_index = None
+    anchor_block_index = None
+    for bi, b in enumerate(blocks):
+        if isinstance(b, Paragraph) and b is anchor_para:
+            anchor_block_index = bi
+            anchor_para_index = block_to_para[bi]
+            break
+    if anchor_block_index is None or anchor_para_index is None:
+        anchor_para_index = paragraphs.index(anchor_para)
+    subsequent_paras: List[Paragraph] = []
+    if anchor_block_index is not None:
+        for b in blocks[anchor_block_index + 1:]:
+            if isinstance(b, Paragraph):
+                txt = (b.text or "").strip()
+                if _looks_like_question(txt):
+                    break
+                subsequent_paras.append(b)
+    else:
+        for p in paragraphs[anchor_para_index + 1:]:
+            txt = (p.text or "").strip()
+            if _looks_like_question(txt):
+                break
+            subsequent_paras.append(p)
+    if len(subsequent_paras) >= offset:
+        return subsequent_paras[offset - 1]
+    needed = offset - len(subsequent_paras)
+    dbg(f"Not enough following paragraphs: need to insert {needed} after anchor")
+    last = anchor_para if not subsequent_paras else subsequent_paras[-1]
+    created: Paragraph = last
+    for _ in range(needed):
+        created = insert_paragraph_after(created, "")
+        subsequent_paras.append(created)
+    return subsequent_paras[offset - 1]
+
+# ---------------------------- Apply operations ----------------------------
+def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") -> None:
+    if isinstance(answer, dict):
+        answer_text = str(answer.get("text", ""))
+        citations = _normalize_citations(answer.get("citations"))
+    else:
+        answer_text = str(answer)
+        citations = {}
+    existing = target.text or ""
+    if mode == "replace":
+        target.text = ""
+        _add_text_with_citations(target, answer_text, citations)
+        return
+    if mode == "append":
+        if existing:
+            target.add_run("\n")
+        else:
+            target.text = ""
+        _add_text_with_citations(target, answer_text, citations)
+        return
+    if is_blank_para(target) or not existing.strip():
+        target.text = ""
+        _add_text_with_citations(target, answer_text, citations)
+        return
+
+    answer_norm = answer_text.strip()
+    if existing.strip() == answer_norm:
+        target.text = ""
+        _add_text_with_citations(target, answer_text, citations)
+        dbg("Replaced existing matching answer in target paragraph.")
+        return
+
+    next_p_elm = target._p.getnext()
+    next_para = None
+    if next_p_elm is not None and next_p_elm.tag.endswith("p"):
+        next_para = Paragraph(next_p_elm, target._parent)
+    if next_para and (next_para.text or "").strip() == answer_norm:
+        next_para.text = ""
+        _add_text_with_citations(next_para, answer_text, citations)
+        dbg("Replaced matching answer in subsequent paragraph.")
+        return
+
+    new_p = insert_paragraph_after(target, "")
+    _add_text_with_citations(new_p, answer_text, citations)
+    dbg("Target paragraph not blank; appended answer in a new paragraph below.")
+
+def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: str = "fill") -> None:
+    try:
+        cell = tbl.cell(row, col)
+    except Exception:
+        return
+    if isinstance(answer, dict):
+        answer_text = str(answer.get("text", ""))
+        citations = _normalize_citations(answer.get("citations"))
+    else:
+        answer_text = str(answer)
+        citations = {}
+    current = cell.text or ""
+    if mode == "replace":
+        cell.text = ""
+        p = cell.paragraphs[0]
+        _add_text_with_citations(p, answer_text, citations)
+        return
+    if current.strip():
+        p = cell.paragraphs[-1]
+        p.add_run().add_break()
+        _add_text_with_citations(p, answer_text, citations)
+    else:
+        cell.text = ""
+        p = cell.paragraphs[0]
+        _add_text_with_citations(p, answer_text, citations)
+
+def mark_multiple_choice(
+    doc: docx.document.Document,
+    blocks: List[Union[Paragraph, Table]],
+    choices_meta: List[Dict[str, object]],
+    index: int,
+    style: Optional[str] = None,
+    comment_text: Optional[str] = None,
+) -> None:
+    if not isinstance(choices_meta, list):
+        return
+    if index is None or not (0 <= index < len(choices_meta)):
+        return
+    meta = choices_meta[index]
+    b_idx = int(meta.get("block_index", -1))
+    if not (0 <= b_idx < len(blocks)):
+        return
+    para = blocks[b_idx]
+    if not isinstance(para, Paragraph):
+        return
+    prefix = str(meta.get("prefix", ""))
+    text = para.text or ""
+    if style in (None, "", "auto"):
+        if any(ch in prefix for ch in _CHECKBOX_CHARS):
+            style = "checkbox"
+        elif prefix.strip() in ("()", "[]"):
+            style = "fill"
+        else:
+            style = "highlight"
+    if style == "checkbox" and any(ch in prefix for ch in _CHECKBOX_CHARS):
+        para.text = re.sub(rf"[{_CHECKBOX_CHARS}]", "☑", text, count=1)
+    elif style == "fill" and prefix.strip() in ("()", "[]"):
+        mark = prefix[0] + "X" + prefix[1]
+        para.text = text.replace(prefix, mark, 1)
+    elif style == "highlight":
+        for run in para.runs:
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    else:
+        para.text = "X " + text
+    if comment_text:
+        run = para.runs[0] if para.runs else para.add_run()
+        try:
+            add_comment_to_run(doc, run, comment_text)
+        except Exception as e:
+            dbg(f"  -> error adding comment: {e}")
+
+# ---------------------------- Main application flow ----------------------------
+def apply_answers_to_docx(
+    docx_path: str,
+    slots_json_path: str,
+    answers_json_path: str,
+    out_path: str,
+    mode: str = "fill",
+    generator: Optional[Callable[..., object]] = None,
+    gen_name: str = ""
+) -> Dict[str, int]:
+    with open(slots_json_path, "r", encoding="utf-8") as f:
+        slots_payload = json.load(f)
+
+    by_id, by_q = ({}, {})
+    if answers_json_path and answers_json_path != "-" and os.path.isfile(answers_json_path):
+        by_id, by_q = load_answers(answers_json_path)
+        dbg(f"Answers loaded: by_id={len(by_id)}, by_question={len(by_q)}")
+    else:
+        dbg("No answers file provided; relying solely on generator (if any)")
+
+    doc = docx.Document(docx_path)
+    blocks, paragraphs, block_to_para, block_to_table = build_indexes(doc)
+
+    applied = 0
+    skipped_no_answer = 0
+    skipped_bad_locator = 0
+    skipped_table_oob = 0
+    generated = 0
+
+    slots = (slots_payload or {}).get("slots", [])
+
+    answers: Dict[str, Optional[object]] = {}
+    to_generate: List[Tuple[str, str, dict]] = []
+    for s in slots:
+        sid = s.get("id", "")
+        question_text = (s.get("question_text") or "").strip()
+        meta = s.get("meta") or {}
+        answer = None
+        if sid in by_id:
+            answer = by_id[sid]
+        else:
+            key = normalize_question(question_text)
+            if key in by_q:
+                answer = by_q[key]
+        if answer is None and generator is not None:
+            if not question_text:
+                dbg(f"Skipping generation for slot {sid}: blank question text")
+            else:
+                kwargs = {}
+                if s.get("answer_type") == "multiple_choice":
+                    choice_meta = meta.get("choices", [])
+                    kwargs["choices"] = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
+                    kwargs["choice_meta"] = choice_meta
+                to_generate.append((sid, question_text, kwargs))
+        answers[sid] = answer
+
+    if to_generate:
+        async def run_all() -> List[Tuple[str, Optional[object]]]:
+            async def worker(sid: str, q: str, kwargs: dict):
+                try:
+                    ans = await asyncio.to_thread(generator, q, **kwargs)
+                    dbg(f"Generated answer via {gen_name} for slot {sid}: {ans}")
+                    return sid, ans
+                except Exception as e:
+                    dbg(f"Generator error for question '{q}': {e}")
+                    # give all detail on the error
+                    dbg(f"Generator error details: {traceback.format_exc()}")
+                    return sid, None
+            tasks = [asyncio.create_task(worker(sid, q, kw)) for sid, q, kw in to_generate]
+            return await asyncio.gather(*tasks)
+
+        for sid, ans in asyncio.run(run_all()):
+            if ans is not None:
+                answers[sid] = ans
+                generated += 1
+
+    for s in slots:
+        sid = s.get("id", "")
+        question_text = (s.get("question_text") or "").strip()
+        locator = s.get("answer_locator") or {}
+        ltype = str(locator.get("type", ""))
+        meta = s.get("meta") or {}
+        answer = answers.get(sid)
+        if answer is None:
+            dbg(f"NO ANSWER for slot {sid!r} / question '{question_text}' — skipping")
+            skipped_no_answer += 1
+            continue
+
+        choice_meta = meta.get("choices", [])
+        if (
+            s.get("answer_type") == "multiple_choice"
+            and choice_meta
+            and isinstance(answer, dict)
+            and "choice_index" in answer
+        ):
+            idx = answer.get("choice_index")
+            style = answer.get("style")
+            citations = answer.get("citations") if isinstance(answer, dict) else None
+            comment_text = None
+            if isinstance(citations, dict):
+                comment_text = "\n\n".join(str(v) for v in citations.values())
+            if idx is not None:
+                try:
+                    mark_multiple_choice(doc, blocks, choice_meta, int(idx), style, comment_text)
+                    applied += 1
+                    dbg("  -> marked choice in-place")
+                except Exception as e:
+                    dbg(f"  -> error marking multiple choice: {e}")
+                    skipped_bad_locator += 1
+            else:
+                dbg("  -> could not resolve selected choice index")
+                skipped_bad_locator += 1
+            continue
+
+        dbg(f"Applying answer for slot {sid} (type={ltype})")
+
+        try:
+            if ltype == "table_cell":
+                t_index = locator.get("table_index")
+                row = locator.get("row", 0)
+                col = locator.get("col", 0)
+                if t_index is None:
+                    dbg("  -> bad locator: missing table_index")
+                    skipped_bad_locator += 1
+                    continue
+                t_index = int(t_index)
+                row = int(row)
+                col = int(col)
+                if 0 <= t_index < len(doc.tables):
+                    tbl = doc.tables[t_index]
+                    apply_to_table_cell(tbl, row, col, answer, mode=mode)
+                    applied += 1
+                    dbg(f"  -> wrote into table[{t_index}] cell({row},{col})")
+                else:
+                    dbg(f"  -> table_index {t_index} out of bounds; have {len(doc.tables)} tables")
+                    skipped_table_oob += 1
+
+            elif ltype in ("paragraph_after", "paragraph"):
+                anchor = resolve_anchor_paragraph(doc, blocks, paragraphs, block_to_para, locator, meta)
+                if anchor is None:
+                    dbg("  -> could not resolve anchor/target paragraph")
+                    skipped_bad_locator += 1
+                    continue
+
+                if ltype == "paragraph_after":
+                    offset = int(locator.get("offset", 1) or 1)
+                    target = get_target_paragraph_after_anchor(blocks, block_to_para, paragraphs, anchor, offset)
+                else:
+                    target = anchor
+
+                apply_to_paragraph(target, answer, mode=mode)
+                applied += 1
+                dbg("  -> wrote into paragraph")
+
+            else:
+                dbg(f"  -> unsupported locator type: {ltype}")
+                skipped_bad_locator += 1
+
+        except Exception as e:
+            dbg(f"  -> error while applying slot {sid}: {e}")
+            skipped_bad_locator += 1
+
+    doc.save(out_path)
+    print(f"Wrote {out_path}")
+
+    return {
+        "applied": applied,
+        "skipped_no_answer": skipped_no_answer,
+        "skipped_bad_locator": skipped_bad_locator,
+        "skipped_table_oob": skipped_table_oob,
+        "total_slots": len(slots),
+        "generated": generated,
+    }
+
+# ---------------------------- CLI ----------------------------
+def main():
+    ap = argparse.ArgumentParser(description="Apply answers into a DOCX using slots.json")
+    ap.add_argument("docx_path", help="Path to the original .docx")
+    ap.add_argument("slots_json", help="Path to slots.json produced by the detector")
+    ap.add_argument("answers_json", nargs="?", default="", help="Path to answers.json (optional if using --generate)")
+    ap.add_argument("-o", "--out", required=True, help="Path to write updated .docx")
+    ap.add_argument("--mode", choices=["replace", "append", "fill"], default="fill",
+                    help="Write mode for paragraphs/cells (default: fill)")
+    ap.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=True,
+        help="Verbose debug logging (default on)",
+    )
+    ap.add_argument(
+        "--no-debug",
+        dest="debug",
+        action="store_false",
+        help="Disable debug logging",
+    )
+    ap.add_argument("--generate", metavar="MODULE:FUNC", help="Dynamically generate answers by calling given function for each question (e.g. rfp_utils.my_module:gen_answer)")
+    if len(sys.argv) == 1:
+        ap.print_help()
+        sys.exit(1)
+    args = ap.parse_args()
+
+    global DEBUG
+    DEBUG = args.debug
+    if DEBUG:
+        print("### APPLY DEBUG MODE ON ###")
+        print(f"[apply_answers] source={args.docx_path} slots={args.slots_json}")
+
+    required_paths = [args.docx_path, args.slots_json]
+    for p in required_paths:
+        if not os.path.isfile(p):
+            print(f"Error: '{p}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+    if DEBUG:
+        print("[apply_answers] validated input paths")
+    if args.answers_json and args.answers_json != "-" and not os.path.isfile(args.answers_json):
+        if not args.generate:
+            print(f"Error: answers file '{args.answers_json}' does not exist and no --generate specified.", file=sys.stderr)
+            sys.exit(1)
+
+    gen_callable = None
+    gen_name = ""
+    if args.generate:
+        if ":" not in args.generate:
+            print("Error: --generate requires MODULE:FUNC", file=sys.stderr)
+            sys.exit(1)
+        mod_name, func_name = args.generate.split(":", 1)
+        try:
+            module: ModuleType = importlib.import_module(mod_name)
+            gen_callable = getattr(module, func_name)
+            if not callable(gen_callable):
+                raise AttributeError
+            gen_name = args.generate
+            if DEBUG:
+                print(f"Loaded generator function {gen_name}")
+        except Exception as e:
+            print(f"Error: failed to load generator function {args.generate}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        if DEBUG:
+            print("[apply_answers] applying answers to document")
+        summary = apply_answers_to_docx(
+            args.docx_path,
+            args.slots_json,
+            args.answers_json,
+            args.out,
+            mode=args.mode,
+            generator=gen_callable,
+            gen_name=gen_name
+        )
+    except Exception as e:
+        print(f"Error: failed to apply answers: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if DEBUG:
+        print("--- APPLY SUMMARY ---")
+        for k, v in summary.items():
+            print(f"{k}: {v}")
+
+if __name__ == "__main__":
+    main()
+=== ./tests/test_followup_context.py ===
+import sys, pathlib, types
+
+# Ensure project root on path
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+# Stub external dependencies to avoid import-time failures
+fake_ac = types.ModuleType("answer_composer")
+
+class DummyClient:
+    def __init__(self, model: str | None = None):
+        pass
+
+    def get_completion(self, prompt: str, json_output: bool = False):
+        return "", {}
+
+fake_ac.CompletionsClient = DummyClient
+fake_ac.get_openai_completion = lambda prompt, model, json_output=False: ("", {})
+sys.modules["answer_composer"] = fake_ac
+
+fake_search = types.ModuleType("search.vector_search")
+fake_search.search = lambda *args, **kwargs: []
+sys.modules["search.vector_search"] = fake_search
+
+import my_module
+
+
+def test_followup_context_is_appended(monkeypatch):
+    calls = []
+
+    def fake_answer_question(q, mode, fund, k, length, approx_words, min_conf, llm):
+        calls.append(q)
+        return "ans", []
+
+    monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
+    monkeypatch.setattr(my_module, "_detect_followup", lambda q, h: [1] if h else [])
+
+    my_module.QUESTION_HISTORY.clear()
+    my_module.gen_answer("Do you provide IT support?")
+    my_module.gen_answer("Please provide comments if yes.")
+
+    assert "Do you provide IT support?" in calls[1]
+    assert "Please provide comments if yes." in calls[1]
+    assert len(my_module.QUESTION_HISTORY) == 2
+=== ./tests/test_multiple_choice_comments.py ===
+import sys, pathlib, docx
+
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+from rfp_docx_apply_answers import iter_block_items, mark_multiple_choice
+from word_comments import ensure_comments_part
+
+
+def test_mark_multiple_choice_adds_comment(tmp_path):
+    doc = docx.Document()
+    doc.add_paragraph("() Yes")
+    doc.add_paragraph("() No")
+    path = tmp_path / "mc.docx"
+    doc.save(path)
+
+    doc = docx.Document(path)
+    blocks = list(iter_block_items(doc))
+    choices_meta = [
+        {"block_index": 0, "text": "Yes", "prefix": "()"},
+        {"block_index": 1, "text": "No", "prefix": "()"},
+    ]
+    mark_multiple_choice(doc, blocks, choices_meta, 0, comment_text="Evidence snippet")
+    doc.save(path)
+
+    reopened = docx.Document(path)
+    part = ensure_comments_part(reopened)
+    assert "Evidence snippet" in part._element.xml
+
+=== ./tests/test_mc_stop_before_next_question.py ===
+import sys, pathlib, docx
+
+# Ensure project root on path
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+from rfp_docx_slot_finder import extract_mc_choices, _iter_block_items
+
+
+def test_extract_mc_choices_stops_before_next_question():
+    doc = docx.Document()
+    doc.add_paragraph("1. What is your favorite color?")
+    doc.add_paragraph("A. Red")
+    doc.add_paragraph("B. Blue")
+    doc.add_paragraph("2. What is your plan?")
+    blocks = list(_iter_block_items(doc))
+    choices = extract_mc_choices(blocks, 0)
+    assert [c["text"] for c in choices] == ["Red", "Blue"]
+=== ./tests/test_workflow.py ===
+import os, json
+import sys, pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+from dataclasses import asdict
+import docx
+from rfp_docx_slot_finder import (
+    detect_para_question_with_blank,
+    detect_two_col_table_q_blank,
+    detect_response_label_then_blank,
+    _iter_block_items,
+    attach_context,
+    dedupe_slots,
+    QASlot,
+    AnswerLocator
+)
+from rfp_docx_apply_answers import apply_answers_to_docx
+
+def build_slots(doc_path):
+    doc = docx.Document(doc_path)
+    blocks = list(_iter_block_items(doc))
+    slots = []
+    for detector in (
+        detect_para_question_with_blank,
+        detect_two_col_table_q_blank,
+        detect_response_label_then_blank,
+    ):
+        slots.extend(detector(blocks))
+    attach_context(slots, blocks)
+    slots = dedupe_slots(slots)
+    return {"doc_type": "docx", "file": os.path.basename(doc_path), "slots": [asdict(s) for s in slots]}
+
+def test_pipeline_idempotent(tmp_path):
+    answer_text = "Our approach is outstanding."
+    doc = docx.Document()
+    doc.add_paragraph("Please describe your approach.")
+    doc.add_paragraph("")
+    src = tmp_path / "orig.docx"
+    doc.save(src)
+    slots_payload = build_slots(src)
+    slots_path = tmp_path / "slots.json"
+    with open(slots_path, "w", encoding="utf-8") as f:
+        json.dump(slots_payload, f)
+    slot_id = slots_payload["slots"][0]["id"]
+    answers_path = tmp_path / "answers.json"
+    with open(answers_path, "w", encoding="utf-8") as f:
+        json.dump({slot_id: answer_text}, f)
+    first = tmp_path / "out1.docx"
+    apply_answers_to_docx(str(src), str(slots_path), str(answers_path), str(first))
+    second = tmp_path / "out2.docx"
+    apply_answers_to_docx(str(first), str(slots_path), str(answers_path), str(second))
+    final_doc = docx.Document(second)
+    texts = [p.text.strip() for p in final_doc.paragraphs]
+    assert texts.count(answer_text) == 1
+
+def test_dedupe_overlapping_ranges():
+    s1 = QASlot(
+        id="1",
+        question_text="1. Please describe your approach.",
+        answer_locator=AnswerLocator(type="paragraph", paragraph_index=5),
+    )
+    s2 = QASlot(
+        id="2",
+        question_text="Please describe your approach.",
+        answer_locator=AnswerLocator(type="paragraph_after", paragraph_index=4, offset=2),
+    )
+    deduped = dedupe_slots([s1, s2])
+    assert len(deduped) == 1
+
+
+def test_blank_search_stops_before_next_question(tmp_path):
+    doc = docx.Document()
+    doc.add_paragraph("Question one?")
+    doc.add_paragraph("Question two?")
+    doc.add_paragraph("")
+    src = tmp_path / "two_questions.docx"
+    doc.save(src)
+    loaded = docx.Document(src)
+    blocks = list(_iter_block_items(loaded))
+    slots = detect_para_question_with_blank(blocks)
+    assert len(slots) == 1
+    assert slots[0].question_text.strip() == "Question two?"
+=== ./tests/test_mc_text_output.py ===
+import sys, pathlib, types, json
+
+# Ensure project root on path
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+# Stub external dependencies to avoid import-time failures
+fake_ac = types.ModuleType("answer_composer")
+
+class DummyClient:
+    def __init__(self, model: str | None = None):
+        pass
+
+    def get_completion(self, prompt: str, json_output: bool = False):
+        return "", {}
+
+fake_ac.CompletionsClient = DummyClient
+fake_ac.get_openai_completion = lambda prompt, model, json_output=False: ("", {})
+sys.modules["answer_composer"] = fake_ac
+
+fake_search = types.ModuleType("search.vector_search")
+fake_search.search = lambda *args, **kwargs: []
+sys.modules["search.vector_search"] = fake_search
+
+import my_module
+
+def test_gen_answer_returns_text(monkeypatch):
+    my_module.QUESTION_HISTORY.clear()
+    def fake_answer_question(q, mode, fund, k, length, approx_words, min_conf, llm):
+        data = {"correct": ["A"], "explanations": {"A": "Because it's correct [1]"}}
+        return json.dumps(data), [("1", "src.txt", "snippet", 0.9, "2024-01-01")]
+    monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
+    res = my_module.gen_answer("Which option?", ["Option1", "Option2"])
+    assert res["text"] == "The correct answer is: Option1. A. Because it's correct [1]"
+    assert res["citations"] == {1: "snippet"}
+=== ./tests/test_xlsx_extraction.py ===
+import openpyxl
+from rfp_xlsx_slot_finder import extract_slots_from_xlsx
+
+
+def test_extract_slots_from_xlsx(tmp_path):
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "Sheet1"
+    c = ws1["A1"]
+    c.value = "Question?"
+    c.font = openpyxl.styles.Font(color="FFFF0000", bold=True)
+    c.fill = openpyxl.styles.PatternFill("solid", fgColor="FFFFFF00")
+    ws2 = wb.create_sheet("Data")
+    ws2["B2"] = "Answer"
+
+    path = tmp_path / "sample.xlsx"
+    wb.save(path)
+
+    result = extract_slots_from_xlsx(str(path))
+    assert result["doc_type"] == "xlsx"
+    sheets = {s["name"]: s for s in result["sheets"]}
+    assert set(sheets.keys()) == {"Sheet1", "Data"}
+
+    sheet1_cells = {cell["address"]: cell for cell in sheets["Sheet1"]["cells"]}
+    assert sheet1_cells["A1"]["value"] == "Question?"
+    assert sheet1_cells["A1"]["bold"] is True
+    assert sheet1_cells["A1"]["font_color"].upper().endswith("FF0000")
+    data_cells = {cell["address"]: cell for cell in sheets["Data"]["cells"]}
+    assert data_cells["B2"]["value"] == "Answer"
+=== ./rfp_pipeline.py ===
+#!/usr/bin/env python3
+"""Convenience script to run slot detection and answer application.
+
+Previously this pipeline only supported DOCX files.  It has been
+refactored to look up concrete handler implementations based on the
+source file's extension so that other document types can be supported in
+future without altering this script.
+"""
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+import importlib
+from typing import Callable, Optional
+
+from rfp_handlers import get_handlers
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description=(
+            "Run slot detection then apply answers.  The handler is selected "
+            "based on the source file's extension; answers JSON optional if "
+            "using --generate"
+        ),
+    )
+    ap.add_argument("source_path", help="Path to the source document")
+    ap.add_argument(
+        "answers_json",
+        nargs="?",
+        help="Path to answers JSON; omit when using --generate",
+    )
+    ap.add_argument("-o", "--out", help="Output file (defaults to Answered<ext>)")
+    ap.add_argument("--slots", help="Optional path to write detected slots JSON")
+    ap.add_argument(
+        "--mode", choices=["replace", "append", "fill"], default="fill", help="Answer write mode"
+    )
+    ap.add_argument(
+        "--generate",
+        metavar="MODULE:FUNC",
+        help="Optional answer generator to call when an answer is missing or when no answers JSON is provided",
+    )
+    ap.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=True,
+        help="Verbose debug output (default on)",
+    )
+    ap.add_argument(
+        "--no-debug",
+        dest="debug",
+        action="store_false",
+        help="Disable debug output",
+    )
+    if len(sys.argv) == 1:
+        ap.print_help()
+        sys.exit(1)
+    args = ap.parse_args()
+
+    if args.debug:
+        print("[rfp_pipeline] starting pipeline")
+    # Determine file handlers based on extension
+    if not os.path.isfile(args.source_path):
+        print(f"Error: '{args.source_path}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+    ext = os.path.splitext(args.source_path)[1].lower()
+    try:
+        extract_slots, apply_answers = get_handlers(ext)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Default output path
+    out_path = args.out or f"Answered{ext}"
+
+    # Step 1: detect slots
+    if args.debug:
+        print("[rfp_pipeline] extracting slots")
+    try:
+        slots_payload = extract_slots(args.source_path)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"Error: failed to extract slots: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Save slots JSON
+    if args.slots:
+        slots_path = args.slots
+        with open(slots_path, "w", encoding="utf-8") as f:
+            json.dump(slots_payload, f, indent=2, ensure_ascii=False)
+    else:
+        fd, slots_path = tempfile.mkstemp(prefix="slots_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(slots_payload, f)
+
+    # If no answers JSON and no generator specified, just print slots and exit
+    if not args.answers_json and not args.generate:
+        if args.debug:
+            print("[rfp_pipeline] no answers JSON or generator; exiting after slot detection")
+        print(json.dumps(slots_payload, indent=2, ensure_ascii=False))
+        if not args.slots:
+            os.unlink(slots_path)
+        return
+
+    # Optional answer generator
+    gen_callable: Optional[Callable[[str], str]] = None
+    gen_name = ""
+    if args.generate:
+        if ":" not in args.generate:
+            print("Error: --generate requires MODULE:FUNC", file=sys.stderr)
+            if not args.slots:
+                os.unlink(slots_path)
+            sys.exit(1)
+        mod_name, func_name = args.generate.split(":", 1)
+        try:
+            module = importlib.import_module(mod_name)
+            gen_callable = getattr(module, func_name)
+            if not callable(gen_callable):
+                raise AttributeError
+            gen_name = args.generate
+            if args.debug:
+                print(f"[rfp_pipeline] loaded generator {gen_name}")
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"Error: failed to load generator {args.generate}: {e}", file=sys.stderr)
+            if not args.slots:
+                os.unlink(slots_path)
+            sys.exit(1)
+
+    # Step 2: apply answers
+    if args.debug:
+        print("[rfp_pipeline] applying answers")
+    try:
+        summary = apply_answers(
+            args.source_path,
+            slots_path,
+            args.answers_json or "",
+            out_path,
+            mode=args.mode,
+            generator=gen_callable,
+            gen_name=gen_name,
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"Error: failed to apply answers: {e}", file=sys.stderr)
+        if not args.slots:
+            os.unlink(slots_path)
+        sys.exit(1)
+
+    if args.debug:
+        for k, v in summary.items():
+            print(f"{k}: {v}")
+    else:
+        print(f"Wrote {out_path}")
+
+    if not args.slots:
+        os.unlink(slots_path)
+
+
+if __name__ == "__main__":
+    main()
+=== ./__init__.py ===
+# Marks rfp_utils as a package
+__all__ = [
+    "qa_core",
+    "my_module",
+    "rfp_docx_apply_answers",
+    "rfp_docx_slot_finder",
+    "rfp_xlsx_slot_finder",
+    "rfp_xlsx_apply_answers",
+    "rfp_pipeline",
+    "rfp_handlers",
+    "answer_composer",
+    "word_comments",
+]
+=== ./answer_composer.py ===
+#!/usr/bin/env python3
+"""
+answer_composer.py
+
+A standalone script to call either OpenAI's API or the custom CompletionsClient
+and print the final response. Uses service-account credentials
+(aladdin_user/aladdin_passwd) from .env when using the custom framework.
+
+Environment variables required in your .env for the custom framework:
+
+    aladdin_studio_api_key   ← your API key
+    defaultWebServer         ← e.g. https://webster.bfm.com
+    aladdin_user             ← your service account username
+    aladdin_passwd           ← your service account password
+
+Environment variables required for OpenAI:
+
+    OPENAI_API_KEY           ← your OpenAI API key
+
+Usage:
+    python3 answer_composer.py --framework openai
+    python3 answer_composer.py --framework aladdin
+"""
+
+import argparse
+import datetime
+import json
+import os
+import time
+import uuid
+
+import requests
+from requests.auth import HTTPBasicAuth
+from dotenv import load_dotenv
+
+# Load all .env variables at startup
+load_dotenv(override=True)
+
+
+class CompletionsClient:
+    """Client for the custom Aladdin chat-completion service."""
+
+    def __init__(self, model: str = "gpt-5-nano"):
+        self.model = model
+        self.service_costs = 0.0
+
+        # 1) Load API key + base URL
+        self.api_key = os.environ.get("aladdin_studio_api_key")
+        self.base_url = os.environ.get("defaultWebServer", "").rstrip("/")
+
+        if not self.api_key or not self.base_url:
+            raise RuntimeError(
+                "Missing aladdin_studio_api_key or defaultWebServer in environment."
+            )
+
+        # 2) Build headers with a fresh Request-ID + timestamp
+        self.header = {
+            "Content-Type": "application/json",
+            "VND.com.blackrock.Request-ID": str(uuid.uuid1()),
+            "VND.com.blackrock.Origin-Timestamp": datetime.datetime.utcnow()
+            .replace(microsecond=0)
+            .astimezone()
+            .isoformat(),
+            "VND.com.blackrock.API-Key": self.api_key,
+        }
+
+        # 3) Use service-account creds (aladdin_user/aladdin_passwd) for BasicAuth
+        aladdin_user = os.environ.get("aladdin_user")
+        aladdin_pass = os.environ.get("aladdin_passwd")
+        if not aladdin_user or not aladdin_pass:
+            raise RuntimeError(
+                "Missing aladdin_user or aladdin_passwd in environment."
+            )
+
+        self.auth = HTTPBasicAuth(aladdin_user, aladdin_pass)
+
+        # 4) Pricing table: USD per million tokens
+        self.pricing = {
+            "gpt-5-nano": {"input": 0.05, "output": 0.4},
+            "gpt-35-turbo": {"input": 0.50, "output": 1.50},
+            "gpt-4": {"input": 60.0, "output": 120.0},
+            "gpt-4-32k-0613": {"input": 60.0, "output": 120.0},
+            "gpt-4o": {"input": 5.0, "output": 15.0},
+        }
+
+    def get_completion(self, prompt: str, json_output: bool = False) -> tuple[str, dict]:
+        """Send a single chat completion request and return (reply, usage)."""
+        endpoint = (
+            f"{self.base_url}/api/ai-platform/toolkit/chat-completion/v1/chatCompletions:compute"
+        )
+
+        payload = {
+            "chatCompletionMessages": [
+                {"prompt": prompt, "promptRole": "assistant"}
+            ],
+            "modelId": self.model,
+        }
+        if json_output:
+            payload["response_format"] = {"type": "json_object"}
+
+        response = requests.post(
+            endpoint, json=payload, headers=self.header, auth=self.auth
+        )
+        data = response.json()
+
+        operation_id = data.get("id")
+        done_flag = data.get("done", False)
+
+        if done_flag:
+            return self._finalize_and_extract(data)
+        if operation_id is None:
+            raise RuntimeError(
+                f"No 'id' in POST response; cannot poll LRO. Full response: {json.dumps(data)}"
+            )
+
+        poll_url = (
+            f"{self.base_url}/api/ai-platform/toolkit/completion/v1/longRunningOperations/"
+            f"{operation_id}"
+        )
+        completed_data = self._poll_until_done(poll_url)
+        return self._finalize_and_extract(completed_data)
+
+    def _poll_until_done(self, url: str, initial_sleep: int = 5) -> dict:
+        """Poll the given LRO URL until 'done': True."""
+        attempts = 0
+        sleep_time = initial_sleep
+
+        while attempts < 50:
+            resp = requests.get(url, headers=self.header, auth=self.auth)
+            data = resp.json()
+            if data.get("done", False):
+                return data
+            attempts += 1
+            if attempts == 20:
+                sleep_time = 10
+            time.sleep(sleep_time)
+
+        raise TimeoutError("Chat-completion operation timed out after 50 polls.")
+
+    def _finalize_and_extract(self, data: dict) -> tuple[str, dict]:
+        """Compute cost once LRO is done and return (reply, usage)."""
+        metadata = data["response"]["chatCompletion"]["chatCompletionMetadata"]
+        prompt_tokens = metadata["promptTokenCount"]
+        completion_tokens = metadata["completionTokenCount"]
+        content = data["response"]["chatCompletion"]["chatCompletionContent"]
+
+        model_props = self.pricing.get(self.model, {})
+        prompt_cost = prompt_tokens * model_props.get("input", 0) / 1_000_000
+        completion_cost = completion_tokens * model_props.get("output", 0) / 1_000_000
+        self.service_costs += prompt_cost + completion_cost
+
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+
+        return content, usage
+
+
+def get_openai_completion(prompt: str, model: str, json_output: bool = False) -> tuple[str, dict]:
+    """Fetch a completion from OpenAI's API and return (reply, usage)."""
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY in environment.")
+    client = OpenAI(api_key=api_key)
+    params = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if json_output:
+        params["response_format"] = {"type": "json_object"}
+    resp = client.chat.completions.create(**params)
+    usage = {
+        "prompt_tokens": resp.usage.prompt_tokens,
+        "completion_tokens": resp.usage.completion_tokens,
+    }
+    return resp.choices[0].message.content, usage
+
+
+def main(prompt: str, framework: str, model: str, json_output: bool = False) -> str:
+    """Dispatch to the requested framework and return the completion."""
+    if framework == "aladdin":
+        client = CompletionsClient(model=model)
+        content, _ = client.get_completion(prompt, json_output=json_output)
+        return content
+    if framework == "openai":
+        content, _ = get_openai_completion(prompt, model, json_output=json_output)
+        return content
+    raise ValueError(f"Unknown framework: {framework}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Call an LLM using different frameworks")
+    parser.add_argument(
+        "--framework",
+        choices=["openai", "aladdin"],
+        default=os.getenv("ANSWER_FRAMEWORK", "openai"),
+        help="Which completion framework to use",
+    )
+    parser.add_argument(
+        "--model",
+        default="gpt-5-nano",
+        help="Model name for the chosen framework",
+    )
+    parser.add_argument(
+        "--prompt",
+        default="Explain the convergence of gradient descent.",
+        help="Prompt to send to the model",
+    )
+    args = parser.parse_args()
+
+    reply = main(args.prompt, args.framework, args.model)
+    print("\n=== Assistant Reply ===\n")
+    print(reply)
+=== ./rfp_xlsx_slot_finder.py ===
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List, Optional
+
+import openpyxl
+from openpyxl.styles import Color
+from openpyxl.utils import get_column_letter
+
+
+def _color_to_hex(color: Optional[Color]) -> Optional[str]:
+    """Convert an openpyxl Color to a RGB hex string.
+
+    openpyxl colors may include an alpha channel (ARGB).  This helper
+    normalizes them to ``RRGGBB`` if possible.  If the color is theme- or
+    indexed-based, ``None`` is returned.
+    """
+    if color is None:
+        return None
+    if getattr(color, "type", None) != "rgb":
+        return None
+    rgb = getattr(color, "rgb", None)
+    if not isinstance(rgb, str):
+        return None
+    # ``rgb`` is usually ``AARRGGBB``; drop the alpha channel if present
+    if len(rgb) == 8:
+        rgb = rgb[2:]
+    return rgb
+
+
+def extract_slots_from_xlsx(path: str) -> Dict[str, Any]:
+    """Extract text and formatting from an .xlsx file.
+
+    The returned structure mirrors the DOCX slot finder in spirit but is
+    simplified.  It returns a dictionary with ``doc_type`` set to
+    ``"xlsx"`` and a ``sheets`` list, where each sheet contains a list of
+    populated cells.  Each cell records its address (e.g. ``A1``), the
+    text value, and basic formatting attributes (font color, bold,
+    italic, background color, and border styles).
+    """
+    wb = openpyxl.load_workbook(path, data_only=True)
+    sheets: List[Dict[str, Any]] = []
+    for ws in wb.worksheets:
+        cells: List[Dict[str, Any]] = []
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value is None:
+                    continue
+                cell_info: Dict[str, Any] = {
+                    "address": cell.coordinate,
+                    "row": cell.row,
+                    "column": get_column_letter(cell.column),
+                    "value": str(cell.value),
+                    "font_color": _color_to_hex(cell.font.color),
+                    "bold": bool(cell.font.bold),
+                    "italic": bool(cell.font.italic),
+                    "bg_color": _color_to_hex(cell.fill.start_color),
+                    "border": {
+                        "left": cell.border.left.style,
+                        "right": cell.border.right.style,
+                        "top": cell.border.top.style,
+                        "bottom": cell.border.bottom.style,
+                    },
+                }
+                cells.append(cell_info)
+        sheets.append({"name": ws.title, "cells": cells})
+    return {"doc_type": "xlsx", "file": os.path.basename(path), "sheets": sheets}
+
+
+__all__ = ["extract_slots_from_xlsx"]
+=== ./my_module_archive.py ===
+
+
+"""Simple generator module for rfp_docx_apply_answers.
+
+`gen_answer(question)` returns the question text reversed. For example:
+>>> gen_answer("What's your name?")
+"?eman ruoy s'tahW"
+"""
+
+def gen_answer(question: str) -> str:
+    """Return the reversed question string as a toy answer generator."""
+    if question is None:
+        return ""
+    # Reverse the entire string (maintain punctuation at end for demonstration)
+    return question[::-1]=== ./prompts.py ===
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Dict
+
+
+def _resolve_prompts_dir() -> Path:
+    """Locate the directory containing prompt template files."""
+    env = os.getenv("RFP_PROMPTS_DIR")
+    if env:
+        p = Path(env).expanduser()
+        if p.is_dir():
+            return p
+    here = Path(__file__).resolve().parent / "prompts"
+    if here.is_dir():
+        return here
+    cwdp = Path.cwd() / "prompts"
+    if cwdp.is_dir():
+        return cwdp
+    # Fallback still returns the 'here' path (reads will raise FileNotFoundError if missing)
+    return Path(__file__).resolve().parent / "prompts"
+
+PROMPTS_DIR = _resolve_prompts_dir()
+
+
+def read_prompt(name: str, default: str = "") -> str:
+    """Read a prompt template from PROMPTS_DIR or return default."""
+    p = PROMPTS_DIR / f"{name}.txt"
+    try:
+        return p.read_text(encoding="utf-8")
+    except Exception:
+        return default
+
+
+def load_prompts(defaults: Dict[str, str]) -> Dict[str, str]:
+    """Load multiple prompt templates given a mapping of name->default."""
+    return {k: read_prompt(k, v) for k, v in defaults.items()}
+=== ./rfp_handlers.py ===
+"""File type handler registry for slot extraction and answer application.
+
+This module centralizes the mapping between file extensions and the
+functions that know how to extract question/answer slots and how to
+apply answers back to the document.  New file formats can be supported
+simply by registering the appropriate functions here without modifying
+the core pipeline.
+"""
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Callable, Dict, Tuple
+
+# Type aliases for clarity
+SlotExtractor = Callable[[str], dict]
+AnswerApplier = Callable[[str, str, str, str], dict]
+
+# Registry mapping lower‑case file extensions to the modules and function
+# names that implement the required operations for that format.
+#
+#   extension: (slot_finder_module, slot_finder_func,
+#               answer_applier_module, answer_applier_func)
+#
+FILE_HANDLERS: Dict[str, Tuple[str, str, str, str]] = {
+    ".docx": (
+        "rfp_docx_slot_finder", "extract_slots_from_docx",
+        "rfp_docx_apply_answers", "apply_answers_to_docx",
+    ),
+    ".xlsx": (
+        "rfp_xlsx_slot_finder", "extract_slots_from_xlsx",
+        "rfp_xlsx_apply_answers", "apply_answers_to_xlsx",
+    ),
+}
+
+
+def get_handlers(ext: str) -> Tuple[SlotExtractor, AnswerApplier]:
+    """Return (slot_extractor, answer_applier) for the given extension.
+
+    Raises ``ValueError`` if the extension is unknown.  Extensions should
+    include the leading dot, e.g. ``.docx``.
+    """
+    key = ext.lower()
+    if key not in FILE_HANDLERS:
+        raise ValueError(f"Unsupported file extension: {ext}")
+    slot_mod, slot_func, apply_mod, apply_func = FILE_HANDLERS[key]
+    slot_extractor = getattr(import_module(slot_mod), slot_func)
+    answer_applier = getattr(import_module(apply_mod), apply_func)
+    return slot_extractor, answer_applier
+=== ./rfp_xlsx_apply_answers.py ===
+"""Placeholder apply-answers module for .xlsx files.
+
+Currently only extraction of text/formatting is supported.  This module
+exists so that ``rfp_handlers`` can register an answer applier for the
+``.xlsx`` extension.  The function defined here simply raises
+``NotImplementedError``.
+"""
+from __future__ import annotations
+
+from typing import Dict
+
+
+def apply_answers_to_xlsx(xlsx_path: str, slots_json: str, answers_json: str, out_path: str) -> Dict[str, str]:
+    raise NotImplementedError("Excel answer application not yet implemented")
+
+
+__all__ = ["apply_answers_to_xlsx"]
+=== ./word_comments.py ===
+from datetime import datetime
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
+
+def ensure_comments_part(document):
+    """Return the document's comments part, creating it if necessary.
+
+    The `python-docx` API has changed over versions. Newer versions expose a
+    ``_comments_part`` property that creates the part on access, while older
+    versions provided ``comments_part`` or an ``add_comments_part()`` factory
+    method. This helper tries the available options to stay compatible across
+    versions.
+    """
+
+    # Preferred modern API: private ``_comments_part`` property
+    part = getattr(document.part, "_comments_part", None)
+    if part is not None:
+        return part
+
+    # Older API: direct attribute
+    part = getattr(document.part, "comments_part", None)
+    if part is not None:
+        return part
+
+    # Fallback: explicit factory method
+    add_part = getattr(document.part, "add_comments_part", None)
+    if callable(add_part):
+        return add_part()
+
+    raise AttributeError("This version of python-docx does not support comments")
+
+def add_comment_to_run(document, run, comment_text, author="RFPBot"):
+    part = ensure_comments_part(document)
+
+    # Next id
+    try:
+        existing = part._element.xpath(".//w:comment", namespaces=part._element.nsmap)
+        next_id = max([int(el.get(qn("w:id"))) for el in existing] + [0]) + 1
+    except Exception:
+        next_id = 0
+
+    # <w:comment>
+    c = OxmlElement("w:comment")
+    c.set(qn("w:id"), str(next_id))
+    c.set(qn("w:author"), author)
+    c.set(qn("w:date"), datetime.utcnow().isoformat() + "Z")
+    p = OxmlElement("w:p")
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = str(comment_text or "")
+    r.append(t)
+    p.append(r)
+    c.append(p)
+    part._element.append(c)
+
+    # Anchor comment to the run
+    start = OxmlElement("w:commentRangeStart"); start.set(qn("w:id"), str(next_id))
+    end   = OxmlElement("w:commentRangeEnd");   end.set(qn("w:id"), str(next_id))
+    ref_r = OxmlElement("w:r")
+    ref   = OxmlElement("w:commentReference");  ref.set(qn("w:id"), str(next_id))
+    ref_r.append(ref)
+
+    parent = run._r.getparent()
+    idx = parent.index(run._r)
+    parent.insert(idx, start)          # before the run
+    parent.insert(idx + 2, end)        # after the run
+    parent.insert(idx + 3, ref_r)      # reference run

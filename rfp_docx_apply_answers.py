@@ -473,7 +473,7 @@ def apply_answers_to_docx(
                         src = v.get("source_file")
                         piece = str(snippet)
                         if src:
-                            piece += f"\nSource File: {src}"
+                            piece += f"\nSource File:\n {src}"
                         parts.append(piece)
                     else:
                         parts.append(str(v))
