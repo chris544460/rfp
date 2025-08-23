@@ -90,3 +90,30 @@ def test_comment_formats_citations(tmp_path):
     xml = part._element.xml
     assert "First" in xml
     assert "Second" in xml
+
+
+def test_default_comments_docx_path(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "Question?"
+    in_path = tmp_path / "in.xlsx"
+    wb.save(in_path)
+
+    schema = [
+        {
+            "sheet": "Sheet1",
+            "question_cell": "A1",
+            "answer_cell": "B1",
+            "question_text": "Question?",
+        }
+    ]
+    answers = [{"text": "Ans [1]", "citations": {1: "Snippet"}}]
+    out_path = tmp_path / "out.xlsx"
+    write_excel_answers(schema, answers, str(in_path), str(out_path))
+
+    comments_path = tmp_path / "out_comments.docx"
+    assert comments_path.exists()
+
+    wb2 = openpyxl.load_workbook(out_path)
+    assert wb2["Sheet1"]["B1"].comment is None
