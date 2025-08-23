@@ -178,19 +178,38 @@ def _question_context(ws, cell) -> Dict[str, Any]:
     }
 
 
-def _llm_find_answer_cell(question_ctx: Dict[str, Any], sheet: Dict[str, Any], *, model: str) -> Optional[str]:
-    """Invoke the LLM to choose an answer cell for ``question_ctx`` in ``sheet``."""
+def _llm_choose_answer_slot(
+    question_ctx: Dict[str, Any], sheets: Dict[str, Any], *, model: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """Invoke the LLM to choose the answer sheet and cell.
+
+    Parameters
+    ----------
+    question_ctx:
+        Context dictionary describing the question cell.
+    sheets:
+        Mapping of sheet name to a JSON serialisation of the worksheet.  The
+        structure mirrors the output of :func:`_sheet_to_json`.
+    model:
+        Name of the LLM model to invoke.
+
+    Returns
+    -------
+    (sheet_name, cell_address):
+        The selected sheet and cell address for the answer.  ``(None, None)`` is
+        returned if the model cannot pick a location or the API key is missing.
+    """
 
     if not os.getenv("OPENAI_API_KEY"):
-        return None
-    payload = {"question": question_ctx, "sheet": sheet}
+        return None, None
+    payload = {"question": question_ctx, "sheets": sheets}
     try:
-        res = _call_llm("xlsx_sheet_answer_slot.txt", payload, model=model)
+        res = _call_llm("xlsx_workbook_answer_slot.txt", payload, model=model)
     except Exception:
-        return None
+        return None, None
     if isinstance(res, dict):
-        return res.get("answer_cell")
-    return None
+        return res.get("sheet"), res.get("answer_cell")
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -416,9 +435,10 @@ def extract_schema_from_xlsx(
     Each non-empty cell is examined with spaCy to determine whether it reads
     like a question or imperative.  For every such cell a context package is
     assembled consisting of the entire row and a 10×10 rectangle around the
-    cell.  That context is provided, sheet by sheet, to an LLM which selects the
-    most appropriate answer cell.  If the model is unavailable or declines to
-    pick a location, ``answer_cell`` is ``None``.
+    cell.  That context plus serialized profiles of **all** sheets are supplied
+    to an LLM which chooses the best sheet and cell for the answer.  If the
+    model is unavailable or declines to pick a location, ``answer_cell`` is
+    ``None`` and the question sheet is used as a fallback.
     """
 
     wb = load_workbook(path, data_only=True)
@@ -443,22 +463,20 @@ def extract_schema_from_xlsx(
                     continue
 
                 qctx = _question_context(ws, cell)
-                answer: Optional[str] = None
-                for sheet_name, profile in sheet_profiles.items():
-                    if debug:
-                        print(f"    LLM scan against sheet '{sheet_name}'")
-                    chosen = _llm_find_answer_cell(qctx, profile, model=model)
-                    if chosen:
-                        answer = chosen
-                        if debug:
-                            print(f"      -> chose {sheet_name}!{chosen}")
-                        break
+                answer_sheet, answer_cell = _llm_choose_answer_slot(
+                    qctx, sheet_profiles, model=model
+                )
+                if debug:
+                    print(
+                        f"    LLM chose {answer_sheet}!{answer_cell}" if answer_cell else "    LLM declined"
+                    )
                 schema.append(
                     {
-                        "sheet": ws.title,
+                        "sheet": answer_sheet or ws.title,
+                        "question_sheet": ws.title,
                         "question_cell": cell.coordinate,
                         "question_text": text,
-                        "answer_cell": answer,
+                        "answer_cell": answer_cell,
                     }
                 )
 
