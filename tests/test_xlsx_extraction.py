@@ -90,6 +90,8 @@ def test_comment_formats_citations(tmp_path):
     xml = part._element.xml
     assert "First" in xml
     assert "Second" in xml
+    assert "Source Text" in xml
+    assert "<w:b/>" in xml
 
 
 def test_default_comments_docx_path(tmp_path):
