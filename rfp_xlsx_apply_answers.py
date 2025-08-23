@@ -147,7 +147,7 @@ def write_excel_answers(
                 )
             else:
                 try:
-                    parts = [f"[{k}] {v}" for k, v in citations.items()]
+                    parts = [f"[{k}] Source Text: {v}" for k, v in citations.items()]
                     comment_txt = _sanitize_comment_text("\n\n".join(parts))
                     if comment_txt:
                         cell.comment = Comment(comment_txt, "RFPBot")
@@ -177,7 +177,7 @@ def write_excel_answers(
                     run = p.add_run(match.group(0))
                     snippet = cits.get(num) or cits.get(int(num)) or cits.get(str(num))
                     if snippet:
-                        add_comment_to_run(doc, run, str(snippet))
+                        add_comment_to_run(doc, run, str(snippet), bold_prefix="Source Text: ")
                     pos = match.end()
                 if pos < len(t):
                     p.add_run(t[pos:])

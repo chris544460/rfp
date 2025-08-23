@@ -24,5 +24,8 @@ def test_mark_multiple_choice_adds_comment(tmp_path):
 
     reopened = docx.Document(path)
     part = ensure_comments_part(reopened)
-    assert "Evidence snippet" in part._element.xml
+    xml = part._element.xml
+    assert "Evidence snippet" in xml
+    assert "Source Text" in xml
+    assert "<w:b/>" in xml
 
