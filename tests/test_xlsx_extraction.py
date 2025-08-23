@@ -100,6 +100,7 @@ def test_comment_formats_citations(tmp_path):
     assert "Second" in xml
     assert "Source Text" in xml
     assert "Source File" in xml
+    assert xml.index("Source File") < xml.index("Source Text")
     assert "file1.txt" in xml
     assert "file2.txt" in xml
     assert "<w:b/>" in xml

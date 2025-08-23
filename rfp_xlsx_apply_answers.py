@@ -156,9 +156,10 @@ def write_excel_answers(
                         else:
                             txt = str(v)
                             src = None
-                        part = f"[{k}] Source Text: {txt}"
                         if src:
-                            part += f"\nSource File: {src}"
+                            part = f"[{k}] Source File: {src}\nSource Text: {txt}"
+                        else:
+                            part = f"[{k}] Source Text: {txt}"
                         parts.append(part)
                     comment_txt = _sanitize_comment_text("\n\n".join(parts))
                     if comment_txt:
