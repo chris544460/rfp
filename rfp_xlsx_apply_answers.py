@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import List, Dict, Any, Optional, Callable
 
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
+
+
+# Excel comments are XML strings and must avoid control characters.
+# Additionally, Excel limits comment text to 32k characters.
+_INVALID_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+_MAX_COMMENT_LEN = 32000
+
+
+def _sanitize_comment_text(text: str) -> str:
+    """Remove invalid characters and truncate overly long comments."""
+    clean = _INVALID_XML_RE.sub("", text or "")
+    if len(clean) > _MAX_COMMENT_LEN:
+        clean = clean[:_MAX_COMMENT_LEN]
+    return clean
 
 
 def _to_text_and_citations(ans: object) -> tuple[str, Dict[str, str]]:
@@ -109,14 +124,16 @@ def write_excel_answers(
         if inc_comments and citations:
             try:
                 parts = [f"[{k}] {v}" for k, v in citations.items()]
-                comment_txt = "\n\n".join(parts)
-                cell.comment = Comment(comment_txt, "RFPBot")
+                comment_txt = _sanitize_comment_text("\n\n".join(parts))
+                if comment_txt:
+                    cell.comment = Comment(comment_txt, "RFPBot")
             except Exception:
                 pass
 
         applied += 1
 
     wb.save(out_xlsx_path)
+    wb.close()
     return {"applied": applied, "skipped": skipped, "total": len(schema)}
 
 
