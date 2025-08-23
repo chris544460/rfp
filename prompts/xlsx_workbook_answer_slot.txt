@@ -1,0 +1,6 @@
+You are given a question cell with surrounding context and an entire workbook's
+sheet layouts. Choose which sheet and cell should hold the answer. Return a JSON
+object with keys `sheet` and `answer_cell` (e.g. {"sheet": "A", "answer_cell": "C5"}).
+Use `null` values if no suitable location exists.
+
+{{data}}
