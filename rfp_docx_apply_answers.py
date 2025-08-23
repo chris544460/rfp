@@ -124,7 +124,7 @@ def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[ob
             if isinstance(snippet, dict):
                 snippet = snippet.get("text") or snippet.get("snippet") or snippet.get("content")
             if snippet:
-                add_comment_to_run(doc, run, str(snippet))
+                add_comment_to_run(doc, run, str(snippet), bold_prefix="Source Text: ")
             pos = match.end()
         if pos < len(line):
             paragraph.add_run(line[pos:])
@@ -349,7 +349,7 @@ def mark_multiple_choice(
     if comment_text:
         run = para.runs[0] if para.runs else para.add_run()
         try:
-            add_comment_to_run(doc, run, comment_text)
+            add_comment_to_run(doc, run, comment_text, bold_prefix="Source Text: ")
         except Exception as e:
             dbg(f"  -> error adding comment: {e}")
 
