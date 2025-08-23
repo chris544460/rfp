@@ -64,8 +64,10 @@ def write_excel_answers(
 
     answers[i] can be a string or a dict like:
       {"text": "...", "citations": {1: "snippet", 2: "snippet", ...}}
-    If ``comments_docx_path`` is provided, citation snippets will be written to
-    a separate Word document instead of Excel cell comments.
+    Citation snippets are written to a separate Word document instead of Excel
+    cell comments. If ``comments_docx_path`` is ``None``, the DOCX will be
+    created next to ``out_xlsx_path`` using the same base name with a
+    ``"_comments.docx"`` suffix.
     """
     inc_comments = (
         (os.getenv("RFP_INCLUDE_COMMENTS", "1") == "1")
@@ -80,6 +82,10 @@ def write_excel_answers(
     skipped = 0
 
     doc_entries: List[Dict[str, Any]] = []
+
+    if inc_comments and comments_docx_path is None:
+        base, _ = os.path.splitext(out_xlsx_path)
+        comments_docx_path = base + "_comments.docx"
 
     # Ensure answers aligns with schema (allow None entries and generate if a generator is provided)
     if len(answers) < len(schema):
