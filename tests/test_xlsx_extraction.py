@@ -67,7 +67,15 @@ def test_comment_formats_citations(tmp_path):
             "question_text": "Question?",
         }
     ]
-    answers = [{"text": "Ans [1] [2]", "citations": {1: "First", 2: "Second"}}]
+    answers = [
+        {
+            "text": "Ans [1] [2]",
+            "citations": {
+                1: {"text": "First", "source_file": "file1.txt"},
+                2: {"text": "Second", "source_file": "file2.txt"},
+            },
+        }
+    ]
     out_path = tmp_path / "out.xlsx"
     comments_path = tmp_path / "comments.docx"
     write_excel_answers(
@@ -91,6 +99,9 @@ def test_comment_formats_citations(tmp_path):
     assert "First" in xml
     assert "Second" in xml
     assert "Source Text" in xml
+    assert "Source File" in xml
+    assert "file1.txt" in xml
+    assert "file2.txt" in xml
     assert "<w:b/>" in xml
 
 

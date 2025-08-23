@@ -88,10 +88,10 @@ def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
 def normalize_question(q: str) -> str:
     return " ".join((q or "").strip().lower().split())
 
-def _normalize_citations(raw: object) -> Dict[str, str]:
+def _normalize_citations(raw: object) -> Dict[str, object]:
     if not raw:
         return {}
-    result: Dict[str, str] = {}
+    result: Dict[str, object] = {}
     if isinstance(raw, dict):
         items = raw.items()
     elif isinstance(raw, list):
@@ -104,12 +104,12 @@ def _normalize_citations(raw: object) -> Dict[str, str]:
     for key, val in items:
         if isinstance(val, dict):
             snippet = val.get("text") or val.get("snippet") or val.get("source_text") or val.get("content") or ""
+            result[str(key)] = {"text": str(snippet), "source_file": val.get("source_file")}
         else:
-            snippet = str(val)
-        result[str(key)] = str(snippet)
+            result[str(key)] = {"text": str(val)}
     return result
 
-def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, str]) -> None:
+def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, object]) -> None:
     """Write text and attach Word comments to each [n] marker using Utilities helper."""
     doc = paragraph.part.document
     parts = text.split("\n")
@@ -120,11 +120,22 @@ def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[ob
                 paragraph.add_run(line[pos:match.start()])
             num = match.group(1)
             run = paragraph.add_run(match.group(0))  # "[n]"
-            snippet = citations.get(num) or citations.get(int(num))
-            if isinstance(snippet, dict):
-                snippet = snippet.get("text") or snippet.get("snippet") or snippet.get("content")
+            data = citations.get(num) or citations.get(int(num))
+            snippet = None
+            source_file = None
+            if isinstance(data, dict):
+                snippet = data.get("text") or data.get("snippet") or data.get("content")
+                source_file = data.get("source_file")
+            elif data is not None:
+                snippet = str(data)
             if snippet:
-                add_comment_to_run(doc, run, str(snippet), bold_prefix="Source Text: ")
+                add_comment_to_run(
+                    doc,
+                    run,
+                    str(snippet),
+                    bold_prefix="Source Text: ",
+                    source_file=source_file,
+                )
             pos = match.end()
         if pos < len(line):
             paragraph.add_run(line[pos:])
@@ -349,7 +360,9 @@ def mark_multiple_choice(
     if comment_text:
         run = para.runs[0] if para.runs else para.add_run()
         try:
-            add_comment_to_run(doc, run, comment_text, bold_prefix="Source Text: ")
+            add_comment_to_run(
+                doc, run, comment_text, bold_prefix="Source Text: ", source_file=None
+            )
         except Exception as e:
             dbg(f"  -> error adding comment: {e}")
 
@@ -453,7 +466,18 @@ def apply_answers_to_docx(
             citations = answer.get("citations") if isinstance(answer, dict) else None
             comment_text = None
             if isinstance(citations, dict):
-                comment_text = "\n\n".join(str(v) for v in citations.values())
+                parts: List[str] = []
+                for v in citations.values():
+                    if isinstance(v, dict):
+                        snippet = v.get("text") or v.get("snippet") or v.get("content") or ""
+                        src = v.get("source_file")
+                        piece = str(snippet)
+                        if src:
+                            piece += f"\nSource File: {src}"
+                        parts.append(piece)
+                    else:
+                        parts.append(str(v))
+                comment_text = "\n\n".join(parts)
             if idx is not None:
                 try:
                     mark_multiple_choice(doc, blocks, choice_meta, int(idx), style, comment_text)

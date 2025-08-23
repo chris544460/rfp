@@ -30,7 +30,14 @@ def ensure_comments_part(document):
 
     raise AttributeError("This version of python-docx does not support comments")
 
-def add_comment_to_run(document, run, comment_text, author="RFPBot", bold_prefix=None):
+def add_comment_to_run(
+    document,
+    run,
+    comment_text,
+    author="RFPBot",
+    bold_prefix=None,
+    source_file: str | None = None,
+):
     part = ensure_comments_part(document)
 
     # Next id
@@ -61,6 +68,23 @@ def add_comment_to_run(document, run, comment_text, author="RFPBot", bold_prefix
     t.text = str(comment_text or "")
     r.append(t)
     p.append(r)
+    if source_file:
+        br = OxmlElement("w:br")
+        p.append(br)
+        r2 = OxmlElement("w:r")
+        r2_pr = OxmlElement("w:rPr")
+        b2 = OxmlElement("w:b")
+        r2_pr.append(b2)
+        r2.append(r2_pr)
+        t2 = OxmlElement("w:t")
+        t2.text = "Source File: "
+        r2.append(t2)
+        p.append(r2)
+        r3 = OxmlElement("w:r")
+        t3 = OxmlElement("w:t")
+        t3.text = str(source_file)
+        r3.append(t3)
+        p.append(r3)
     c.append(p)
     part._element.append(c)
 
