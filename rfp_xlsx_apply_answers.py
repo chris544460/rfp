@@ -175,24 +175,33 @@ def write_excel_answers(
     if inc_comments and comments_docx_path and doc_entries:
         try:
             doc = docx.Document()
-            for entry in doc_entries:
+            for idx, entry in enumerate(doc_entries, start=1):
                 q = entry["question"]
                 t = entry["text"]
                 cits = entry["citations"]
                 if q:
-                    doc.add_paragraph(q)
-                p = doc.add_paragraph()
+                    pq = doc.add_paragraph()
+                    qrun = pq.add_run(f"Question {idx}: ")
+                    qrun.bold = True
+                    pq.add_run(q)
+                pa = doc.add_paragraph()
+                arun = pa.add_run("Answer: ")
+                arun.bold = True
                 pos = 0
                 for match in _CITATION_RE.finditer(t):
                     if match.start() > pos:
-                        p.add_run(t[pos:match.start()])
+                        pa.add_run(t[pos:match.start()])
                     num = match.group(1)
-                    run = p.add_run(match.group(0))
+                    run = pa.add_run(match.group(0))
                     data = cits.get(num) or cits.get(int(num)) or cits.get(str(num))
                     snippet = None
                     src_file = None
                     if isinstance(data, dict):
-                        snippet = data.get("text") or data.get("snippet") or data.get("content")
+                        snippet = (
+                            data.get("text")
+                            or data.get("snippet")
+                            or data.get("content")
+                        )
                         src_file = data.get("source_file")
                     elif data is not None:
                         snippet = str(data)
@@ -202,7 +211,8 @@ def write_excel_answers(
                         )
                     pos = match.end()
                 if pos < len(t):
-                    p.add_run(t[pos:])
+                    pa.add_run(t[pos:])
+                doc.add_paragraph("")  # blank line between entries for readability
             doc.save(comments_docx_path)
         except Exception:
             pass
