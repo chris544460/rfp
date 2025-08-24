@@ -177,8 +177,13 @@ def write_excel_answers(
     if inc_comments and comments_docx_path and doc_entries:
         try:
             doc = docx.Document()
+            # Auto-populate fields (like TOC) when opened in Word
+            update = OxmlElement("w:updateFields")
+            update.set(qn("w:val"), "true")
+            doc.settings._element.append(update)
+
             # First page: table of contents
-            doc.add_paragraph("Table of Contents", style="Heading 1")
+            doc.add_paragraph("Table of Contents", style="Title")
             p_toc = doc.add_paragraph()
             run = p_toc.add_run()
             fld = OxmlElement("w:fldSimple")
