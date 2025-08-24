@@ -8,7 +8,6 @@ other pipelines can reuse it without circular imports.
 """
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 # Your vector search — keep the original import path you already use.
 # If your project uses a different path, update this import accordingly.
 from search.vector_search import search
+from llm_doc_search import search_uploaded_docs
 
 # Use the Utilities' client; typically returns (text, usage)
 from answer_composer import CompletionsClient
@@ -49,6 +49,7 @@ def answer_question(
     approx_words: Optional[int],
     min_confidence: float,
     llm: CompletionsClient,
+    extra_docs: Optional[List[str]] = None,
 ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
     """
     Return (answer_text, comments) where comments is a list of:
@@ -59,6 +60,7 @@ def answer_question(
     If no search results meet the confidence threshold, the function returns
     "No relevant information found." and an empty comments list without calling
     the language model.
+    extra_docs: optional list of document paths to scan with an LLM in addition to vector search.
     """
     if DEBUG:
         print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
@@ -70,6 +72,10 @@ def answer_question(
         hits = search(q, k=k, mode="blend", fund_filter=fund) + search(q, k=k, mode="dual", fund_filter=fund)
     else:
         hits = search(q, k=k, mode=mode, fund_filter=fund)
+    if extra_docs:
+        if DEBUG:
+            print(f"[qa_core] LLM searching {len(extra_docs)} uploaded docs")
+        hits.extend(search_uploaded_docs(q, extra_docs, llm))
     if DEBUG:
         print(f"[qa_core] retrieved {len(hits)} hits")
         top_n = min(len(hits), k)

@@ -1,0 +1,4 @@
+You will be given a user question and a chunk of text from an uploaded document.
+The question will appear as "Question:" and the text chunk will follow "Chunk:".
+If the chunk contains information that helps answer the question, respond with "YES:" followed by only the relevant excerpt from the chunk.
+If the chunk does not provide relevant information, respond with "NO".
