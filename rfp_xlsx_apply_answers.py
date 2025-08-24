@@ -8,6 +8,8 @@ from openpyxl import load_workbook
 from openpyxl.comments import Comment
 
 import docx
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from word_comments import add_comment_to_run
 
 
@@ -175,12 +177,21 @@ def write_excel_answers(
     if inc_comments and comments_docx_path and doc_entries:
         try:
             doc = docx.Document()
+            # First page: table of contents
+            doc.add_paragraph("Table of Contents", style="Heading 1")
+            p_toc = doc.add_paragraph()
+            run = p_toc.add_run()
+            fld = OxmlElement("w:fldSimple")
+            fld.set(qn("w:instr"), 'TOC \\o "1-1" \\h \\z \\u')
+            run._r.append(fld)
+            doc.add_page_break()
+
             for idx, entry in enumerate(doc_entries, start=1):
                 q = entry["question"]
                 t = entry["text"]
                 cits = entry["citations"]
                 if q:
-                    pq = doc.add_paragraph()
+                    pq = doc.add_paragraph(style="Heading 1")
                     qrun = pq.add_run(f"Question {idx}: ")
                     qrun.bold = True
                     pq.add_run(q)
@@ -212,7 +223,8 @@ def write_excel_answers(
                     pos = match.end()
                 if pos < len(t):
                     pa.add_run(t[pos:])
-                doc.add_paragraph("")  # blank line between entries for readability
+                if idx < len(doc_entries):
+                    doc.add_page_break()
             doc.save(comments_docx_path)
         except Exception:
             pass
