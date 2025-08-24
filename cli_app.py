@@ -254,7 +254,8 @@ def main():
             answers.append(ans)
 
         out_path = Path(args.output or infile.with_name(infile.stem + "_answered.xlsx"))
-        write_excel_answers(schema, answers, out_path)
+        # write_excel_answers expects both source and destination paths.
+        write_excel_answers(schema, answers, str(infile), str(out_path))
         print(f"[DEBUG] Wrote filled Excel to {out_path}")
         sys.exit(0)
 
