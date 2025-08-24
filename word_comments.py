@@ -1,4 +1,5 @@
 from datetime import datetime
+import uuid
 from typing import Optional
 
 from docx.oxml import OxmlElement
@@ -31,6 +32,52 @@ def ensure_comments_part(document):
         return add_part()
 
     raise AttributeError("This version of python-docx does not support comments")
+
+
+# --- Modern (threaded) comments extension part helper ---
+def ensure_comments_ext_part(document):
+    """
+    Return the document's *modern* comments‑extension part, creating it if
+    necessary.  Modern (threaded) comments reside in a separate part
+    `/word/commentsExt.xml` that contains the `<w15:commentsExt>` root with
+    one `<w15:commentEx>` per legacy comment.  The python‑docx API does not
+    (yet) expose this part officially, but some versions have a private
+    ``_comments_ext_part`` or ``comments_ext_part`` attribute, or a
+    ``add_comments_ext_part()`` factory.  This helper mirrors
+    ``ensure_comments_part`` for maximum compatibility.
+    """
+    # Newer private attr
+    part = getattr(document.part, "_comments_ext_part", None)
+    if part is not None:
+        return part
+
+    # Older attr
+    part = getattr(document.part, "comments_ext_part", None)
+    if part is not None:
+        return part
+
+    # Factory, if provided by patched builds
+    add_part = getattr(document.part, "add_comments_ext_part", None)
+    if callable(add_part):
+        return add_part()
+
+    # Fallback: create an empty commentsExt part manually
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.opc.package import OpcPackage
+    from docx.opc.part import XmlPart
+
+    package: OpcPackage = document.part.package
+    reltype = "http://schemas.microsoft.com/office/2017/10/relationships/commentsExt"
+    if not any(rel.reltype == reltype for rel in document.part.rels.values()):
+        # create a new xml part with the correct content‑type
+        partname = package.partname_for(reltype, "/word/commentsExt.xml")
+        content_type = "application/vnd.ms-word.commentsExt+xml"
+        part = XmlPart(partname, content_type, b'<w15:commentsExt xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/>')
+        package.relate_to(document.part, reltype, part, is_external=False)
+    else:
+        part = next(rel._target for rel in document.part.rels.values() if rel.reltype == reltype)
+
+    return part
 
 def add_comment_to_run(
     document,
@@ -91,6 +138,27 @@ def add_comment_to_run(
     p.append(r)
     c.append(p)
     part._element.append(c)
+
+    # ------------------------------------------------------------------
+    # Modern (threaded) comment extension record
+    # ------------------------------------------------------------------
+    try:
+        ext_part = ensure_comments_ext_part(document)
+        ce = OxmlElement("w15:commentEx")
+        ce.set(qn("w15:id"), str(next_id))
+        # Each thread needs a stable 8‑char paraId – use random hex
+        ce.set(qn("w15:paraId"), uuid.uuid4().hex[:8])
+        ce.set(qn("w15:done"), "0")        # not resolved
+        ce.set(qn("w15:authorId"), "0")    # default author map
+        # Append to the <w15:commentsExt> root (create if missing)
+        root = ext_part._element
+        if root.tag != qn("w15:commentsExt"):  # empty part?
+            root.clear()
+            root.tag = qn("w15:commentsExt")
+        root.append(ce)
+    except AttributeError:
+        # Silently ignore if the running python‑docx build lacks support
+        pass
 
     # Anchor comment to the run
     start = OxmlElement("w:commentRangeStart"); start.set(qn("w:id"), str(next_id))
