@@ -231,6 +231,7 @@ def _make_docx_generator(
     min_confidence: float,
     include_citations_in_text: bool,
     llm: CompletionsClient,
+    extra_docs: Optional[List[str]] = None,
 ) -> Callable[[str], str]:
     """
     Returns a callable(question)->answer_text suitable for rfp_docx_apply_answers.apply_answers_tb_docx.
@@ -245,6 +246,7 @@ def _make_docx_generator(
             approx_words,
             min_confidence,
             llm,
+            extra_docs=extra_docs,
         )
         if not include_citations_in_text:
             ans = re.sub(r"[\[\d+\]]", "", ans)
@@ -274,6 +276,7 @@ def main():
     group.add_argument("--length", choices=["short", "medium", "long"], help="Preset length")
     group.add_argument("--approx_words", type=int, help="Approximate word count")
     parser.add_argument("--no_comments", action="store_true", help="Disable citations")
+    parser.add_argument("--extra-doc", dest="extra_docs", action="append", help="Additional document to include via LLM search")
 
     parser.add_argument("--search_mode", choices=["answer", "question", "blend", "dual", "both"], default="dual")
     parser.add_argument("--llm_model", choices=["gpt-3.5-turbo", "gpt-4"], default="gpt-4o")
@@ -307,6 +310,7 @@ def main():
             min_confidence=args.min_confidence,
             include_citations_in_text=not args.no_comments,
             llm=CompletionsClient(model=os.environ.get("OPENAI_MODEL", "gpt-4o")),
+            extra_docs=args.extra_docs,
         )
         gen_name = "cli_app:gen"
 
@@ -401,6 +405,7 @@ def main():
                 min_confidence=args.min_confidence,
                 include_citations_in_text=not args.no_comments,
                 llm=llm,
+                extra_docs=args.extra_docs,
             )
             gen_name = "cli_app:rag_gen"
 
