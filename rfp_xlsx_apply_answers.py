@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Dict, Any, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional
 
 from openpyxl import load_workbook
-from openpyxl.comments import Comment
 
 import docx
 from docx.oxml import OxmlElement
@@ -13,19 +12,8 @@ from docx.oxml.ns import qn
 from word_comments import add_comment_to_run
 
 
-# Excel comments are XML strings and must avoid control characters.
-# Additionally, Excel limits comment text to 32k characters.
-_INVALID_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
-_MAX_COMMENT_LEN = 32000
+# Pattern for [n] style citation markers in the answer text
 _CITATION_RE = re.compile(r"\[(\d+)\]")
-
-
-def _sanitize_comment_text(text: str) -> str:
-    """Remove invalid characters and truncate overly long comments."""
-    clean = _INVALID_XML_RE.sub("", text or "")
-    if len(clean) > _MAX_COMMENT_LEN:
-        clean = clean[:_MAX_COMMENT_LEN]
-    return clean
 
 
 def _to_text_and_citations(ans: object) -> tuple[str, Dict[str, object]]:
@@ -86,7 +74,7 @@ def write_excel_answers(
 
     doc_entries: List[Dict[str, Any]] = []
 
-    if inc_comments and comments_docx_path is None:
+    if inc_comments and not comments_docx_path:
         base, _ = os.path.splitext(out_xlsx_path)
         comments_docx_path = base + "_comments.docx"
 
@@ -138,36 +126,15 @@ def write_excel_answers(
         except Exception:
             pass
 
-        # Put citations into a single Excel comment or collect for DOCX
+        # Collect citations for a separate Word document with real comments
         if inc_comments and citations:
-            if comments_docx_path:
-                doc_entries.append(
-                    {
-                        "question": ent.get("question_text") or "",
-                        "text": text,
-                        "citations": citations,
-                    }
-                )
-            else:
-                try:
-                    parts = []
-                    for k, v in citations.items():
-                        if isinstance(v, dict):
-                            txt = v.get("text") or ""
-                            src = v.get("source_file")
-                        else:
-                            txt = str(v)
-                            src = None
-                        if src:
-                            part = f"[{k}] Source File:\n {src}\n\nSource Text:\n {txt}"
-                        else:
-                            part = f"[{k}] Source Text: {txt}"
-                        parts.append(part)
-                    comment_txt = _sanitize_comment_text("\n\n".join(parts))
-                    if comment_txt:
-                        cell.comment = Comment(comment_txt, "RFPBot")
-                except Exception:
-                    pass
+            doc_entries.append(
+                {
+                    "question": ent.get("question_text") or "",
+                    "text": text,
+                    "citations": citations,
+                }
+            )
 
         applied += 1
 
