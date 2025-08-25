@@ -9,7 +9,7 @@ Modes by input type:
 - PDF/TXT (and DOCX with --doc-as-text): extract questions as text, answer, and build a Q/A Word report
 
 Dependencies in this repo:
-- answer/answer_composer.CompletionsClient
+- answer_composer.CompletionsClient
 - search/vector_search.search
 - rfp_docx_slot_finder.extract_slots_from_docx
 - rfp_docx_apply_answers.apply_answers_to_docx
@@ -41,7 +41,7 @@ from input_file_reader.interpreter_sheet import (
     collect_non_empty_cells
 )
 
-from answer.answer_composer import CompletionsClient
+from answer_composer import CompletionsClient
 from search.vector_search import search
 
 # Restore sys.path
