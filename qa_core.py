@@ -29,16 +29,20 @@ DEBUG = True
 
 # ───────────────────────── Prompt loading ─────────────────────────
 
-PROMPTS = load_prompts({name: "" for name in ("extract_questions", "answer_search_context", "answer_llm")})
+PROMPTS = load_prompts(
+    {name: "" for name in ("extract_questions", "answer_search_context", "answer_llm")}
+)
 
 PRESET_INSTRUCTIONS: Dict[str, str] = {
     "short": "Answer briefly in 1–2 sentences.",
     "medium": "Answer in one concise paragraph.",
     "long": "Answer in detail (up to one page).",
+    "auto": "Answer using only the provided sources and choose an appropriate length.",
 }
 
 
 # ───────────────────────── Core answering ─────────────────────────
+
 
 def answer_question(
     q: str,
@@ -69,7 +73,9 @@ def answer_question(
         print("[qa_core] searching for context snippets")
     if mode == "both":
         # Back-compat: treat "both" as blend + dual
-        hits = search(q, k=k, mode="blend", fund_filter=fund) + search(q, k=k, mode="dual", fund_filter=fund)
+        hits = search(q, k=k, mode="blend", fund_filter=fund) + search(
+            q, k=k, mode="dual", fund_filter=fund
+        )
     else:
         hits = search(q, k=k, mode=mode, fund_filter=fund)
     if extra_docs:
@@ -93,7 +99,9 @@ def answer_question(
             )
 
     seen_snippets = set()
-    rows: List[Tuple[str, str, str, float, str]] = []  # (lbl, src, snippet, score, date)
+    rows: List[Tuple[str, str, str, float, str]] = (
+        []
+    )  # (lbl, src, snippet, score, date)
     for h in hits:
         score = float(h.get("cosine", 0.0))
         if score < min_confidence:
@@ -109,8 +117,16 @@ def answer_question(
         src_path = str(meta.get("source", "")) or "unknown"
         src_name = Path(src_path).name if src_path else "unknown"
         try:
-            mtime = Path(src_path).stat().st_mtime if src_path and Path(src_path).exists() else None
-            date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d") if mtime else "unknown"
+            mtime = (
+                Path(src_path).stat().st_mtime
+                if src_path and Path(src_path).exists()
+                else None
+            )
+            date_str = (
+                datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+                if mtime
+                else "unknown"
+            )
         except Exception:
             date_str = "unknown"
 
@@ -126,7 +142,9 @@ def answer_question(
         return "No relevant information found.", []
 
     # Build the context block presented to the model
-    ctx_block = "\n\n".join(f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows)
+    ctx_block = "\n\n".join(
+        f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows
+    )
     if DEBUG:
         print(f"[qa_core] built context with {len(rows)} snippets")
 
