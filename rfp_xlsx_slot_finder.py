@@ -179,7 +179,11 @@ def _question_context(ws, cell) -> Dict[str, Any]:
 
 
 def _llm_choose_answer_slot(
-    question_ctx: Dict[str, Any], sheets: Dict[str, Any], *, model: str
+    question_ctx: Dict[str, Any],
+    sheets: Dict[str, Any],
+    *,
+    model: str,
+    debug: bool = False,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Invoke the LLM to choose the answer sheet and cell.
 
@@ -201,14 +205,29 @@ def _llm_choose_answer_slot(
     """
 
     if not os.getenv("OPENAI_API_KEY"):
+        if debug:
+            print("  OPENAI_API_KEY not set; skipping LLM call")
         return None, None
+
     payload = {"question": question_ctx, "sheets": sheets}
+    if debug:
+        print(f"  Prepared LLM payload with model '{model}'")
+
     try:
         res = _call_llm("xlsx_workbook_answer_slot.txt", payload, model=model)
-    except Exception:
+    except Exception as exc:
+        if debug:
+            print(f"  LLM invocation failed: {exc}")
         return None, None
+
     if isinstance(res, dict):
-        return res.get("sheet"), res.get("answer_cell")
+        sheet, cell = res.get("sheet"), res.get("answer_cell")
+        if debug:
+            print(f"  LLM response: {res}")
+        return sheet, cell
+
+    if debug:
+        print(f"  Unexpected LLM response type {type(res).__name__}: {res}")
     return None, None
 
 
@@ -462,9 +481,11 @@ def extract_schema_from_xlsx(
                 if not _spacy_is_question_or_imperative(text):
                     continue
 
+                if debug:
+                    print(f"  Question at {cell.coordinate}: {text}")
                 qctx = _question_context(ws, cell)
                 answer_sheet, answer_cell = _llm_choose_answer_slot(
-                    qctx, sheet_profiles, model=model
+                    qctx, sheet_profiles, model=model, debug=debug
                 )
                 if debug:
                     print(
