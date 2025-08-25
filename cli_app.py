@@ -35,11 +35,9 @@ from openpyxl import load_workbook
 # Save current sys.path
 _original_sys_path = sys.path.copy()
 # Expand ~ to the home directory
-rfp_dir = os.path.expanduser('~/derivs-tool/rfp-ai-tool')
+rfp_dir = os.path.expanduser("~/derivs-tool/rfp-ai-tool")
 sys.path.insert(0, rfp_dir)
-from input_file_reader.interpreter_sheet import (
-    collect_non_empty_cells
-)
+from input_file_reader.interpreter_sheet import collect_non_empty_cells
 
 from answer_composer import CompletionsClient
 from search.vector_search import search
@@ -59,12 +57,20 @@ from rfp_xlsx_apply_answers import write_excel_answers
 from rfp_xlsx_slot_finder import ask_sheet_schema
 from qa_core import answer_question
 
+
 def load_prompts(base: Path) -> Dict[str, str]:
     return {
-        "extract_questions": (base / "prompts" / "extract_questions.txt").read_text(encoding="utf-8"),
-        "answer_search_context": (base / "prompts" / "answer_search_context.txt").read_text(encoding="utf-8"),
-        "answer_llm": (base / "prompts" / "answer_llm_template.txt").read_text(encoding="utf-8"),
+        "extract_questions": (base / "prompts" / "extract_questions.txt").read_text(
+            encoding="utf-8"
+        ),
+        "answer_search_context": (
+            base / "prompts" / "answer_search_context.txt"
+        ).read_text(encoding="utf-8"),
+        "answer_llm": (base / "prompts" / "answer_llm_template.txt").read_text(
+            encoding="utf-8"
+        ),
     }
+
 
 PROMPTS = load_prompts(BASE_DIR)
 
@@ -72,7 +78,9 @@ PRESET_INSTRUCTIONS = {
     "short": "Answer briefly in 1-2 sentences.",
     "medium": "Answer in one concise paragraph.",
     "long": "Answer in detail (up to one page).",
+    "auto": "Answer using only the provided sources and choose an appropriate length.",
 }
+
 
 # Input text helpers (unchanged)
 def load_input_text(path: Optional[str]) -> str:
@@ -96,9 +104,11 @@ def load_input_text(path: Optional[str]) -> str:
         return "\n".join(par.text for par in doc.paragraphs)
     return p.read_text(encoding="utf-8")
 
+
 # _______________________________________________________
 # LLM question extraction (unchanged)
 # _______________________________________________________
+
 
 def extract_questions(text: str, llm: CompletionsClient) -> List[str]:
     tpl = PROMPTS["extract_questions"]
@@ -114,7 +124,9 @@ def extract_questions(text: str, llm: CompletionsClient) -> List[str]:
     print(f"[DEBUG] Extracted {len(out)} questions")
     return out
 
+
 # Q/A DOCX report builder (unchanged)
+
 
 def build_docx(
     questions: List[str],
@@ -156,7 +168,10 @@ def build_docx(
         c = OxmlElement("w:comment")
         c.set(Document().part.element.xmlns["w"] + "id", str(cid))
         c.set(Document().part.element.xmlns["w"] + "author", "RFPBot")
-        c.set(Document().part.element.xmlns["w"] + "date", datetime.utcnow().isoformat() + "Z")
+        c.set(
+            Document().part.element.xmlns["w"] + "date",
+            datetime.utcnow().isoformat() + "Z",
+        )
         for label, val, is_b in [
             ("Citation: ", f"[{lbl}]", True),
             ("Source: ", src, True),
@@ -217,9 +232,11 @@ def build_docx(
     doc.save(buf)
     return buf.getvalue()
 
-# 
+
+#
 # Helpers for DOCX apply flow
-# 
+#
+
 
 def _make_docx_generator(
     *,
@@ -236,6 +253,7 @@ def _make_docx_generator(
     """
     Returns a callable(question)->answer_text suitable for rfp_docx_apply_answers.apply_answers_tb_docx.
     """
+
     def gen(question: str) -> str:
         ans, cmts = answer_question(
             question,
@@ -251,6 +269,7 @@ def _make_docx_generator(
         if not include_citations_in_text:
             ans = re.sub(r"[\[\d+\]]", "", ans)
         return ans
+
     return gen
 
 
@@ -265,6 +284,7 @@ def main():
     sys.path.insert(0, rfp_dir)
     # DOCX slot finder + applier
     from my_module import gen_answer as gen  # <-- lives in ~/rfp_utils/rfp_utils
+
     # Restore sys.path
     sys.path = _original_sys_path
 
@@ -273,29 +293,56 @@ def main():
 
     parser.add_argument("--fund", required=False, help="Fund tag filter")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--length", choices=["short", "medium", "long"], help="Preset length")
+    group.add_argument(
+        "--length", choices=["short", "medium", "long"], help="Preset length"
+    )
     group.add_argument("--approx_words", type=int, help="Approximate word count")
     parser.add_argument("--no_comments", action="store_true", help="Disable citations")
-    parser.add_argument("--extra-doc", dest="extra_docs", action="append", help="Additional document to include via LLM search")
+    parser.add_argument(
+        "--extra-doc",
+        dest="extra_docs",
+        action="append",
+        help="Additional document to include via LLM search",
+    )
 
-    parser.add_argument("--search_mode", choices=["answer", "question", "blend", "dual", "both"], default="dual")
-    parser.add_argument("--llm_model", choices=["gpt-3.5-turbo", "gpt-4"], default="gpt-4o")
-    parser.add_argument("-k", "--k_max_hits", type=int, default=6, help="Hits per question")
-    parser.add_argument("--min_confidence", type=float, default=0.0, help="Min confidence threshold")
+    parser.add_argument(
+        "--search_mode",
+        choices=["answer", "question", "blend", "dual", "both"],
+        default="dual",
+    )
+    parser.add_argument(
+        "--llm_model", choices=["gpt-3.5-turbo", "gpt-4"], default="gpt-4o"
+    )
+    parser.add_argument(
+        "-k", "--k_max_hits", type=int, default=6, help="Hits per question"
+    )
+    parser.add_argument(
+        "--min_confidence", type=float, default=0.0, help="Min confidence threshold"
+    )
     parser.add_argument("-o", "--output", help="Output file path")
 
     # New DOCX-specific flags
-    parser.add_argument("--docx-as-text", action="store_true",
-                        help="Treat docx like free text (build separate Q/A report) instead of applying in place.")
-    parser.add_argument("--docx-write-mode", choices=["fill", "replace", "append"], default="fill",
-                        help="Write mode for DOCX apply flow")
-    parser.add_argument("--slots", help="If provided (DOCX), also save detected slots JSON here")
+    parser.add_argument(
+        "--docx-as-text",
+        action="store_true",
+        help="Treat docx like free text (build separate Q/A report) instead of applying in place.",
+    )
+    parser.add_argument(
+        "--docx-write-mode",
+        choices=["fill", "replace", "append"],
+        default="fill",
+        help="Write mode for DOCX apply flow",
+    )
+    parser.add_argument(
+        "--slots", help="If provided (DOCX), also save detected slots JSON here"
+    )
 
     args = parser.parse_args()
 
     # Prefer the Utilities-owned generator; fall back to the local one used for DOCX
     try:
         from my_module import gen_answer as _ext_gen  # provided by rfp_utils
+
         gen = _ext_gen
         gen_name = "rfp_utils.my_module:gen_answer"
         print(f"[DEBUG] Using external generator: {gen_name}")
@@ -334,7 +381,9 @@ def main():
                 print(f"[DEBUG] Cell {i}: {cell}")
         else:
             for i, cell in enumerate(cells[:10]):  # Show first 10 cells
-                print(f"[DEBUG] Cell {i}: {getattr(cell, 'row', 'N/A')}, {getattr(cell, 'column', 'N/A')} = '{getattr(cell, 'value', 'N/A')}'")
+                print(
+                    f"[DEBUG] Cell {i}: {getattr(cell, 'row', 'N/A')}, {getattr(cell, 'column', 'N/A')} = '{getattr(cell, 'value', 'N/A')}'"
+                )
 
         if not cells:
             print("[ERROR] No non-empty cells found", file=sys.stderr)
@@ -367,12 +416,14 @@ def main():
             ans = gen(qtext)
             answers.append(ans)
 
-        out_path = Path(args.output) if args.output else infile.with_name(infile.stem + "_answered.xlsx")
+        out_path = (
+            Path(args.output)
+            if args.output
+            else infile.with_name(infile.stem + "_answered.xlsx")
+        )
         write_excel_answers(schema, answers, infile, out_path)
         print(f"[DEBUG] Wrote filled Excel to {out_path}")
         sys.exit(0)
-
-
 
     # — DOCX flow (apply answers into the template) ————————
     if suffix == ".docx" and not args.docx_as_text:
@@ -385,6 +436,7 @@ def main():
         else:
             # temp file for slots JSON
             import tempfile, json
+
             fd, tmp = tempfile.mkstemp(prefix="slots_", suffix=".json")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(slots_payload, f)
@@ -409,9 +461,12 @@ def main():
             )
             gen_name = "cli_app:rag_gen"
 
-
         # 3) Apply into a new docx
-        out_path = Path(args.output) if args.output else infile.with_name(infile.stem + "_answered.docx")
+        out_path = (
+            Path(args.output)
+            if args.output
+            else infile.with_name(infile.stem + "_answered.docx")
+        )
         summary = apply_answers_to_docx(
             docx_path=str(infile),
             slots_json_path=slots_path,
@@ -459,16 +514,24 @@ def main():
         answers.append(ans)
         comments.append(cmts)
 
-    qa_doc = build_docx(questions, answers, comments, include_comments=not args.no_comments)
-    out_path = Path(args.output) if args.output else infile.with_name(infile.stem + "_answered.docx")
+    qa_doc = build_docx(
+        questions, answers, comments, include_comments=not args.no_comments
+    )
+    out_path = (
+        Path(args.output)
+        if args.output
+        else infile.with_name(infile.stem + "_answered.docx")
+    )
     out_path.write_bytes(qa_doc)
     print(f"[DEBUG] Wrote Q/A Word report to {out_path}")
+
 
 # Small helper so we can safely write JSON even if ensure_ascii=False is wanted
 def json_dump(obj: Any) -> str:
     import json
+
     return json.dumps(obj, indent=2, ensure_ascii=False)
+
 
 if __name__ == "__main__":
     main()
-
