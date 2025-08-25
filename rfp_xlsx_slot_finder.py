@@ -201,12 +201,34 @@ def _llm_choose_answer_slot(
     -------
     (sheet_name, cell_address):
         The selected sheet and cell address for the answer.  ``(None, None)`` is
-        returned if the model cannot pick a location or the API key is missing.
+        returned if the model cannot pick a location or the environment lacks
+        credentials for the selected framework.
     """
 
-    if not os.getenv("OPENAI_API_KEY"):
+    if FRAMEWORK == "openai":
+        if not os.getenv("OPENAI_API_KEY"):
+            if debug:
+                print("  OPENAI_API_KEY not set for openai; skipping LLM call")
+            return None, None
+    elif FRAMEWORK == "aladdin":
+        required = [
+            "aladdin_studio_api_key",
+            "defaultWebServer",
+            "aladdin_user",
+            "aladdin_passwd",
+        ]
+        missing = [v for v in required if not os.getenv(v)]
+        if missing:
+            if debug:
+                print(
+                    "  Missing environment variables for aladdin: "
+                    + ", ".join(missing)
+                    + "; skipping LLM call"
+                )
+            return None, None
+    else:
         if debug:
-            print("  OPENAI_API_KEY not set; skipping LLM call")
+            print(f"  Unsupported framework {FRAMEWORK}; skipping LLM call")
         return None, None
 
     payload = {"question": question_ctx, "sheets": sheets}
