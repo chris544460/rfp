@@ -110,6 +110,8 @@ def write_excel_answers(
         text, citations = _to_text_and_citations(ans)
         excel_text = _CITATION_RE.sub("", text)
         excel_text = re.sub(r"\s{2,}", " ", excel_text).strip()
+        if not excel_text and text.strip():
+            excel_text = text.strip()
 
         if not excel_text and generator:
             q = (ent.get("question_text") or "").strip()
@@ -117,6 +119,8 @@ def write_excel_answers(
             text, citations = _to_text_and_citations(ans)
             excel_text = _CITATION_RE.sub("", text)
             excel_text = re.sub(r"\s{2,}", " ", excel_text).strip()
+            if not excel_text and text.strip():
+                excel_text = text.strip()
 
         if mode == "replace":
             cell.value = excel_text
