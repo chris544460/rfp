@@ -89,6 +89,7 @@ def test_comment_formats_citations(tmp_path):
     wb2 = openpyxl.load_workbook(out_path)
     c = wb2["Sheet1"]["B1"]
     assert c.comment is None
+    assert c.value == "Ans"
 
     import docx
     from word_comments import ensure_comments_part
@@ -130,4 +131,6 @@ def test_default_comments_docx_path(tmp_path):
     assert comments_path.exists()
 
     wb2 = openpyxl.load_workbook(out_path)
-    assert wb2["Sheet1"]["B1"].comment is None
+    c = wb2["Sheet1"]["B1"]
+    assert c.comment is None
+    assert c.value == "Ans"
