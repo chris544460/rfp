@@ -17,6 +17,20 @@ from word_comments import add_comment_to_run
 _CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
+def _clean_excel_text(text: str) -> str:
+    """Strip citations and collapse whitespace without deleting all content."""
+    if not text:
+        return ""
+    original = text
+    no_cits = _CITATION_RE.sub("", original)
+    if not no_cits.strip():
+        no_cits = original
+    collapsed = re.sub(r"\s{2,}", " ", no_cits).strip()
+    if not collapsed and no_cits.strip():
+        collapsed = no_cits.strip()
+    return collapsed
+
+
 def _to_text_and_citations(ans: object) -> tuple[str, Dict[str, object]]:
     """Normalize answer objects to (text, {cit_num -> data})."""
     if isinstance(ans, dict):
@@ -108,19 +122,13 @@ def write_excel_answers(
             ans = generator(q)
 
         text, citations = _to_text_and_citations(ans)
-        excel_text = _CITATION_RE.sub("", text)
-        excel_text = re.sub(r"\s{2,}", " ", excel_text).strip()
-        if not excel_text and text.strip():
-            excel_text = text.strip()
+        excel_text = _clean_excel_text(text)
 
         if not excel_text and generator:
             q = (ent.get("question_text") or "").strip()
             ans = generator(q)
             text, citations = _to_text_and_citations(ans)
-            excel_text = _CITATION_RE.sub("", text)
-            excel_text = re.sub(r"\s{2,}", " ", excel_text).strip()
-            if not excel_text and text.strip():
-                excel_text = text.strip()
+            excel_text = _clean_excel_text(text)
 
         if mode == "replace":
             cell.value = excel_text
