@@ -60,7 +60,8 @@ def build_indexes(doc: docx.document.Document) -> Tuple[
 # ---------------------------- Utilities ----------------------------
 _BLANK_RE = re.compile(r"_+\s*$")
 _CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
-_CITATION_RE = re.compile(r"\[(\d+)\]")
+# Allow comma-separated citations like "[1,2]" or "[1, 2, 3]"
+_CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 def is_blank_para(p: Paragraph) -> bool:
     t = (p.text or "").strip()
@@ -118,24 +119,27 @@ def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[ob
         for match in _CITATION_RE.finditer(line):
             if match.start() > pos:
                 paragraph.add_run(line[pos:match.start()])
-            num = match.group(1)
-            run = paragraph.add_run(match.group(0))  # "[n]"
-            data = citations.get(num) or citations.get(int(num))
-            snippet = None
-            source_file = None
-            if isinstance(data, dict):
-                snippet = data.get("text") or data.get("snippet") or data.get("content")
-                source_file = data.get("source_file")
-            elif data is not None:
-                snippet = str(data)
-            if snippet:
-                add_comment_to_run(
-                    doc,
-                    run,
-                    str(snippet),
-                    bold_prefix="Source Text: ",
-                    source_file=source_file,
-                )
+            nums = [n.strip() for n in match.group(1).split(",")]
+            for i, num in enumerate(nums):
+                run = paragraph.add_run(f"[{num}]")
+                data = citations.get(num) or citations.get(int(num))
+                snippet = None
+                source_file = None
+                if isinstance(data, dict):
+                    snippet = data.get("text") or data.get("snippet") or data.get("content")
+                    source_file = data.get("source_file")
+                elif data is not None:
+                    snippet = str(data)
+                if snippet:
+                    add_comment_to_run(
+                        doc,
+                        run,
+                        str(snippet),
+                        bold_prefix="Source Text: ",
+                        source_file=source_file,
+                    )
+                if i < len(nums) - 1:
+                    paragraph.add_run(" ")
             pos = match.end()
         if pos < len(line):
             paragraph.add_run(line[pos:])
