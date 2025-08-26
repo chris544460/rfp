@@ -12,8 +12,9 @@ from docx.oxml.ns import qn
 from word_comments import add_comment_to_run
 
 
-# Pattern for [n] style citation markers in the answer text
-_CITATION_RE = re.compile(r"\[(\d+)\]")
+# Pattern for [n] style citation markers in the answer text, allowing
+# comma-separated values like "[1,2]" or "[1, 2, 3]"
+_CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
 def _to_text_and_citations(ans: object) -> tuple[str, Dict[str, object]]:
@@ -183,24 +184,27 @@ def write_excel_answers(
                 for match in _CITATION_RE.finditer(t):
                     if match.start() > pos:
                         pa.add_run(t[pos:match.start()])
-                    num = match.group(1)
-                    run = pa.add_run(match.group(0))
-                    data = cits.get(num) or cits.get(int(num)) or cits.get(str(num))
-                    snippet = None
-                    src_file = None
-                    if isinstance(data, dict):
-                        snippet = (
-                            data.get("text")
-                            or data.get("snippet")
-                            or data.get("content")
-                        )
-                        src_file = data.get("source_file")
-                    elif data is not None:
-                        snippet = str(data)
-                    if snippet:
-                        add_comment_to_run(
-                            doc, run, str(snippet), bold_prefix="Source Text: ", source_file=src_file
-                        )
+                    nums = [n.strip() for n in match.group(1).split(",")]
+                    for i, num in enumerate(nums):
+                        run = pa.add_run(f"[{num}]")
+                        data = cits.get(num) or cits.get(int(num)) or cits.get(str(num))
+                        snippet = None
+                        src_file = None
+                        if isinstance(data, dict):
+                            snippet = (
+                                data.get("text")
+                                or data.get("snippet")
+                                or data.get("content")
+                            )
+                            src_file = data.get("source_file")
+                        elif data is not None:
+                            snippet = str(data)
+                        if snippet:
+                            add_comment_to_run(
+                                doc, run, str(snippet), bold_prefix="Source Text: ", source_file=src_file
+                            )
+                        if i < len(nums) - 1:
+                            pa.add_run(" ")
                     pos = match.end()
                 if pos < len(t):
                     pa.add_run(t[pos:])
