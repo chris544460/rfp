@@ -107,7 +107,7 @@ def test_comment_formats_citations(tmp_path):
     assert "<w:b/>" in xml
 
 
-def test_regenerates_blank_answer(tmp_path):
+def test_preserves_pure_citation_answer(tmp_path):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Sheet1"
@@ -136,10 +136,10 @@ def test_regenerates_blank_answer(tmp_path):
         schema, answers, str(in_path), str(out_path), generator=generator
     )
 
-    assert calls["count"] == 1
+    assert calls["count"] == 0
     wb2 = openpyxl.load_workbook(out_path)
     c = wb2["Sheet1"]["B1"]
-    assert c.value == "Retry answer"
+    assert c.value == "[1]"
 
 
 def test_default_comments_docx_path(tmp_path):
