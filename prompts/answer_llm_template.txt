@@ -11,4 +11,4 @@ Context:
 Question:
 {question}
 
-Answer (remember to cite sources with bracket numbers):
+Answer (remember to cite sources with bracket numbers, each citation in its own bracket like [1] [2]):
