@@ -5,6 +5,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import openpyxl
 from openpyxl import load_workbook
 from openpyxl.styles import Color
@@ -363,18 +365,25 @@ def _llm_zone_refinement(
     if debug:
         print(f"Refining {len(regions)} regions into zones")
     zones: List[Dict[str, Any]] = []
-    for region in regions:
+
+    def refine(region: Dict[str, Any]) -> List[Dict[str, Any]]:
         sheet_profile = profile.get(region.get("sheet"), {})
         payload = {"region": region, "cells": sheet_profile.get("cells", [])}
         try:
             res = _call_llm("xlsx_zone_refinement.txt", payload, model=model)
-            zones.extend(res)
             if debug:
                 print(f"  Region {region.get('sheet')} -> {len(res)} zones")
+            return res
         except Exception as exc:
             if debug:
                 print(f"  Zone refinement failed for {region}: {exc}")
-            continue
+            return []
+
+    with ThreadPoolExecutor() as ex:
+        futures = [ex.submit(refine, region) for region in regions]
+        for fut in as_completed(futures):
+            zones.extend(fut.result())
+
     if debug:
         print(f"Total zones: {len(zones)}")
     return zones
@@ -388,18 +397,25 @@ def _llm_extract_candidates(
     if debug:
         print(f"Extracting candidates from {len(zones)} zones")
     candidates: List[Dict[str, Any]] = []
-    for zone in zones:
+
+    def extract(zone: Dict[str, Any]) -> List[Dict[str, Any]]:
         sheet_profile = profile.get(zone.get("sheet"), {})
         payload = {"zone": zone, "cells": sheet_profile.get("cells", [])}
         try:
             res = _call_llm("xlsx_slot_candidates.txt", payload, model=model)
-            candidates.extend(res)
             if debug:
                 print(f"  Zone {zone.get('sheet')} -> {len(res)} candidates")
+            return res
         except Exception as exc:
             if debug:
                 print(f"  Candidate extraction failed for {zone}: {exc}")
-            continue
+            return []
+
+    with ThreadPoolExecutor() as ex:
+        futures = [ex.submit(extract, zone) for zone in zones]
+        for fut in as_completed(futures):
+            candidates.extend(fut.result())
+
     if debug:
         print(f"Total candidates: {len(candidates)}")
     return candidates
@@ -487,7 +503,7 @@ def extract_schema_from_xlsx(
     # Pre-serialize all sheets so we can present them to the model.
     sheet_profiles = {ws.title: _sheet_to_json(ws) for ws in wb.worksheets}
 
-    schema: List[Dict[str, Any]] = []
+    tasks: List[Tuple[str, str, str, Dict[str, Any]]] = []
 
     for ws in wb.worksheets:
         if debug:
@@ -506,22 +522,27 @@ def extract_schema_from_xlsx(
                 if debug:
                     print(f"  Question at {cell.coordinate}: {text}")
                 qctx = _question_context(ws, cell)
-                answer_sheet, answer_cell = _llm_choose_answer_slot(
-                    qctx, sheet_profiles, model=model, debug=debug
-                )
-                if debug:
-                    print(
-                        f"    LLM chose {answer_sheet}!{answer_cell}" if answer_cell else "    LLM declined"
-                    )
-                schema.append(
-                    {
-                        "sheet": answer_sheet or ws.title,
-                        "question_sheet": ws.title,
-                        "question_cell": cell.coordinate,
-                        "question_text": text,
-                        "answer_cell": answer_cell,
-                    }
-                )
+                tasks.append((ws.title, cell.coordinate, text, qctx))
+
+    def choose(task: Tuple[str, str, str, Dict[str, Any]]) -> Dict[str, Any]:
+        sheet_title, coord, text, qctx = task
+        answer_sheet, answer_cell = _llm_choose_answer_slot(
+            qctx, sheet_profiles, model=model, debug=debug
+        )
+        if debug:
+            print(
+                f"    LLM chose {answer_sheet}!{answer_cell}" if answer_cell else "    LLM declined"
+            )
+        return {
+            "sheet": answer_sheet or sheet_title,
+            "question_sheet": sheet_title,
+            "question_cell": coord,
+            "question_text": text,
+            "answer_cell": answer_cell,
+        }
+
+    with ThreadPoolExecutor() as ex:
+        schema = list(ex.map(choose, tasks))
 
     return schema
 
