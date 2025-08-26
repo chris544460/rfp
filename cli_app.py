@@ -29,6 +29,7 @@ from typing import Optional, List, Tuple, Dict, Any, Callable
 import PyPDF2
 from docx import Document
 from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Pt
 from openpyxl import load_workbook
 
@@ -150,7 +151,7 @@ def build_docx(
         if bold:
             rPr = OxmlElement("w:rPr")
             b = OxmlElement("w:b")
-            b.set(Document().part.element.xmlns["w"] + "val", "1")
+            b.set(qn("w:val"), "1")
             rPr.append(b)
             r.append(rPr)
         t = OxmlElement("w:t")
@@ -166,12 +167,9 @@ def build_docx(
         if com_part is None:
             com_part = _ensure_comments_part(doc)
         c = OxmlElement("w:comment")
-        c.set(Document().part.element.xmlns["w"] + "id", str(cid))
-        c.set(Document().part.element.xmlns["w"] + "author", "RFPBot")
-        c.set(
-            Document().part.element.xmlns["w"] + "date",
-            datetime.utcnow().isoformat() + "Z",
-        )
+        c.set(qn("w:id"), str(cid))
+        c.set(qn("w:author"), "RFPBot")
+        c.set(qn("w:date"), datetime.utcnow().isoformat() + "Z")
         for label, val, is_b in [
             ("Citation: ", f"[{lbl}]", True),
             ("Source: ", src, True),
@@ -186,11 +184,11 @@ def build_docx(
 
         # anchor
         start = OxmlElement("w:commentRangeStart")
-        start.set(Document().part.element.xmlns["w"] + "id", str(cid))
+        start.set(qn("w:id"), str(cid))
         end = OxmlElement("w:commentRangeEnd")
-        end.set(Document().part.element.xmlns["w"] + "id", str(cid))
+        end.set(qn("w:id"), str(cid))
         ref = OxmlElement("w:commentReference")
-        ref.set(Document().part.element.xmlns["w"] + "id", str(cid))
+        ref.set(qn("w:id"), str(cid))
 
         parent = run._r.getparent()
         idx = parent.index(run._r)
