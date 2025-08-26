@@ -107,18 +107,20 @@ def write_excel_answers(
             ans = generator(q)
 
         text, citations = _to_text_and_citations(ans)
+        excel_text = _CITATION_RE.sub("", text)
+        excel_text = re.sub(r"\s{2,}", " ", excel_text).strip()
 
         if mode == "replace":
-            cell.value = text
+            cell.value = excel_text
         elif mode == "append":
             prior = cell.value or ""
-            cell.value = (prior + ("\n" if prior else "") + text)
+            cell.value = (prior + ("\n" if prior else "") + excel_text)
         else:  # "fill" (default)
             # If cell is blank write; otherwise append on a new line to avoid clobbering
             if cell.value is None or str(cell.value).strip() == "":
-                cell.value = text
+                cell.value = excel_text
             else:
-                cell.value = f"{cell.value}\n{text}"
+                cell.value = f"{cell.value}\n{excel_text}"
 
         # Wrap long text
         try:
