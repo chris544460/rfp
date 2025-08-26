@@ -255,6 +255,73 @@ def _llm_choose_answer_slot(
     return None, None
 
 
+def _llm_resolve_duplicate_slots(
+    schema: List[Dict[str, Any]],
+    sheets: Dict[str, Any],
+    *,
+    model: str,
+    debug: bool = False,
+) -> List[Dict[str, Any]]:
+    """Ask the LLM to resolve answer-cell conflicts for questions.
+
+    Parameters
+    ----------
+    schema:
+        Current list of question entries with potential duplicate answer cells.
+    sheets:
+        Serialized workbook profiles to provide full context.
+    model:
+        Name of the LLM model to invoke.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Updated schema with revised ``sheet`` and ``answer_cell`` values.
+    """
+
+    payload = {
+        "questions": [
+            {
+                "question_sheet": q["question_sheet"],
+                "question_cell": q["question_cell"],
+                "question_text": q.get("question_text"),
+                "answer_sheet": q.get("sheet"),
+                "answer_cell": q.get("answer_cell"),
+            }
+            for q in schema
+        ],
+        "sheets": sheets,
+    }
+
+    try:
+        res = _call_llm("xlsx_resolve_duplicate_slots.txt", payload, model=model)
+    except Exception as exc:  # pragma: no cover - defensive
+        if debug:
+            print(f"  Duplicate resolution failed: {exc}")
+        return schema
+
+    if debug:
+        print(f"  Duplicate resolution LLM returned {len(res)} entries")
+
+    mapping = {
+        (r.get("question_sheet"), r.get("question_cell")): (
+            r.get("sheet"),
+            r.get("answer_cell"),
+        )
+        for r in res
+    }
+
+    for q in schema:
+        key = (q["question_sheet"], q["question_cell"])
+        if key in mapping:
+            new_sheet, new_cell = mapping[key]
+            if debug:
+                print(f"  Reassigning {key}: {new_sheet}!{new_cell}")
+            q["sheet"] = new_sheet or q["sheet"]
+            q["answer_cell"] = new_cell
+
+    return schema
+
 # ---------------------------------------------------------------------------
 # LLM driven pipeline
 # ---------------------------------------------------------------------------
@@ -543,6 +610,23 @@ def extract_schema_from_xlsx(
 
     with ThreadPoolExecutor() as ex:
         schema = list(ex.map(choose, tasks))
+
+    # Detect duplicate answer cells and resolve them via a second LLM pass
+    seen = {}
+    duplicates = False
+    for q in schema:
+        cell = q.get("answer_cell")
+        if not cell:
+            continue
+        key = (q.get("sheet"), cell)
+        if key in seen:
+            duplicates = True
+            break
+        seen[key] = True
+    if duplicates:
+        if debug:
+            print("Duplicate answer cells detected; invoking resolution step")
+        schema = _llm_resolve_duplicate_slots(schema, sheet_profiles, model=model, debug=debug)
 
     return schema
 

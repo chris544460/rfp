@@ -1,0 +1,4 @@
+
+Multiple questions selected the same answer cell. You are given all questions with their current chosen cells and the full workbook layout. Assign a sheet and cell for each question so that no two questions share the same cell. Return a JSON array where each element has `question_sheet`, `question_cell`, `sheet`, and `answer_cell` keys.
+
+{{data}}
