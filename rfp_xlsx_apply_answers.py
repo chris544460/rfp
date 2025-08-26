@@ -110,6 +110,13 @@ def write_excel_answers(
         excel_text = _CITATION_RE.sub("", text)
         excel_text = re.sub(r"\s{2,}", " ", excel_text).strip()
 
+        if not excel_text and generator:
+            q = (ent.get("question_text") or "").strip()
+            ans = generator(q)
+            text, citations = _to_text_and_citations(ans)
+            excel_text = _CITATION_RE.sub("", text)
+            excel_text = re.sub(r"\s{2,}", " ", excel_text).strip()
+
         if mode == "replace":
             cell.value = excel_text
         elif mode == "append":
