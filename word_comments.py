@@ -87,57 +87,7 @@ def add_comment_to_run(
     bold_prefix=None,
     source_file: Optional[str] = None,
 ):
-    part = ensure_comments_part(document)
-
-    # Next id
-    try:
-        existing = part._element.xpath(".//w:comment", namespaces=part._element.nsmap)
-        next_id = max([int(el.get(qn("w:id"))) for el in existing] + [0]) + 1
-    except Exception:
-        next_id = 0
-
-    # <w:comment>
-    c = OxmlElement("w:comment")
-    c.set(qn("w:id"), str(next_id))
-    c.set(qn("w:author"), author)
-    c.set(qn("w:date"), datetime.utcnow().isoformat() + "Z")
-    p = OxmlElement("w:p")
-    if source_file:
-        r2 = OxmlElement("w:r")
-        r2_pr = OxmlElement("w:rPr")
-        b2 = OxmlElement("w:b")
-        r2_pr.append(b2)
-        r2.append(r2_pr)
-        t2 = OxmlElement("w:t")
-        # preserve trailing space in Source File text
-        t2.set(qn("xml:space"), "preserve")
-        t2.text = "Source File: "
-        r2.append(t2)
-        p.append(r2)
-        r3 = OxmlElement("w:r")
-        t3 = OxmlElement("w:t")
-        t3.text = str(source_file)
-        r3.append(t3)
-        p.append(r3)
-        br = OxmlElement("w:br")
-        p.append(br)
-    if bold_prefix:
-        r1 = OxmlElement("w:r")
-        r1_pr = OxmlElement("w:rPr")
-        b = OxmlElement("w:b")
-        r1_pr.append(b)
-        r1.append(r1_pr)
-        t1 = OxmlElement("w:t")
-        t1.text = str(bold_prefix)
-        r1.append(t1)
-        p.append(r1)
-    r = OxmlElement("w:r")
-    t = OxmlElement("w:t")
-    t.text = str(comment_text or "")
-    r.append(t)
-    p.append(r)
-    c.append(p)
-    part._element.append(c)
+    ext_part = ensure_comments_ext_part(document)
 
     # ------------------------------------------------------------------
     # Modern (threaded) comment extension record
