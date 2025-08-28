@@ -421,7 +421,13 @@ def main():
             if args.output
             else infile.with_name(infile.stem + "_answered.xlsx")
         )
-        write_excel_answers(schema, answers, infile, out_path)
+        write_excel_answers(
+            schema,
+            answers,
+            infile,
+            out_path,
+            include_comments=not args.no_comments,
+        )
         print(f"[DEBUG] Wrote filled Excel to {out_path}")
         sys.exit(0)
 
