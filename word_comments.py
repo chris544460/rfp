@@ -79,12 +79,16 @@ def ensure_comments_ext_part(document):
         part = XmlPart(partname, content_type, b'<w15:commentsExt xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/>', package)
         try:
             # Newer python-docx signature
-            package.relate_to(document.part, reltype, part, is_external=False)
+            document.part.relate_to(part, reltype, is_external=False)
         except TypeError:
             # Older signature without the keyword argument
-            package.relate_to(document.part, reltype, part)
+            document.part.relate_to(part, reltype)
     else:
-        part = next(rel._target for rel in document.part.rels.values() if rel.reltype == reltype)
+        # Use rel.target_part if available, fallback to _target
+        for rel in document.part.rels.values():
+            if rel.reltype == reltype:
+                part = getattr(rel, "target_part", None) or getattr(rel, "_target", None)
+                break
 
     return part
 
@@ -96,16 +100,42 @@ def add_comment_to_run(
     bold_prefix=None,
     source_file: Optional[str] = None,
 ):
-    ext_part = ensure_comments_ext_part(document)
+    comments_part = ensure_comments_part(document)
 
-    # ------------------------------------------------------------------
-    # Modern (threaded) comment extension record
-    # ------------------------------------------------------------------
+    # Compute next available comment id
+    comments_el = comments_part._element
+    ids = [int(el.get(qn("w:id"))) for el in comments_el.findall(qn("w:comment")) if el.get(qn("w:id")) is not None]
+    next_id = (max(ids) + 1) if ids else 0
+
+    # Create <w:comment> in /word/comments.xml
+    comment_el = OxmlElement("w:comment")
+    comment_el.set(qn("w:id"), str(next_id))
+    comment_el.set(qn("w:author"), author)
+    comment_el.set(qn("w:date"), datetime.utcnow().isoformat())
+
+    p = OxmlElement("w:p")
+    # Optional bold prefix
+    if bold_prefix:
+        r1 = OxmlElement("w:r")
+        rpr = OxmlElement("w:rPr")
+        b = OxmlElement("w:b"); rpr.append(b)
+        r1.append(rpr)
+        t1 = OxmlElement("w:t"); t1.text = str(bold_prefix)
+        r1.append(t1)
+        p.append(r1)
+
+    r2 = OxmlElement("w:r")
+    t2 = OxmlElement("w:t"); t2.text = str(comment_text)
+    r2.append(t2); p.append(r2)
+
+    comment_el.append(p)
+    comments_part._element.append(comment_el)
+
+    # --- Modern (threaded) comment extension record ---
     try:
         ext_part = ensure_comments_ext_part(document)
         ce = OxmlElement("w15:commentEx")
         ce.set(qn("w15:id"), str(next_id))
-        # Each thread needs a stable 8‑char paraId – use random hex
         ce.set(qn("w15:paraId"), uuid.uuid4().hex[:8])
         ce.set(qn("w15:done"), "0")        # not resolved
         ce.set(qn("w15:authorId"), "0")    # default author map
