@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import traceback
 from typing import Any, Callable, Dict, List, Optional
 
 from openpyxl import load_workbook
@@ -229,14 +230,14 @@ def write_excel_answers(
                     pa.add_run(t[pos:])
                 if idx < len(doc_entries):
                     doc.add_page_break()
+            print(f"[DEBUG] Attempting to save comments DOCX to {comments_docx_path}")
             doc.save(comments_docx_path)
             print(
                 f"[DEBUG] Saved comments DOCX to {comments_docx_path} with {len(doc_entries)} entries"
             )
         except Exception as e:
-            print(
-                f"[DEBUG] Failed to write comments DOCX to {comments_docx_path}: {e}"
-            )
+            tb = traceback.format_exc()
+            print(f"[DEBUG] Failed to write comments DOCX to {comments_docx_path}: {e}\n{tb}")
     elif inc_comments and comments_docx_path:
         print("[DEBUG] No citation entries collected; comments DOCX not created")
 
@@ -244,4 +245,3 @@ def write_excel_answers(
 
 
 __all__ = ["write_excel_answers"]
-
