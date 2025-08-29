@@ -89,9 +89,15 @@ def write_excel_answers(
 
     doc_entries: List[Dict[str, Any]] = []
 
-    if inc_comments and not comments_docx_path:
-        base, _ = os.path.splitext(out_xlsx_path)
-        comments_docx_path = base + "_comments.docx"
+    if inc_comments:
+        if not comments_docx_path:
+            base, _ = os.path.splitext(out_xlsx_path)
+            comments_docx_path = base + "_comments.docx"
+        print(
+            f"[DEBUG] Citation comments enabled; DOCX will be written to {comments_docx_path}"
+        )
+    else:
+        print("[DEBUG] Citation comments disabled; no DOCX will be created")
 
     # Ensure answers aligns with schema (allow None entries and generate if a generator is provided)
     if len(answers) < len(schema):
@@ -162,6 +168,7 @@ def write_excel_answers(
 
     wb.save(out_xlsx_path)
     wb.close()
+    print(f"[DEBUG] Saved output workbook to {out_xlsx_path}")
 
     if inc_comments and comments_docx_path and doc_entries:
         try:
@@ -223,8 +230,15 @@ def write_excel_answers(
                 if idx < len(doc_entries):
                     doc.add_page_break()
             doc.save(comments_docx_path)
-        except Exception:
-            pass
+            print(
+                f"[DEBUG] Saved comments DOCX to {comments_docx_path} with {len(doc_entries)} entries"
+            )
+        except Exception as e:
+            print(
+                f"[DEBUG] Failed to write comments DOCX to {comments_docx_path}: {e}"
+            )
+    elif inc_comments and comments_docx_path:
+        print("[DEBUG] No citation entries collected; comments DOCX not created")
 
     return {"applied": applied, "skipped": skipped, "total": len(schema)}
 

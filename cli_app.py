@@ -421,14 +421,20 @@ def main():
             if args.output
             else infile.with_name(infile.stem + "_answered.xlsx")
         )
+        comments_path = out_path.with_name(out_path.stem + "_comments.docx")
         write_excel_answers(
             schema,
             answers,
             infile,
             out_path,
             include_comments=not args.no_comments,
+            comments_docx_path=str(comments_path)
+            if not args.no_comments
+            else None,
         )
         print(f"[DEBUG] Wrote filled Excel to {out_path}")
+        if not args.no_comments:
+            print(f"[DEBUG] Wrote citation comments DOCX to {comments_path}")
         sys.exit(0)
 
     # — DOCX flow (apply answers into the template) ————————
