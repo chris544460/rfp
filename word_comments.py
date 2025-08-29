@@ -76,7 +76,7 @@ def ensure_comments_ext_part(document):
             from docx.opc.packuri import PackURI
             partname = PackURI("/word/commentsExt.xml")
         content_type = "application/vnd.ms-word.commentsExt+xml"
-        part = XmlPart(partname, content_type, b'<w15:commentsExt xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/>')
+        part = XmlPart(partname, content_type, b'<w15:commentsExt xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/>', package)
         package.relate_to(document.part, reltype, part, is_external=False)
     else:
         part = next(rel._target for rel in document.part.rels.values() if rel.reltype == reltype)
