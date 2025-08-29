@@ -5,6 +5,9 @@ from typing import Optional
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
+# Namespace URI for threaded comments (w15)
+W15_NS = "http://schemas.microsoft.com/office/word/2012/wordml"
+
 
 def ensure_comments_part(document):
     """Return the document's comments part, creating it if necessary.
@@ -134,16 +137,17 @@ def add_comment_to_run(
     # --- Modern (threaded) comment extension record ---
     try:
         ext_part = ensure_comments_ext_part(document)
-        ce = OxmlElement(qn("w15:commentEx"))
-        ce.set(qn("w15:id"), str(next_id))
-        ce.set(qn("w15:paraId"), uuid.uuid4().hex[:8])
-        ce.set(qn("w15:done"), "0")        # not resolved
-        ce.set(qn("w15:authorId"), "0")    # default author map
-        # Append to the <w15:commentsExt> root (create if missing)
+        # Create threaded commentEx element with fully-qualified namespace
+        ce = OxmlElement(f"{{{W15_NS}}}commentEx")
+        ce.set(f"{{{W15_NS}}}id", str(next_id))
+        ce.set(f"{{{W15_NS}}}paraId", uuid.uuid4().hex[:8])
+        ce.set(f"{{{W15_NS}}}done", "0")
+        ce.set(f"{{{W15_NS}}}authorId", "0")
+        # Append to the <w15:commentsExt> root
         root = ext_part._element
-        if root.tag != qn("w15:commentsExt"):  # empty part?
+        if root.tag != f"{{{W15_NS}}}commentsExt":
             root.clear()
-            root.tag = qn("w15:commentsExt")
+            root.tag = f"{{{W15_NS}}}commentsExt"
         root.append(ce)
     except AttributeError:
         # Silently ignore if the running python‑docx build lacks support
