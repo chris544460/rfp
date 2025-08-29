@@ -153,10 +153,13 @@ def build_docx(
         necessary so the legacy private helper continues to work across
         versions.
         """
+        print("[DEBUG] _ensure_comments_part: start")
         part = document.part
+        print("[DEBUG] _ensure_comments_part: obtained document.part")
 
         # If the comments part already exists just return it
         if getattr(part, "_comments_part", None) is not None:
+            print("[DEBUG] _ensure_comments_part: comments part already exists – returning existing part")
             return part._comments_part
 
         # ------------------------------------------------------------------
@@ -164,6 +167,7 @@ def build_docx(
         # ------------------------------------------------------------------
         pkg = part.package
         if not hasattr(pkg, "partname_for"):
+            print("[DEBUG] _ensure_comments_part: monkey‑patching missing Package.partname_for")
             from docx.opc.packuri import PackURI
 
             def _partname_for(self, content_type, idx):
@@ -176,6 +180,7 @@ def build_docx(
             pkg.partname_for = _partname_for.__get__(pkg, pkg.__class__)
 
         # Create a new comments part using the now‑compatible private helper
+        print("[DEBUG] _ensure_comments_part: creating new comments part with _add_comments_part()")
         return part._add_comments_part()
 
     def _make_r(text: str, bold: bool = False):
