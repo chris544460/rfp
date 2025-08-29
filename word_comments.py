@@ -70,7 +70,11 @@ def ensure_comments_ext_part(document):
     reltype = "http://schemas.microsoft.com/office/2017/10/relationships/commentsExt"
     if not any(rel.reltype == reltype for rel in document.part.rels.values()):
         # create a new xml part with the correct content‑type
-        partname = package.partname_for(reltype, "/word/commentsExt.xml")
+        if hasattr(package, "partname_for"):
+            partname = package.partname_for(reltype, "/word/commentsExt.xml")
+        else:
+            from docx.opc.packuri import PackURI
+            partname = PackURI("/word/commentsExt.xml")
         content_type = "application/vnd.ms-word.commentsExt+xml"
         part = XmlPart(partname, content_type, b'<w15:commentsExt xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/>')
         package.relate_to(document.part, reltype, part, is_external=False)
