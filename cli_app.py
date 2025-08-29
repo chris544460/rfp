@@ -140,10 +140,43 @@ def build_docx(
     doc.styles["Normal"].font.size = Pt(11)
 
     def _ensure_comments_part(document: Document):
-        try:
-            return document.part._comments_part
-        except AttributeError:
-            return document.part._add_comments_part()
+        """
+        Return the comments part for *document*, creating it if it does not yet
+        exist.
+
+        Newer versions of *python‑docx* (≥ 1.0) removed the internal
+        ``Package.partname_for`` method that older private helpers relied on.
+        When it is missing, calling ``_add_comments_part()`` raises
+        ``AttributeError: 'Package' object has no attribute 'partname_for'``.
+
+        This shim reinstates a minimal ``partname_for`` implementation when
+        necessary so the legacy private helper continues to work across
+        versions.
+        """
+        part = document.part
+
+        # If the comments part already exists just return it
+        if getattr(part, "_comments_part", None) is not None:
+            return part._comments_part
+
+        # ------------------------------------------------------------------
+        # Monkey‑patch Package.partname_for when it is absent (python‑docx ≥1.0)
+        # ------------------------------------------------------------------
+        pkg = part.package
+        if not hasattr(pkg, "partname_for"):
+            from docx.opc.packuri import PackURI
+
+            def _partname_for(self, content_type, idx):
+                # Replicates the naming scheme from python‑docx 0.8.x:
+                # /word/comments.xml, /word/comments2.xml, ...
+                suffix = "" if idx == 1 else idx
+                return PackURI(f"/word/comments{suffix}.xml")
+
+            # Bind the helper as an instance method on the package object
+            pkg.partname_for = _partname_for.__get__(pkg, pkg.__class__)
+
+        # Create a new comments part using the now‑compatible private helper
+        return part._add_comments_part()
 
     def _make_r(text: str, bold: bool = False):
         r = OxmlElement("w:r")
