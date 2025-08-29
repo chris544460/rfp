@@ -134,7 +134,7 @@ def add_comment_to_run(
     # --- Modern (threaded) comment extension record ---
     try:
         ext_part = ensure_comments_ext_part(document)
-        ce = OxmlElement("w15:commentEx")
+        ce = OxmlElement(qn("w15:commentEx"))
         ce.set(qn("w15:id"), str(next_id))
         ce.set(qn("w15:paraId"), uuid.uuid4().hex[:8])
         ce.set(qn("w15:done"), "0")        # not resolved
