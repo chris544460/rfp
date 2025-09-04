@@ -583,6 +583,8 @@ def extract_schema_from_xlsx(
                 text = str(value).strip()
                 if not text:
                     continue
+                if text.lower() in {"n/a", "na", "n.a.", "n a"}:
+                    continue
                 if not _spacy_is_question_or_imperative(text):
                     continue
 
