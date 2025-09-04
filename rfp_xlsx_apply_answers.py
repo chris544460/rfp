@@ -84,6 +84,17 @@ def write_excel_answers(
     wb = load_workbook(source_xlsx_path)
     ws_by_name = {ws.title: ws for ws in wb.worksheets}
 
+    print(
+        "DEBUG: Starting write_excel_answers with",
+        len(schema),
+        "schema entries and",
+        len(answers),
+        "answers",
+    )
+    print(
+        f"DEBUG: Loaded workbook '{source_xlsx_path}' with {len(wb.worksheets)} worksheets"
+    )
+
     applied = 0
     skipped = 0
 
@@ -104,6 +115,10 @@ def write_excel_answers(
         else:
             addr = ent.get("question_cell") or ent.get("cell") or ent.get("address")
 
+        print(
+            f"DEBUG: Processing entry {idx}: sheet='{sheet_name}', address='{addr}'"
+        )
+
         if not sheet_name or not addr:
             if sheet_name and ent.get("answer_cell") is None:
                 qtxt = (ent.get("question_text") or "").strip()
@@ -119,6 +134,7 @@ def write_excel_answers(
         ans = answers[idx]
         if ans is None and generator:
             q = (ent.get("question_text") or "").strip()
+            print(f"DEBUG: Generating answer for question '{q}'")
             ans = generator(q)
 
         text, citations = _to_text_and_citations(ans)
@@ -126,20 +142,35 @@ def write_excel_answers(
 
         if not excel_text and generator:
             q = (ent.get("question_text") or "").strip()
+            print(
+                f"DEBUG: Regenerating answer for question '{q}' due to empty text"
+            )
             ans = generator(q)
             text, citations = _to_text_and_citations(ans)
             excel_text = _clean_excel_text(text)
 
         if mode == "replace":
+            print(
+                f"DEBUG: Replacing cell {sheet_name}!{addr} contents with '{excel_text}'"
+            )
             cell.value = excel_text
         elif mode == "append":
             prior = cell.value or ""
+            print(
+                f"DEBUG: Appending to cell {sheet_name}!{addr}: prior='{prior}', new='{excel_text}'"
+            )
             cell.value = (prior + ("\n" if prior else "") + excel_text)
         else:  # "fill" (default)
             # If cell is blank write; otherwise append on a new line to avoid clobbering
             if cell.value is None or str(cell.value).strip() == "":
+                print(
+                    f"DEBUG: Filling empty cell {sheet_name}!{addr} with '{excel_text}'"
+                )
                 cell.value = excel_text
             else:
+                print(
+                    f"DEBUG: Cell {sheet_name}!{addr} already has data; appending '{excel_text}'"
+                )
                 cell.value = f"{cell.value}\n{excel_text}"
 
         # Wrap long text
@@ -150,6 +181,9 @@ def write_excel_answers(
 
         # Collect citations for a separate Word document with real comments
         if inc_comments and citations:
+            print(
+                f"DEBUG: Collected {len(citations)} citations for question index {idx}"
+            )
             doc_entries.append(
                 {
                     "question": ent.get("question_text") or "",
@@ -162,6 +196,7 @@ def write_excel_answers(
 
     wb.save(out_xlsx_path)
     wb.close()
+    print(f"DEBUG: Workbook saved to {out_xlsx_path}")
 
     if inc_comments and comments_docx_path and doc_entries:
         try:
@@ -226,7 +261,12 @@ def write_excel_answers(
         except Exception:
             pass
 
-    return {"applied": applied, "skipped": skipped, "total": len(schema)}
+    result = {"applied": applied, "skipped": skipped, "total": len(schema)}
+    print(
+        "DEBUG: Finished write_excel_answers with",
+        result,
+    )
+    return result
 
 
 __all__ = ["write_excel_answers"]
