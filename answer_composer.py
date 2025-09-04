@@ -85,8 +85,62 @@ class CompletionsClient:
 
     def get_completion(self, prompt: str, json_output: bool = False) -> tuple[str, dict]:
         """Send a single chat completion request and return (reply, usage)."""
+
+        # Try the regular async endpoint first
+        try:
+            endpoint = (
+                f"{self.base_url}/api/ai-platform/toolkit/chat-completion/v1/chatCompletions:compute"
+            )
+
+            payload = {
+                "chatCompletionMessages": [
+                    {"prompt": prompt, "promptRole": "assistant"}
+                ],
+                "modelId": self.model,
+            }
+            if json_output:
+                payload["response_format"] = {"type": "json_object"}
+
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers=self.header,
+                auth=self.auth,
+                timeout=30,
+            )
+            data = response.json()
+
+            operation_id = data.get("id")
+            done_flag = data.get("done", False)
+
+            if done_flag:
+                return self._finalize_and_extract(data)
+            if operation_id is None:
+                # If we can't poll but have a result, try to extract it directly
+                if "response" in data and "chatCompletion" in data["response"]:
+                    return self._finalize_and_extract(data)
+                raise RuntimeError(
+                    f"No 'id' in POST response; cannot poll LRO. Full response: {json.dumps(data)}"
+                )
+
+            poll_url = (
+                f"{self.base_url}/api/ai-platform/toolkit/completion/v1/longRunningOperations/"
+                f"{operation_id}"
+            )
+            completed_data = self._poll_until_done(poll_url)
+            return self._finalize_and_extract(completed_data)
+
+        except Exception as e:
+            # If async fails, fall back to synchronous endpoint
+            print(f"Async endpoint failed: {e}")
+            print("Falling back to synchronous endpoint...")
+            return self._get_completion_sync(prompt, json_output)
+
+    def _get_completion_sync(self, prompt: str, json_output: bool = False) -> tuple[str, dict]:
+        """Send a single chat completion request using sync endpoint."""
+
         endpoint = (
-            f"{self.base_url}/api/ai-platform/toolkit/chat-completion/v1/chatCompletions:compute"
+            f"{self.base_url}/api/ai-platform/toolkit/chat-completion/v1/chatCompletionsSync:compute"
         )
 
         payload = {
@@ -98,27 +152,21 @@ class CompletionsClient:
         if json_output:
             payload["response_format"] = {"type": "json_object"}
 
-        response = requests.post(
-            endpoint, json=payload, headers=self.header, auth=self.auth
-        )
-        data = response.json()
-
-        operation_id = data.get("id")
-        done_flag = data.get("done", False)
-
-        if done_flag:
-            return self._finalize_and_extract(data)
-        if operation_id is None:
-            raise RuntimeError(
-                f"No 'id' in POST response; cannot poll LRO. Full response: {json.dumps(data)}"
+        try:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers=self.header,
+                auth=self.auth,
+                timeout=60,
             )
+            response.raise_for_status()
+            data = response.json()
 
-        poll_url = (
-            f"{self.base_url}/api/ai-platform/toolkit/completion/v1/longRunningOperations/"
-            f"{operation_id}"
-        )
-        completed_data = self._poll_until_done(poll_url)
-        return self._finalize_and_extract(completed_data)
+            return self._finalize_and_extract_sync(data)
+
+        except Exception as e:
+            raise RuntimeError(f"Sync API call failed: {str(e)}")
 
     def _poll_until_done(self, url: str, initial_sleep: int = 5) -> dict:
         """Poll the given LRO URL until 'done': True."""
@@ -138,23 +186,83 @@ class CompletionsClient:
         raise TimeoutError("Chat-completion operation timed out after 50 polls.")
 
     def _finalize_and_extract(self, data: dict) -> tuple[str, dict]:
-        """Compute cost once LRO is done and return (reply, usage)."""
-        metadata = data["response"]["chatCompletion"]["chatCompletionMetadata"]
-        prompt_tokens = metadata["promptTokenCount"]
-        completion_tokens = metadata["completionTokenCount"]
-        content = data["response"]["chatCompletion"]["chatCompletionContent"]
+        """Compute cost for async endpoint and return (reply, usage)."""
+        try:
+            # Handle the actual response structure from async endpoint
+            chat_completion = data.get("response", {}).get("chatCompletion", {})
+            if not chat_completion:
+                raise RuntimeError("No chat completion data in response")
 
-        model_props = self.pricing.get(self.model, {})
-        prompt_cost = prompt_tokens * model_props.get("input", 0) / 1_000_000
-        completion_cost = completion_tokens * model_props.get("output", 0) / 1_000_000
-        self.service_costs += prompt_cost + completion_cost
+            metadata = chat_completion.get("chatCompletionMetadata", {})
+            prompt_tokens = metadata.get("promptTokenCount", 0)
+            completion_tokens = metadata.get("completionTokenCount", 0)
+            content = chat_completion.get("chatCompletionContent", "")
 
-        usage = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-        }
+            # If we have a JSON string, parse it
+            if isinstance(content, str) and content.startswith("{"):
+                try:
+                    parsed_content = json.loads(content)
+                    content = json.dumps(parsed_content, indent=2)
+                except Exception:
+                    pass
 
-        return content, usage
+            model_props = self.pricing.get(self.model, {})
+            prompt_cost = prompt_tokens * model_props.get("input", 0) / 1_000_000
+            completion_cost = completion_tokens * model_props.get("output", 0) / 1_000_000
+            self.service_costs += prompt_cost + completion_cost
+
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+
+            return content, usage
+
+        except Exception as e:
+            print(f"Error processing async response: {data}")
+            raise RuntimeError(
+                f"Failed to extract result from async response: {str(e)}"
+            )
+
+    def _finalize_and_extract_sync(self, data: dict) -> tuple[str, dict]:
+        """Compute cost for sync endpoint and return (reply, usage)."""
+        try:
+            # Handle the actual response structure from sync endpoint
+            chat_completion = data.get("chatCompletion", {})
+
+            if not chat_completion:
+                raise RuntimeError("No chat completion data in response")
+
+            metadata = chat_completion.get("chatCompletionMetadata", {})
+            prompt_tokens = metadata.get("promptTokenCount", 0)
+            completion_tokens = metadata.get("completionTokenCount", 0)
+            content = chat_completion.get("chatCompletionContent", "")
+
+            # If we have a JSON string, parse it
+            if isinstance(content, str) and content.startswith("{"):
+                try:
+                    parsed_content = json.loads(content)
+                    content = json.dumps(parsed_content, indent=2)
+                except Exception:
+                    pass  # Keep original string if parsing fails
+
+            model_props = self.pricing.get(self.model, {})
+            prompt_cost = prompt_tokens * model_props.get("input", 0) / 1_000_000
+            completion_cost = completion_tokens * model_props.get("output", 0) / 1_000_000
+            self.service_costs += prompt_cost + completion_cost
+
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+
+            return content, usage
+
+        except Exception as e:
+            print(f"Error processing sync response: {data}")
+            raise RuntimeError(
+                f"Failed to extract result from sync response: {str(e)}"
+            )
 
 
 def get_openai_completion(prompt: str, model: str, json_output: bool = False) -> tuple[str, dict]:
