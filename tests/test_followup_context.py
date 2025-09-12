@@ -56,22 +56,3 @@ def test_followup_skips_search_and_uses_history(monkeypatch):
     assert "Initial answer" in llm_calls[0]
     assert "snippet" in llm_calls[0]
     assert len(my_module.QUESTION_HISTORY) == 2
-
-
-def test_clarify_intent_asks_for_more_info(monkeypatch):
-    calls = []
-
-    def fake_answer_question(q, mode, fund, k, length, approx_words, min_conf, llm):
-        calls.append(q)
-        return "ans", []
-
-    monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
-    monkeypatch.setattr(my_module, "_classify_intent", lambda q, h: "clarify")
-
-    my_module.QUESTION_HISTORY.clear()
-    my_module.QA_HISTORY.clear()
-    resp = my_module.gen_answer("More details?")
-
-    assert "clarify" in resp["text"].lower()
-    assert calls == []
-    assert my_module.QUESTION_HISTORY == []

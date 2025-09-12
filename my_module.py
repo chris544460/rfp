@@ -32,15 +32,14 @@ FOLLOWUP_PROMPT = read_prompt(
     ),
 )
 
-# Prompt template for classifying whether the user message is a new question,
-# a follow-up to previous discussion, or ambiguous.
+# Prompt template for classifying whether the user message is a new question
+# or a follow-up to previous discussion.
 INTENT_PROMPT = read_prompt(
     "intent_classify",
     (
-        "Determine if the user message should be treated as a new question, a "
-        "follow-up to prior questions, or if clarification is required. Return "
-        "JSON with key 'intent' whose value is one of 'new', 'follow_up', or "
-        "'clarify'."
+        "Determine if the user message should be treated as a new question or a "
+        "follow-up to prior questions. Return JSON with key 'intent' whose value "
+        "is 'new' or 'follow_up'."
     ),
 )
 
@@ -149,7 +148,7 @@ def _format_mc_answer(ans: str, choices: List[str]) -> str:
 
 
 def _classify_intent(question: str, history: List[str]) -> str:
-    """Classify whether the message is new, follow-up, or needs clarification."""
+    """Classify whether the message is new or follow-up."""
     if not history:
         return "new"
     history_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(history))
@@ -165,7 +164,7 @@ def _classify_intent(question: str, history: List[str]) -> str:
         intent = str(data.get("intent", "new")).lower()
     except Exception:
         intent = "new"
-    if intent not in {"new", "follow_up", "clarify"}:
+    if intent not in {"new", "follow_up"}:
         intent = "new"
     return intent
 
@@ -191,7 +190,7 @@ def classify_intent(question: str, history: Optional[List[str]] = None) -> str:
     Returns
     -------
     str
-        One of ``"new"``, ``"follow_up"`` or ``"clarify"``.
+        One of ``"new"`` or ``"follow_up"``.
     """
 
     return _classify_intent(question, history or QUESTION_HISTORY)
@@ -233,12 +232,6 @@ def gen_answer(
 ):
     """Generate an answer. Handles both open and multiple-choice questions."""
     intent = _classify_intent(question, QUESTION_HISTORY)
-    if intent == "clarify":
-        msg = (
-            "I'm not sure if you're asking a new question or referring to a previous answer. "
-            "Could you clarify?"
-        )
-        return {"text": msg} if INCLUDE_COMMENTS else msg
     indices = (
         _detect_followup(question, QUESTION_HISTORY)
         if intent == "follow_up"
