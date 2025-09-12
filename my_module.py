@@ -172,30 +172,19 @@ def _detect_followup(question: str, history: List[str]) -> List[int]:
 def gen_answer(
     question: str,
     choices: Optional[List[str]] = None,
-    choice_meta: Optional[List[Dict[str, object]]] = None,
-    developer_mode: bool = False,
+    choice_meta: Optional[List[Dict[str, object]]] = None
 ):
     """Generate an answer. Handles both open and multiple-choice questions."""
-
-    steps: List[str] = []
     intent = _classify_intent(question, QUESTION_HISTORY)
-    steps.append(f"intent: {intent}")
     if intent == "clarify":
         msg = (
             "I'm not sure if you're asking a new question or referring to a previous answer. "
             "Could you clarify?"
         )
-        result = {"text": msg} if INCLUDE_COMMENTS else msg
-        if developer_mode:
-            return {**result, "debug_steps": steps} if isinstance(result, dict) else {
-                "text": result,
-                "debug_steps": steps,
-            }
-        return result
+        return {"text": msg} if INCLUDE_COMMENTS else msg
 
     # Determine if this question relies on previous ones
     indices = _detect_followup(question, QUESTION_HISTORY) if intent == "follow_up" else []
-    steps.append(f"follow_up_indices: {indices}")
     question_with_ctx = question
     if indices:
         ctx_text = " ".join(QUESTION_HISTORY[i - 1] for i in indices)
@@ -210,73 +199,33 @@ def gen_answer(
             "with citations in square brackets like [1]. Return the result as JSON with keys "
             "'correct' (list of letters) and 'explanations' (mapping letters to explanations)."
         )
-        if developer_mode:
-            ans, cmts, core_steps = answer_question(
-                mc_question,
-                SEARCH_MODE,
-                FUND_TAG,
-                K,
-                None,
-                None,
-                MIN_CONFIDENCE,
-                _llm_client,
-                return_steps=True,
-            )
-            steps.extend(core_steps)
-        else:
-            ans, cmts = answer_question(
-                mc_question,
-                SEARCH_MODE,
-                FUND_TAG,
-                K,
-                None,
-                None,
-                MIN_CONFIDENCE,
-                _llm_client,
-            )
+        ans, cmts = answer_question(
+            mc_question,
+            SEARCH_MODE,
+            FUND_TAG,
+            K,
+            None,
+            None,
+            MIN_CONFIDENCE,
+            _llm_client,
+        )
         ans = _format_mc_answer(ans, choices)
         QUESTION_HISTORY.append(question)
-        result = _format_with_or_without_comments(ans, cmts)
-        if developer_mode:
-            if isinstance(result, dict):
-                result["debug_steps"] = steps
-            else:
-                result = {"text": result, "debug_steps": steps}
-        return result
+        return _format_with_or_without_comments(ans, cmts)
 
     # Free-text: call core QA
     approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
     length = None if approx_words is not None else LENGTH_PRESET
 
-    if developer_mode:
-        ans, cmts, core_steps = answer_question(
-            question_with_ctx,
-            SEARCH_MODE,
-            FUND_TAG,
-            K,
-            length,
-            approx_words,
-            MIN_CONFIDENCE,
-            _llm_client,
-            return_steps=True,
-        )
-        steps.extend(core_steps)
-    else:
-        ans, cmts = answer_question(
-            question_with_ctx,
-            SEARCH_MODE,
-            FUND_TAG,
-            K,
-            length,
-            approx_words,
-            MIN_CONFIDENCE,
-            _llm_client,
-        )
+    ans, cmts = answer_question(
+        question_with_ctx,
+        SEARCH_MODE,
+        FUND_TAG,
+        K,
+        length,
+        approx_words,
+        MIN_CONFIDENCE,
+        _llm_client,
+    )
     QUESTION_HISTORY.append(question)
-    result = _format_with_or_without_comments(ans, cmts)
-    if developer_mode:
-        if isinstance(result, dict):
-            result["debug_steps"] = steps
-        else:
-            result = {"text": result, "debug_steps": steps}
-    return result
+    return _format_with_or_without_comments(ans, cmts)
