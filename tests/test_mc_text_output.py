@@ -25,6 +25,7 @@ import my_module
 
 def test_gen_answer_returns_text(monkeypatch):
     my_module.QUESTION_HISTORY.clear()
+    my_module.QA_HISTORY.clear()
     def fake_answer_question(q, mode, fund, k, length, approx_words, min_conf, llm):
         data = {"correct": ["A"], "explanations": {"A": "Because it's correct [1]"}}
         return json.dumps(data), [("1", "src.txt", "snippet", 0.9, "2024-01-01")]
