@@ -142,6 +142,33 @@ def _classify_intent(question: str, history: List[str]) -> str:
         intent = "new"
     return intent
 
+
+def classify_intent(question: str, history: Optional[List[str]] = None) -> str:
+    """Backward-compatible wrapper for intent classification.
+
+    Older callers expected a ``classify_intent`` function that handled a
+    question and optional history.  Previously this function used
+    ``str.format`` on prompt templates containing JSON curly braces, which
+    could raise ``KeyError: 'intent'``.  The implementation now delegates to
+    :func:`_classify_intent`, which safely substitutes placeholders using
+    ``str.replace`` and returns a simple string label.
+
+    Parameters
+    ----------
+    question:
+        The user's message to classify.
+    history:
+        Optional list of previous questions.  If ``None`` (the default), the
+        global ``QUESTION_HISTORY`` is used.
+
+    Returns
+    -------
+    str
+        One of ``"new"``, ``"follow_up"`` or ``"clarify"``.
+    """
+
+    return _classify_intent(question, history or QUESTION_HISTORY)
+
 def _detect_followup(question: str, history: List[str]) -> List[int]:
     """Use the LLM to determine which previous questions provide context."""
     if not history:
