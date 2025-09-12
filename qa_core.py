@@ -8,6 +8,7 @@ other pipelines can reuse it without circular imports.
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,13 @@ from prompts import load_prompts
 
 # Default debug flag; always on unless caller toggles.
 DEBUG = True
+
+# Retry the model if we detect citation markers but end up with no comments.
+# Can be overridden via the RFP_COMMENT_RETRIES environment variable.
+MAX_COMMENT_RETRIES = int(os.getenv("RFP_COMMENT_RETRIES", "2"))
+
+# Regex for [1] or comma-separated citations like [1, 2]
+CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
 # ───────────────────────── Prompt loading ─────────────────────────
@@ -156,45 +164,58 @@ def answer_question(
 
     prompt = f"{length_instr}\n\n{PROMPTS['answer_llm'].format(context=ctx_block, question=q)}"
 
-    # 3) Call the model
-    if DEBUG:
-        print("[qa_core] calling language model")
-        print(f"[qa_core] prompt:\n{prompt}")
-        print(f"[qa_core] llm type: {type(llm)}")
-
-    raw_response = llm.get_completion(prompt)
-    if DEBUG:
-        print(f"[qa_core] raw response: {raw_response!r}")
-    if isinstance(raw_response, tuple):
-        content = raw_response[0]
-    else:
-        content = raw_response
-    ans = (content or "").strip()
-
-    # 4) Re-number bracket markers [n] in the answer to reflect the order they first appear
-    order: List[str] = []
-    for m in re.finditer(r"\[(\d+)\]", ans):
-        tok = m.group(0)  # like "[3]"
-        if tok not in order:
-            order.append(tok)
-
-    mapping = {old: f"[{i+1}]" for i, old in enumerate(order)}
-    for old, new in mapping.items():
-        ans = ans.replace(old, new)
-    if DEBUG:
-        print("[qa_core] renumbered citations")
-
-    # 5) Build comments in that order
+    ans = ""
     comments: List[Tuple[str, str, str, float, str]] = []
-    for old in order:
-        try:
-            idx = int(old.strip("[]")) - 1
-        except Exception:
-            continue
-        if 0 <= idx < len(rows):
-            lbl, src, snippet, score, date_str = rows[idx]
-            new_lbl = mapping.get(old, lbl).strip("[]")  # "1", "2", ...
-            comments.append((new_lbl, src, snippet, score, date_str))
+    for attempt in range(MAX_COMMENT_RETRIES + 1):
+        if DEBUG:
+            print(f"[qa_core] calling language model (attempt {attempt + 1})")
+            print(f"[qa_core] prompt:\n{prompt}")
+            print(f"[qa_core] llm type: {type(llm)}")
+
+        raw_response = llm.get_completion(prompt)
+        if DEBUG:
+            print(f"[qa_core] raw response: {raw_response!r}")
+        if isinstance(raw_response, tuple):
+            content = raw_response[0]
+        else:
+            content = raw_response
+        ans = (content or "").strip()
+
+        # 4) Re-number bracket markers in the answer to reflect the order they first appear
+        order: List[str] = []
+        for m in CITATION_RE.finditer(ans):
+            nums = [n.strip() for n in m.group(1).split(",")]
+            for n in nums:
+                tok = f"[{n}]"
+                if tok not in order:
+                    order.append(tok)
+
+        mapping = {old: f"[{i+1}]" for i, old in enumerate(order)}
+
+        def _repl(match: re.Match[str]) -> str:
+            nums = [n.strip() for n in match.group(1).split(",")]
+            return "".join(mapping.get(f"[{n}]", f"[{n}]") for n in nums)
+
+        ans = CITATION_RE.sub(_repl, ans)
+        if DEBUG:
+            print("[qa_core] renumbered citations")
+
+        # 5) Build comments in that order
+        comments = []
+        for old in order:
+            try:
+                idx = int(old.strip("[]")) - 1
+            except Exception:
+                continue
+            if 0 <= idx < len(rows):
+                lbl, src, snippet, score, date_str = rows[idx]
+                new_lbl = mapping.get(old, lbl).strip("[]")
+                comments.append((new_lbl, src, snippet, score, date_str))
+
+        if comments or not order or attempt == MAX_COMMENT_RETRIES:
+            break
+        if DEBUG:
+            print("[qa_core] zero comments despite citation markers; retrying")
 
     if DEBUG:
         print(f"[qa_core] returning answer with {len(comments)} comments")
