@@ -1,6 +1,6 @@
 # my_module.py (Utilities-owned generator)
 import os, re, json
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from answer_composer import CompletionsClient
 from qa_core import answer_question  # <<— now comes from Utilities core
@@ -18,8 +18,9 @@ INCLUDE_COMMENTS = os.getenv("RFP_INCLUDE_COMMENTS", "1") == "1"  # "0" to disab
 
 _llm_client = CompletionsClient(model=MODEL)
 
-# Maintain history of previous questions so follow-ups can pull context.
+# Maintain history of prior interactions so follow-ups can reuse context.
 QUESTION_HISTORY: List[str] = []
+QA_HISTORY: List[Dict[str, Any]] = []
 
 # Prompt template for deciding whether a question depends on prior ones.
 FOLLOWUP_PROMPT = read_prompt(
@@ -44,6 +45,32 @@ INTENT_PROMPT = read_prompt(
 )
 
 DEBUG = True
+
+def _build_history(indices: Optional[List[int]] = None) -> str:
+    """Return a textual representation of previous Q/A pairs.
+
+    Parameters
+    ----------
+    indices:
+        Optional list of 1-based indices indicating which history items to
+        include. If omitted, the entire conversation history is used.
+    """
+    items = (
+        QA_HISTORY
+        if not indices
+        else [QA_HISTORY[i - 1] for i in indices if 1 <= i <= len(QA_HISTORY)]
+    )
+    lines: List[str] = []
+    for item in items:
+        q = item.get("question", "")
+        a = item.get("answer", "")
+        lines.append(f"Question: {q}")
+        lines.append(f"Answer: {a}")
+        cmts = item.get("citations", []) or []
+        if cmts:
+            cite_text = "; ".join(f"{c[1]}: {c[2]}" for c in cmts)
+            lines.append(f"Sources: {cite_text}")
+    return "\n".join(lines)
 
 def _format_with_or_without_comments(ans: str, cmts):
     """Return answer text plus optional citation metadata."""
@@ -212,50 +239,59 @@ def gen_answer(
             "Could you clarify?"
         )
         return {"text": msg} if INCLUDE_COMMENTS else msg
-
-    # Determine if this question relies on previous ones
-    indices = _detect_followup(question, QUESTION_HISTORY) if intent == "follow_up" else []
-    question_with_ctx = question
-    if indices:
-        ctx_text = " ".join(QUESTION_HISTORY[i - 1] for i in indices)
-        question_with_ctx = f"{ctx_text}\n\n{question}"
-
-    # Multiple-choice: provide textual explanation with citations
-    if choices:
-        opt_lines = "\n".join(f"{chr(65+i)}. {c}" for i, c in enumerate(choices))
-        mc_question = (
-            f"{question_with_ctx}\n\nOptions:\n{opt_lines}\n\n"
-            "Identify the correct option letter(s). For each correct option, provide a brief explanation "
-            "with citations in square brackets like [1]. Return the result as JSON with keys "
-            "'correct' (list of letters) and 'explanations' (mapping letters to explanations)."
-        )
-        ans, cmts = answer_question(
-            mc_question,
-            SEARCH_MODE,
-            FUND_TAG,
-            K,
-            None,
-            None,
-            MIN_CONFIDENCE,
-            _llm_client,
-        )
-        ans = _format_mc_answer(ans, choices)
-        QUESTION_HISTORY.append(question)
-        return _format_with_or_without_comments(ans, cmts)
-
-    # Free-text: call core QA
-    approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
-    length = None if approx_words is not None else LENGTH_PRESET
-
-    ans, cmts = answer_question(
-        question_with_ctx,
-        SEARCH_MODE,
-        FUND_TAG,
-        K,
-        length,
-        approx_words,
-        MIN_CONFIDENCE,
-        _llm_client,
+    indices = (
+        _detect_followup(question, QUESTION_HISTORY)
+        if intent == "follow_up"
+        else []
     )
+
+    if intent == "follow_up":
+        history_text = _build_history(indices if indices else None)
+        prompt = (
+            f"{history_text}\n\nFollow-up question: {question}\nAnswer:" if history_text else question
+        )
+        ans, _ = _llm_client.get_completion(prompt)
+        cmts = []
+    else:
+        question_with_ctx = question
+        if indices:
+            ctx_text = " ".join(QUESTION_HISTORY[i - 1] for i in indices)
+            question_with_ctx = f"{ctx_text}\n\n{question}"
+
+        if choices:
+            opt_lines = "\n".join(f"{chr(65+i)}. {c}" for i, c in enumerate(choices))
+            mc_question = (
+                f"{question_with_ctx}\n\nOptions:\n{opt_lines}\n\n"
+                "Identify the correct option letter(s). For each correct option, provide a brief explanation "
+                "with citations in square brackets like [1]. Return the result as JSON with keys "
+                "'correct' (list of letters) and 'explanations' (mapping letters to explanations)."
+            )
+            ans, cmts = answer_question(
+                mc_question,
+                SEARCH_MODE,
+                FUND_TAG,
+                K,
+                None,
+                None,
+                MIN_CONFIDENCE,
+                _llm_client,
+            )
+            ans = _format_mc_answer(ans, choices)
+        else:
+            approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
+            length = None if approx_words is not None else LENGTH_PRESET
+
+            ans, cmts = answer_question(
+                question_with_ctx,
+                SEARCH_MODE,
+                FUND_TAG,
+                K,
+                length,
+                approx_words,
+                MIN_CONFIDENCE,
+                _llm_client,
+            )
+
     QUESTION_HISTORY.append(question)
+    QA_HISTORY.append({"question": question, "answer": ans, "citations": cmts})
     return _format_with_or_without_comments(ans, cmts)
