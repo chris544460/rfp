@@ -33,6 +33,9 @@ def test_followup_context_is_appended(monkeypatch):
 
     monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
     monkeypatch.setattr(my_module, "_detect_followup", lambda q, h: [1] if h else [])
+    monkeypatch.setattr(
+        my_module, "_classify_intent", lambda q, h: "follow_up" if h else "new"
+    )
 
     my_module.QUESTION_HISTORY.clear()
     my_module.gen_answer("Do you provide IT support?")
@@ -41,3 +44,21 @@ def test_followup_context_is_appended(monkeypatch):
     assert "Do you provide IT support?" in calls[1]
     assert "Please provide comments if yes." in calls[1]
     assert len(my_module.QUESTION_HISTORY) == 2
+
+
+def test_clarify_intent_asks_for_more_info(monkeypatch):
+    calls = []
+
+    def fake_answer_question(q, mode, fund, k, length, approx_words, min_conf, llm):
+        calls.append(q)
+        return "ans", []
+
+    monkeypatch.setattr(my_module, "answer_question", fake_answer_question)
+    monkeypatch.setattr(my_module, "_classify_intent", lambda q, h: "clarify")
+
+    my_module.QUESTION_HISTORY.clear()
+    resp = my_module.gen_answer("More details?")
+
+    assert "clarify" in resp["text"].lower()
+    assert calls == []
+    assert my_module.QUESTION_HISTORY == []
