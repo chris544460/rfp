@@ -31,6 +31,18 @@ FOLLOWUP_PROMPT = read_prompt(
     ),
 )
 
+# Prompt template for classifying whether the user message is a new question,
+# a follow-up to previous discussion, or ambiguous.
+INTENT_PROMPT = read_prompt(
+    "intent_classify",
+    (
+        "Determine if the user message should be treated as a new question, a "
+        "follow-up to prior questions, or if clarification is required. Return "
+        "JSON with key 'intent' whose value is one of 'new', 'follow_up', or "
+        "'clarify'."
+    ),
+)
+
 DEBUG = True
 
 def _format_with_or_without_comments(ans: str, cmts):
@@ -108,6 +120,25 @@ def _format_mc_answer(ans: str, choices: List[str]) -> str:
 
     return f"{intro} {explanation}" if explanation else intro
 
+
+def _classify_intent(question: str, history: List[str]) -> str:
+    """Classify whether the message is new, follow-up, or needs clarification."""
+    if not history:
+        return "new"
+    history_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(history))
+    prompt = INTENT_PROMPT.format(question=question, history=history_block)
+    if DEBUG:
+        print("[my_module] classifying question intent")
+    try:
+        content, _ = _llm_client.get_completion(prompt)
+        data = json.loads(content or "{}")
+        intent = str(data.get("intent", "new")).lower()
+    except Exception:
+        intent = "new"
+    if intent not in {"new", "follow_up", "clarify"}:
+        intent = "new"
+    return intent
+
 def _detect_followup(question: str, history: List[str]) -> List[int]:
     """Use the LLM to determine which previous questions provide context."""
     if not history:
@@ -144,8 +175,16 @@ def gen_answer(
     choice_meta: Optional[List[Dict[str, object]]] = None
 ):
     """Generate an answer. Handles both open and multiple-choice questions."""
+    intent = _classify_intent(question, QUESTION_HISTORY)
+    if intent == "clarify":
+        msg = (
+            "I'm not sure if you're asking a new question or referring to a previous answer. "
+            "Could you clarify?"
+        )
+        return {"text": msg} if INCLUDE_COMMENTS else msg
+
     # Determine if this question relies on previous ones
-    indices = _detect_followup(question, QUESTION_HISTORY)
+    indices = _detect_followup(question, QUESTION_HISTORY) if intent == "follow_up" else []
     question_with_ctx = question
     if indices:
         ctx_text = " ".join(QUESTION_HISTORY[i - 1] for i in indices)
