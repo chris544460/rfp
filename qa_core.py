@@ -9,8 +9,6 @@ other pipelines can reuse it without circular imports.
 from __future__ import annotations
 
 import re
-import io
-import contextlib
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -46,7 +44,7 @@ PRESET_INSTRUCTIONS: Dict[str, str] = {
 # ───────────────────────── Core answering ─────────────────────────
 
 
-def _answer_question_impl(
+def answer_question(
     q: str,
     mode: str,
     fund: Optional[str],
@@ -201,54 +199,3 @@ def _answer_question_impl(
     if DEBUG:
         print(f"[qa_core] returning answer with {len(comments)} comments")
     return ans, comments
-
-
-def answer_question(
-    q: str,
-    mode: str,
-    fund: Optional[str],
-    k: int,
-    length: Optional[str],
-    approx_words: Optional[int],
-    min_confidence: float,
-    llm: CompletionsClient,
-    extra_docs: Optional[List[str]] = None,
-    return_steps: bool = False,
-) -> Tuple[str, List[Tuple[str, str, str, float, str]]] | Tuple[
-    str, List[Tuple[str, str, str, float, str]], List[str]
-]:
-    """Wrapper around :func:`_answer_question_impl` that optionally captures
-    debug print statements and returns them as a list of steps when
-    ``return_steps`` is True."""
-
-    if not return_steps:
-        return _answer_question_impl(
-            q,
-            mode,
-            fund,
-            k,
-            length,
-            approx_words,
-            min_confidence,
-            llm,
-            extra_docs,
-        )
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        result = _answer_question_impl(
-            q,
-            mode,
-            fund,
-            k,
-            length,
-            approx_words,
-            min_confidence,
-            llm,
-            extra_docs,
-        )
-    steps = buf.getvalue().splitlines()
-    if DEBUG:
-        for line in steps:
-            print(line)
-    return result[0], result[1], steps
