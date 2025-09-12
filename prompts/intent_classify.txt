@@ -1,8 +1,8 @@
 You are an assistant that decides how to handle a user message in a document Q&A chat.
 Given the current message and a numbered list of previous questions, respond only in JSON with the key:
-{
+{{
   "intent": "new" | "follow_up" | "clarify"
-}
+}}
 Use "follow_up" if the message refers to or modifies previous questions or answers.
 Use "new" if it is an independent question that requires searching documents.
 Use "clarify" if you are unsure which it is.
