@@ -126,7 +126,10 @@ def _classify_intent(question: str, history: List[str]) -> str:
     if not history:
         return "new"
     history_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(history))
-    prompt = INTENT_PROMPT.format(question=question, history=history_block)
+    prompt = (
+        INTENT_PROMPT.replace("{question}", question)
+        .replace("{history}", history_block)
+    )
     if DEBUG:
         print("[my_module] classifying question intent")
     try:
