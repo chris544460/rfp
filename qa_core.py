@@ -191,6 +191,9 @@ def answer_question(
                     order.append(tok)
 
         mapping = {old: f"[{i+1}]" for i, old in enumerate(order)}
+        if DEBUG:
+            print(f"[qa_core] citation order: {order}")
+            print(f"[qa_core] citation mapping: {mapping}")
 
         def _repl(match: re.Match[str]) -> str:
             nums = [n.strip() for n in match.group(1).split(",")]
@@ -206,11 +209,28 @@ def answer_question(
             try:
                 idx = int(old.strip("[]")) - 1
             except Exception:
+                if DEBUG:
+                    print(f"[qa_core] invalid citation token: {old}")
                 continue
             if 0 <= idx < len(rows):
                 lbl, src, snippet, score, date_str = rows[idx]
                 new_lbl = mapping.get(old, lbl).strip("[]")
                 comments.append((new_lbl, src, snippet, score, date_str))
+                if DEBUG:
+                    short_snippet = snippet.replace("\n", " ")
+                    if len(short_snippet) > 60:
+                        short_snippet = short_snippet[:57] + "..."
+                    print(
+                        f"[qa_core] add comment {new_lbl} from {src} score={score:.3f} snippet='{short_snippet}'"
+                    )
+            else:
+                if DEBUG:
+                    print(
+                        f"[qa_core] citation {old} out of range for {len(rows)} snippets"
+                    )
+
+        if DEBUG:
+            print(f"[qa_core] built {len(comments)} comments for this attempt")
 
         if comments or not order or attempt == MAX_COMMENT_RETRIES:
             break
