@@ -1,0 +1,6 @@
+You will be given a question and a snippet of text. If the snippet contains information that would help answer the question, reply with "true". Otherwise reply with "false". Respond with only one word.
+
+Question: {question}
+Snippet: {snippet}
+
+Answer:
