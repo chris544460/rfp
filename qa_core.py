@@ -96,7 +96,7 @@ def answer_question(
     if progress:
         progress(f"Found {len(hits)} candidate snippets. Filtering...")
     if DEBUG:
-        print(f"[qa_core] retrieved {len(hits)} hits")
+        print(f"[qa_core] retrieved {len(hits)} hits before filtering")
         top_n = min(len(hits), k)
         print(f"[qa_core] top {top_n} hits:")
         for i, h in enumerate(hits[:top_n], 1):
@@ -115,16 +115,24 @@ def answer_question(
     rows: List[Tuple[str, str, str, float, str]] = (
         []
     )  # (lbl, src, snippet, score, date)
+    low_confidence = 0
+    duplicate_or_empty = 0
     for h in hits:
         score = float(h.get("cosine", 0.0))
+        doc_id = h.get("id", "unknown")
         if score < min_confidence:
+            low_confidence += 1
             if DEBUG:
-                print(f"[qa_core] skip hit below confidence {score:.3f}")
+                print(
+                    f"[qa_core] filter out id={doc_id} score={score:.3f} < min_confidence {min_confidence}"
+                )
             continue
         txt = (h.get("text") or "").strip()
         if not txt or txt in seen_snippets:
+            duplicate_or_empty += 1
             if DEBUG:
-                print("[qa_core] skip empty/duplicate snippet")
+                reason = "empty" if not txt else "duplicate"
+                print(f"[qa_core] filter out id={doc_id} {reason} snippet")
             continue
         meta = h.get("meta", {}) or {}
         src_path = str(meta.get("source", "")) or "unknown"
@@ -149,6 +157,20 @@ def answer_question(
         if DEBUG:
             print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
 
+    if DEBUG:
+        print(
+            f"[qa_core] filtering summary: {len(rows)} accepted, {low_confidence} low-confidence, {duplicate_or_empty} duplicate/empty"
+        )
+        if rows:
+            print("[qa_core] accepted snippets after filtering:")
+            for lbl, src, snippet, score, _ in rows:
+                short = snippet.replace("\n", " ")
+                if len(short) > 80:
+                    short = short[:77] + "..."
+                print(
+                    f"    {lbl} from {src} score={score:.3f} text='{short}'"
+                )
+
     if not rows:
         if progress:
             progress("No relevant information found; skipping language model.")
@@ -162,6 +184,8 @@ def answer_question(
     )
     if DEBUG:
         print(f"[qa_core] built context with {len(rows)} snippets")
+        print("[qa_core] context block:")
+        print(ctx_block)
     if progress:
         progress("Generating answer with language model...")
 
