@@ -16,6 +16,9 @@ LENGTH_PRESET    = os.getenv("RFP_LENGTH") or "medium"       # "short"|"medium"|
 APPROX_WORDS_ENV = os.getenv("RFP_APPROX_WORDS")             # if set, overrides LENGTH
 INCLUDE_COMMENTS = os.getenv("RFP_INCLUDE_COMMENTS", "1") == "1"  # "0" to disable
 
+# Message returned when no supporting sources are found.
+NO_SOURCES_MSG = "Sorry, couldn't find relevant information in the sources."
+
 _llm_client = CompletionsClient(model=MODEL)
 
 # Maintain history of prior interactions so follow-ups can reuse context.
@@ -302,6 +305,9 @@ def gen_answer(
                 _llm_client,
                 **kwargs,
             )
+
+        if not cmts:
+            ans = NO_SOURCES_MSG
 
     QUESTION_HISTORY.append(question)
     QA_HISTORY.append({"question": question, "answer": ans, "citations": cmts})
