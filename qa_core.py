@@ -181,6 +181,16 @@ def answer_question(
             content = raw_response
         ans = (content or "").strip()
 
+        # Strip a trailing "In summary" section unless the question explicitly
+        # requests a summary. Some models tend to append a concluding paragraph
+        # beginning with this phrase, which users found redundant.
+        if "summary" not in q.lower():
+            idx_summary = ans.lower().rfind("in summary")
+            if idx_summary != -1:
+                if DEBUG:
+                    print("[qa_core] stripping trailing 'In summary' section")
+                ans = ans[:idx_summary].rstrip()
+
         # 4) Re-number bracket markers in the answer to reflect the order they first appear
         order: List[str] = []
         for m in CITATION_RE.finditer(ans):
