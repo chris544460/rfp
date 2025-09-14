@@ -12,7 +12,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Callable
 
 # Your vector search — keep the original import path you already use.
 # If your project uses a different path, update this import accordingly.
@@ -62,6 +62,7 @@ def answer_question(
     min_confidence: float,
     llm: CompletionsClient,
     extra_docs: Optional[List[str]] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
     """
     Return (answer_text, comments) where comments is a list of:
@@ -76,6 +77,8 @@ def answer_question(
     """
     if DEBUG:
         print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
+    if progress:
+        progress("Searching knowledge base for relevant snippets...")
     # 1) Retrieve candidate context snippets
     if DEBUG:
         print("[qa_core] searching for context snippets")
@@ -90,6 +93,8 @@ def answer_question(
         if DEBUG:
             print(f"[qa_core] LLM searching {len(extra_docs)} uploaded docs")
         hits.extend(search_uploaded_docs(q, extra_docs, llm))
+    if progress:
+        progress(f"Found {len(hits)} candidate snippets. Filtering...")
     if DEBUG:
         print(f"[qa_core] retrieved {len(hits)} hits")
         top_n = min(len(hits), k)
@@ -145,6 +150,8 @@ def answer_question(
             print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
 
     if not rows:
+        if progress:
+            progress("No relevant information found; skipping language model.")
         if DEBUG:
             print("[qa_core] no relevant context found; returning fallback answer")
         return "No relevant information found.", []
@@ -155,6 +162,8 @@ def answer_question(
     )
     if DEBUG:
         print(f"[qa_core] built context with {len(rows)} snippets")
+    if progress:
+        progress("Generating answer with language model...")
 
     # 2) Compose the prompt with a length instruction
     if approx_words is not None:
@@ -249,4 +258,6 @@ def answer_question(
 
     if DEBUG:
         print(f"[qa_core] returning answer with {len(comments)} comments")
+    if progress:
+        progress("Answer generation complete.")
     return ans, comments
