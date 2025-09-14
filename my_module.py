@@ -1,6 +1,6 @@
 # my_module.py (Utilities-owned generator)
 import os, re, json
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 
 from answer_composer import CompletionsClient
 from qa_core import answer_question  # <<— now comes from Utilities core
@@ -228,9 +228,23 @@ def _detect_followup(question: str, history: List[str]) -> List[int]:
 def gen_answer(
     question: str,
     choices: Optional[List[str]] = None,
-    choice_meta: Optional[List[Dict[str, object]]] = None
+    choice_meta: Optional[List[Dict[str, object]]] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ):
-    """Generate an answer. Handles both open and multiple-choice questions."""
+    """Generate an answer. Handles both open and multiple-choice questions.
+
+    Parameters
+    ----------
+    question:
+        The user's question text.
+    choices:
+        Optional list of multiple-choice options.
+    choice_meta:
+        Optional metadata about each choice.
+    progress:
+        Optional callback receiving status strings describing the model's
+        progress. Useful for displaying thinking steps in a UI.
+    """
     intent = _classify_intent(question, QUESTION_HISTORY)
     indices = (
         _detect_followup(question, QUESTION_HISTORY)
@@ -259,6 +273,7 @@ def gen_answer(
                 "with citations in square brackets like [1]. Return the result as JSON with keys "
                 "'correct' (list of letters) and 'explanations' (mapping letters to explanations)."
             )
+            kwargs = {"progress": progress} if progress else {}
             ans, cmts = answer_question(
                 mc_question,
                 SEARCH_MODE,
@@ -268,12 +283,14 @@ def gen_answer(
                 None,
                 MIN_CONFIDENCE,
                 _llm_client,
+                **kwargs,
             )
             ans = _format_mc_answer(ans, choices)
         else:
             approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
             length = None if approx_words is not None else LENGTH_PRESET
 
+            kwargs = {"progress": progress} if progress else {}
             ans, cmts = answer_question(
                 question_with_ctx,
                 SEARCH_MODE,
@@ -283,6 +300,7 @@ def gen_answer(
                 approx_words,
                 MIN_CONFIDENCE,
                 _llm_client,
+                **kwargs,
             )
 
     QUESTION_HISTORY.append(question)
