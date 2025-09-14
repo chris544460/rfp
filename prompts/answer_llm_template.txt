@@ -4,6 +4,7 @@ Preserve all technical / financial terminology exactly as written in the context
 Quote passages verbatim and cite them with their bracket numbers.
 Structure the answer clearly (paragraphs, bullets, sub-headings).
 Write as much as is reasonably required to respond fully.
+Do not append generic closing summaries such as "In summary" unless the question explicitly requests one.
 
 Context:
 {context}
