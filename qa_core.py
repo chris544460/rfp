@@ -34,11 +34,23 @@ MAX_COMMENT_RETRIES = int(os.getenv("RFP_COMMENT_RETRIES", "2"))
 # Regex for [1] or comma-separated citations like [1, 2]
 CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
+# Model used to verify snippet relevance. Can be overridden via
+# the RFP_RELEVANCE_MODEL environment variable.
+RELEVANCE_MODEL = os.getenv("RFP_RELEVANCE_MODEL", "gpt-4.1")
+
 
 # ───────────────────────── Prompt loading ─────────────────────────
 
 PROMPTS = load_prompts(
-    {name: "" for name in ("extract_questions", "answer_search_context", "answer_llm")}
+    {
+        name: ""
+        for name in (
+            "extract_questions",
+            "answer_search_context",
+            "answer_llm",
+            "relevance_filter",
+        )
+    }
 )
 
 PRESET_INSTRUCTIONS: Dict[str, str] = {
@@ -111,12 +123,17 @@ def answer_question(
                 f"    {i}. id={doc_id} score={score:.3f} source={src} text='{snippet}'"
             )
 
+    relevance_llm = CompletionsClient(model=RELEVANCE_MODEL) if RELEVANCE_MODEL else None
+    if DEBUG and relevance_llm:
+        print(f"[qa_core] using relevance model: {RELEVANCE_MODEL}")
+
     seen_snippets = set()
     rows: List[Tuple[str, str, str, float, str]] = (
         []
     )  # (lbl, src, snippet, score, date)
     low_confidence = 0
     duplicate_or_empty = 0
+    irrelevant = 0
     for h in hits:
         score = float(h.get("cosine", 0.0))
         doc_id = h.get("id", "unknown")
@@ -134,6 +151,24 @@ def answer_question(
                 reason = "empty" if not txt else "duplicate"
                 print(f"[qa_core] filter out id={doc_id} {reason} snippet")
             continue
+        if relevance_llm:
+            rel_prompt = PROMPTS["relevance_filter"].format(question=q, snippet=txt)
+            if DEBUG:
+                print(f"[qa_core] LLM relevance check for id={doc_id}")
+                print(f"[qa_core] relevance prompt:\n{rel_prompt}")
+            rel_raw = relevance_llm.get_completion(rel_prompt)
+            rel_text = (
+                rel_raw[0] if isinstance(rel_raw, tuple) else rel_raw
+            ).strip().lower()
+            if DEBUG:
+                print(f"[qa_core] relevance model output: {rel_text!r}")
+            if not rel_text.startswith("t"):
+                irrelevant += 1
+                if DEBUG:
+                    print(
+                        f"[qa_core] filter out id={doc_id} marked irrelevant by relevance model"
+                    )
+                continue
         meta = h.get("meta", {}) or {}
         src_path = str(meta.get("source", "")) or "unknown"
         src_name = Path(src_path).name if src_path else "unknown"
@@ -159,7 +194,7 @@ def answer_question(
 
     if DEBUG:
         print(
-            f"[qa_core] filtering summary: {len(rows)} accepted, {low_confidence} low-confidence, {duplicate_or_empty} duplicate/empty"
+            f"[qa_core] filtering summary: {len(rows)} accepted, {low_confidence} low-confidence, {duplicate_or_empty} duplicate/empty, {irrelevant} irrelevant"
         )
         if rows:
             print("[qa_core] accepted snippets after filtering:")
