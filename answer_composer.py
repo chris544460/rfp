@@ -136,6 +136,28 @@ class CompletionsClient:
             print("Falling back to synchronous endpoint...")
             return self._get_completion_sync(prompt, json_output)
 
+    def get_chat_completion(self, messages: list[dict]) -> tuple[str, dict]:
+        """Send a chat completion request with explicit messages."""
+        endpoint = (
+            f"{self.base_url}/api/ai-platform/toolkit/chat-completion/v1/chatCompletionsSync:compute"
+        )
+        payload = {
+            "chatCompletionMessages": [
+                {"prompt": m["content"], "promptRole": m["role"]} for m in messages
+            ],
+            "modelId": self.model,
+        }
+        response = requests.post(
+            endpoint,
+            json=payload,
+            headers=self.header,
+            auth=self.auth,
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return self._finalize_and_extract_sync(data)
+
     def _get_completion_sync(self, prompt: str, json_output: bool = False) -> tuple[str, dict]:
         """Send a single chat completion request using sync endpoint."""
 
