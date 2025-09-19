@@ -52,49 +52,42 @@ PRESET_INSTRUCTIONS: Dict[str, str] = {
 # ───────────────────────── Core answering ─────────────────────────
 
 
-def answer_question(
+def collect_relevant_snippets(
     q: str,
     mode: str,
     fund: Optional[str],
     k: int,
-    length: Optional[str],
-    approx_words: Optional[int],
     min_confidence: float,
     llm: CompletionsClient,
     extra_docs: Optional[List[str]] = None,
     progress: Optional[Callable[[str], None]] = None,
-) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
-    """
-    Return (answer_text, comments) where comments is a list of:
-    (new_label_without_brackets, source_name, snippet, score, date_str)
+) -> List[Tuple[str, str, str, float, str]]:
+    """Return the filtered context snippets used for answering a question."""
 
-    The answer contains bracket markers like [1], [2], ... which we re-number
-    to match the order of comments we return.
-    If no search results meet the confidence threshold, the function returns
-    "No relevant information found." and an empty comments list without calling
-    the language model.
-    extra_docs: optional list of document paths to scan with an LLM in addition to vector search.
-    """
     if DEBUG:
-        print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
+        print(f"[qa_core] collect_relevant_snippets start: q='{q}', mode={mode}, fund={fund}")
+
     if progress:
         progress("Searching knowledge base for relevant snippets...")
-    # 1) Retrieve candidate context snippets
+
     if DEBUG:
         print("[qa_core] searching for context snippets")
+
     if mode == "both":
-        # Back-compat: treat "both" as blend + dual
         hits = search(q, k=k, mode="blend", fund_filter=fund) + search(
             q, k=k, mode="dual", fund_filter=fund
         )
     else:
         hits = search(q, k=k, mode=mode, fund_filter=fund)
+
     if extra_docs:
         if DEBUG:
             print(f"[qa_core] LLM searching {len(extra_docs)} uploaded docs")
         hits.extend(search_uploaded_docs(q, extra_docs, llm))
+
     if progress:
         progress(f"Found {len(hits)} candidate snippets. Filtering...")
+
     if DEBUG:
         print(f"[qa_core] retrieved {len(hits)} hits before filtering")
         top_n = min(len(hits), k)
@@ -112,11 +105,10 @@ def answer_question(
             )
 
     seen_snippets = set()
-    rows: List[Tuple[str, str, str, float, str]] = (
-        []
-    )  # (lbl, src, snippet, score, date)
+    rows: List[Tuple[str, str, str, float, str]] = []
     low_confidence = 0
     duplicate_or_empty = 0
+
     for h in hits:
         score = float(h.get("cosine", 0.0))
         doc_id = h.get("id", "unknown")
@@ -171,9 +163,49 @@ def answer_question(
                     f"    {lbl} from {src} score={score:.3f} text='{short}'"
                 )
 
+    if not rows and progress:
+        progress("No relevant information found; skipping language model.")
+
+    return rows
+
+
+def answer_question(
+    q: str,
+    mode: str,
+    fund: Optional[str],
+    k: int,
+    length: Optional[str],
+    approx_words: Optional[int],
+    min_confidence: float,
+    llm: CompletionsClient,
+    extra_docs: Optional[List[str]] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
+    """
+    Return (answer_text, comments) where comments is a list of:
+    (new_label_without_brackets, source_name, snippet, score, date_str)
+
+    The answer contains bracket markers like [1], [2], ... which we re-number
+    to match the order of comments we return.
+    If no search results meet the confidence threshold, the function returns
+    "No relevant information found." and an empty comments list without calling
+    the language model.
+    extra_docs: optional list of document paths to scan with an LLM in addition to vector search.
+    """
+    if DEBUG:
+        print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
+    rows = collect_relevant_snippets(
+        q=q,
+        mode=mode,
+        fund=fund,
+        k=k,
+        min_confidence=min_confidence,
+        llm=llm,
+        extra_docs=extra_docs,
+        progress=progress,
+    )
+
     if not rows:
-        if progress:
-            progress("No relevant information found; skipping language model.")
         if DEBUG:
             print("[qa_core] no relevant context found; returning fallback answer")
         return "No relevant information found.", []
