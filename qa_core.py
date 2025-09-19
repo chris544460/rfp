@@ -47,9 +47,165 @@ PRESET_INSTRUCTIONS: Dict[str, str] = {
     "long": "Answer in detail (up to one page).",
     "auto": "Answer using only the provided sources and choose an appropriate length.",
 }
-
+ 
 
 # ───────────────────────── Core answering ─────────────────────────
+
+
+def _search_and_filter_hits(
+    q: str,
+    mode: str,
+    fund: Optional[str],
+    k: int,
+    min_confidence: float,
+    llm: CompletionsClient,
+    extra_docs: Optional[List[str]] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> Tuple[List[Tuple[str, str, str, float, str]], List[Dict[str, object]]]:
+    """Search the knowledge base and filter snippets for downstream use."""
+
+    if progress:
+        progress("Searching knowledge base for relevant snippets...")
+
+    if DEBUG:
+        print(f"[qa_core] searching for context snippets: q='{q}' mode={mode} fund={fund}")
+
+    if mode == "both":
+        hits = search(q, k=k, mode="blend", fund_filter=fund) + search(
+            q, k=k, mode="dual", fund_filter=fund
+        )
+    else:
+        hits = search(q, k=k, mode=mode, fund_filter=fund)
+
+    if extra_docs:
+        if DEBUG:
+            print(f"[qa_core] LLM searching {len(extra_docs)} uploaded docs")
+        hits.extend(search_uploaded_docs(q, extra_docs, llm))
+
+    if progress:
+        progress(f"Found {len(hits)} candidate snippets. Filtering...")
+
+    if DEBUG:
+        print(f"[qa_core] retrieved {len(hits)} hits before filtering")
+        top_n = min(len(hits), k)
+        print(f"[qa_core] top {top_n} hits:")
+        for i, h in enumerate(hits[:top_n], 1):
+            meta = h.get("meta", {}) or {}
+            src = meta.get("source", "unknown")
+            doc_id = h.get("id", "unknown")
+            score = float(h.get("cosine", 0.0))
+            snippet = (h.get("text") or "").strip().replace("\n", " ")
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            print(
+                f"    {i}. id={doc_id} score={score:.3f} source={src} text='{snippet}'"
+            )
+
+    seen_snippets = set()
+    rows: List[Tuple[str, str, str, float, str]] = []
+    structured_hits: List[Dict[str, object]] = []
+    low_confidence = 0
+    duplicate_or_empty = 0
+
+    for h in hits:
+        score = float(h.get("cosine", 0.0))
+        doc_id = h.get("id", "unknown")
+        if score < min_confidence:
+            low_confidence += 1
+            if DEBUG:
+                print(
+                    f"[qa_core] filter out id={doc_id} score={score:.3f} < min_confidence {min_confidence}"
+                )
+            continue
+
+        txt = (h.get("text") or "").strip()
+        if not txt or txt in seen_snippets:
+            duplicate_or_empty += 1
+            if DEBUG:
+                reason = "empty" if not txt else "duplicate"
+                print(f"[qa_core] filter out id={doc_id} {reason} snippet")
+            continue
+
+        meta = h.get("meta", {}) or {}
+        src_path = str(meta.get("source", "")) or "unknown"
+        src_name = Path(src_path).name if src_path else "unknown"
+
+        try:
+            mtime = (
+                Path(src_path).stat().st_mtime
+                if src_path and Path(src_path).exists()
+                else None
+            )
+            date_str = (
+                datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+                if mtime
+                else "unknown"
+            )
+        except Exception:
+            date_str = "unknown"
+
+        lbl = f"[{len(rows)+1}]"
+        rows.append((lbl, src_name, txt, score, date_str))
+        structured_hits.append(
+            {
+                "label": lbl,
+                "source": src_name,
+                "source_path": src_path,
+                "snippet": txt,
+                "score": score,
+                "date": date_str,
+            }
+        )
+        seen_snippets.add(txt)
+
+        if DEBUG:
+            print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
+
+    if DEBUG:
+        print(
+            f"[qa_core] filtering summary: {len(rows)} accepted, {low_confidence} low-confidence, {duplicate_or_empty} duplicate/empty"
+        )
+        if rows:
+            print("[qa_core] accepted snippets after filtering:")
+            for lbl, src, snippet, score, _ in rows:
+                short = snippet.replace("\n", " ")
+                if len(short) > 80:
+                    short = short[:77] + "..."
+                print(
+                    f"    {lbl} from {src} score={score:.3f} text='{short}'"
+                )
+
+    if not rows and progress:
+        progress("No relevant information found; skipping language model.")
+
+    return rows, structured_hits
+
+
+def get_relevant_snippets(
+    q: str,
+    mode: str,
+    fund: Optional[str],
+    k: int,
+    min_confidence: float,
+    llm: CompletionsClient,
+    extra_docs: Optional[List[str]] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, object]]:
+    """Return filtered knowledge-base snippets without invoking the LLM."""
+
+    rows, structured_hits = _search_and_filter_hits(
+        q,
+        mode,
+        fund,
+        k,
+        min_confidence,
+        llm,
+        extra_docs=extra_docs,
+        progress=progress,
+    )
+    if not rows and DEBUG:
+        print("[qa_core] no relevant snippets found for direct retrieval")
+    return structured_hits
 
 
 def answer_question(
@@ -77,103 +233,19 @@ def answer_question(
     """
     if DEBUG:
         print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
-    if progress:
-        progress("Searching knowledge base for relevant snippets...")
-    # 1) Retrieve candidate context snippets
-    if DEBUG:
-        print("[qa_core] searching for context snippets")
-    if mode == "both":
-        # Back-compat: treat "both" as blend + dual
-        hits = search(q, k=k, mode="blend", fund_filter=fund) + search(
-            q, k=k, mode="dual", fund_filter=fund
-        )
-    else:
-        hits = search(q, k=k, mode=mode, fund_filter=fund)
-    if extra_docs:
-        if DEBUG:
-            print(f"[qa_core] LLM searching {len(extra_docs)} uploaded docs")
-        hits.extend(search_uploaded_docs(q, extra_docs, llm))
-    if progress:
-        progress(f"Found {len(hits)} candidate snippets. Filtering...")
-    if DEBUG:
-        print(f"[qa_core] retrieved {len(hits)} hits before filtering")
-        top_n = min(len(hits), k)
-        print(f"[qa_core] top {top_n} hits:")
-        for i, h in enumerate(hits[:top_n], 1):
-            meta = h.get("meta", {}) or {}
-            src = meta.get("source", "unknown")
-            doc_id = h.get("id", "unknown")
-            score = float(h.get("cosine", 0.0))
-            snippet = (h.get("text") or "").strip().replace("\n", " ")
-            if len(snippet) > 80:
-                snippet = snippet[:77] + "..."
-            print(
-                f"    {i}. id={doc_id} score={score:.3f} source={src} text='{snippet}'"
-            )
 
-    seen_snippets = set()
-    rows: List[Tuple[str, str, str, float, str]] = (
-        []
-    )  # (lbl, src, snippet, score, date)
-    low_confidence = 0
-    duplicate_or_empty = 0
-    for h in hits:
-        score = float(h.get("cosine", 0.0))
-        doc_id = h.get("id", "unknown")
-        if score < min_confidence:
-            low_confidence += 1
-            if DEBUG:
-                print(
-                    f"[qa_core] filter out id={doc_id} score={score:.3f} < min_confidence {min_confidence}"
-                )
-            continue
-        txt = (h.get("text") or "").strip()
-        if not txt or txt in seen_snippets:
-            duplicate_or_empty += 1
-            if DEBUG:
-                reason = "empty" if not txt else "duplicate"
-                print(f"[qa_core] filter out id={doc_id} {reason} snippet")
-            continue
-        meta = h.get("meta", {}) or {}
-        src_path = str(meta.get("source", "")) or "unknown"
-        src_name = Path(src_path).name if src_path else "unknown"
-        try:
-            mtime = (
-                Path(src_path).stat().st_mtime
-                if src_path and Path(src_path).exists()
-                else None
-            )
-            date_str = (
-                datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-                if mtime
-                else "unknown"
-            )
-        except Exception:
-            date_str = "unknown"
-
-        lbl = f"[{len(rows)+1}]"
-        rows.append((lbl, src_name, txt, score, date_str))
-        seen_snippets.add(txt)
-        if DEBUG:
-            print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
-
-    if DEBUG:
-        print(
-            f"[qa_core] filtering summary: {len(rows)} accepted, {low_confidence} low-confidence, {duplicate_or_empty} duplicate/empty"
-        )
-        if rows:
-            print("[qa_core] accepted snippets after filtering:")
-            for lbl, src, snippet, score, _ in rows:
-                short = snippet.replace("\n", " ")
-                if len(short) > 80:
-                    short = short[:77] + "..."
-                print(
-                    f"    {lbl} from {src} score={score:.3f} text='{short}'"
-                )
+    rows, _ = _search_and_filter_hits(
+        q,
+        mode,
+        fund,
+        k,
+        min_confidence,
+        llm,
+        extra_docs=extra_docs,
+        progress=progress,
+    )
 
     if not rows:
-        if progress:
-            progress("No relevant information found; skipping language model.")
         if DEBUG:
             print("[qa_core] no relevant context found; returning fallback answer")
         return "No relevant information found.", []
