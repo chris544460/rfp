@@ -1,14 +1,16 @@
-import os
 import json
 import glob
+from pathlib import Path
 
 ######################################
 # 1) CONFIGURATION
 ######################################
 
-INPUT_FOLDER    = "./parsed_json_outputs"  # your folder with the original JSON files
-EMBEDDING_JSON  = "embedding_data.json"    # output for vector search
-FINE_TUNE_JSON  = "fine_tuning_data.json"  # output for extractive QA fine-tuning
+BASE_DIR        = Path(__file__).resolve().parent
+PARSED_DIR      = BASE_DIR / "parsed_json_outputs"
+INPUT_FOLDER    = PARSED_DIR                 # folder with the original JSON files
+EMBEDDING_JSON  = PARSED_DIR / "embedding_data.json"    # output for vector search
+FINE_TUNE_JSON  = PARSED_DIR / "fine_tuning_data.json"  # output for extractive QA fine-tuning
 
 ######################################
 # 2) SET UP CONTAINERS
@@ -27,7 +29,13 @@ fine_tuning_data = {
 # 3) READ & MERGE
 ######################################
 
-all_files  = glob.glob(os.path.join(INPUT_FOLDER, "*.json"))
+PARSED_DIR.mkdir(parents=True, exist_ok=True)
+
+all_files  = [
+    path
+    for path in glob.glob(str(INPUT_FOLDER / "*.json"))
+    if Path(path).name not in {EMBEDDING_JSON.name, FINE_TUNE_JSON.name}
+]
 qa_counter = 0
 
 for filepath in all_files:
