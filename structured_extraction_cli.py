@@ -2,7 +2,7 @@
 
 This script guides a user through the typical pipeline:
 
-1. Place source files (DOCX or Excel) inside ``data_sources/``.
+1. Place source files (DOCX or Excel) inside ``structured_extraction/data_sources/``.
 2. Convert a selected file into JSON using the parsers in
    ``structured_extraction/parser.py`` (outputs land in
    ``parsed_json_outputs/``).
@@ -12,7 +12,7 @@ This script guides a user through the typical pipeline:
 
 Running the script presents a small interactive menu allowing the user to:
 
-* Choose a file from ``data_sources`` (or provide a custom path).
+* Choose a file from ``structured_extraction/data_sources`` (or provide a custom path).
 * Decide whether to parse the file or regenerate prepared data assets.
 
 The implementation keeps everything in one place so a single command
@@ -31,8 +31,8 @@ from structured_extraction.parser import (
     process_excel_file_with_detection,
 )
 
-
-DATA_SOURCES_DIR = Path("data_sources")
+BASE_DIR = Path(__file__).resolve().parent
+DATA_SOURCES_DIR = BASE_DIR / "structured_extraction" / "data_sources"
 PARSED_OUTPUT_DIR = Path("parsed_json_outputs")
 PREPARED_OUTPUT_DIR = Path("prepared_data")
 
@@ -40,13 +40,13 @@ PREPARED_OUTPUT_DIR = Path("prepared_data")
 def ensure_directories() -> None:
     """Make sure the expected folders exist."""
 
-    DATA_SOURCES_DIR.mkdir(exist_ok=True)
+    DATA_SOURCES_DIR.mkdir(parents=True, exist_ok=True)
     PARSED_OUTPUT_DIR.mkdir(exist_ok=True)
     PREPARED_OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 def list_data_source_files() -> List[Path]:
-    """Return the files currently available in ``data_sources``."""
+    """Return the files currently available in ``structured_extraction/data_sources``."""
 
     return sorted(
         [p for p in DATA_SOURCES_DIR.iterdir() if p.is_file()],
@@ -63,7 +63,7 @@ def prompt_for_file() -> Optional[Path]:
         for idx, path in enumerate(files, start=1):
             print(f"  {idx}) {path.name}")
     else:
-        print("  (no files in data_sources yet)")
+        print("  (no files in structured_extraction/data_sources yet)")
 
     print("  C) Enter a custom path")
     print("  Q) Cancel")
