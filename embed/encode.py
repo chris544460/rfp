@@ -5,7 +5,7 @@ encode.py  ⇒ send (answer.text) + (question.text) to Surface embedding,
 
 Usage:
     python3 encode.py \
-        --file structured_extraction/embedding_data.json \
+        --file structured_extraction/parsed_json_outputs/embedding_data.json \
         --output vector_store \
         --workers 4 \
         --model text-embedding-ada-002 \
@@ -20,6 +20,10 @@ import time
 import concurrent.futures
 from pathlib import Path
 from typing import List, Dict
+
+DEFAULT_EMBEDDING_FILE = Path(
+    "structured_extraction/parsed_json_outputs/embedding_data.json"
+)
 
 import numpy as np
 import faiss
@@ -114,8 +118,12 @@ def main():
         description="Load JSON records with 'text' and metadata.question, embed both, blend, and build FAISS index."
     )
     ap.add_argument(
-        "--file", required=True,
-        help="Path to the JSON file of records (each must have 'text' and metadata.question)."
+        "--file",
+        default=str(DEFAULT_EMBEDDING_FILE),
+        help=(
+            "Path to the JSON file of records (each must have 'text' and metadata.question). "
+            "Defaults to structured_extraction/parsed_json_outputs/embedding_data.json."
+        ),
     )
     ap.add_argument(
         "--output", required=True,
