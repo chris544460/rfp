@@ -1,7 +1,9 @@
-import pandas as pd
-import json, os
+import os
 import re
+import json
 from typing import List, Dict, Optional, Union
+
+import pandas as pd
 import docx
 from docx.text.paragraph import Paragraph
 from docx.table import Table
@@ -9,8 +11,7 @@ from docx.table import Table
 
 def iter_block_items(parent):
     """
-    A generator that yields paragraphs and tables in the order they appear in the DOCX.
-    Adapted from python-docx FAQ to preserve reading order.
+    Generator yielding paragraphs and tables in reading order from a DOCX document or element.
     """
     if hasattr(parent, "element"):
         elm = parent.element.body if hasattr(parent.element, "body") else parent.element
@@ -25,242 +26,345 @@ def iter_block_items(parent):
 
 class ExcelQuestionnaireParser:
     """
-    Parses two-column questionnaire XLSX into JSON records.
+    Parses a two-column questionnaire Excel file into JSON-friendly records.
+    Column 0: question key (ignored), Column 1: question text and subsequent answer lines.
     """
-    def __init__(self, file_path: str, sheet_name: Optional[Union[str,int]] = 0, section: Optional[str] = None):
+    def __init__(self,
+                 file_path: str,
+                 sheet_name: Optional[Union[str, int]] = 0,
+                 section: Optional[str] = None):
         self.file_path = file_path
         self.sheet_name = sheet_name
-        self.section = section
-        self.records: List[Dict[str,Optional[str]]] = []
+        self.section = section or "Document"
+        self.records: List[Dict[str, Optional[str]]] = []
 
-    def parse(self) -> List[Dict[str,Optional[str]]]:
+    def parse(self) -> List[Dict[str, Optional[str]]]:
         df = pd.read_excel(self.file_path, sheet_name=self.sheet_name, header=None)
-        n = len(df)
-        i = 0
-        while i < n:
-            key = df.iloc[i,0]
-            txt = df.iloc[i,1]
-            if pd.notna(key) and pd.notna(txt):
-                q = str(txt).strip()
-                ans_parts: List[str] = []
+        i, n_rows = 0, len(df)
+        while i < n_rows:
+            key_cell = df.iat[i, 0]
+            text_cell = df.iat[i, 1]
+            if pd.notna(key_cell) and pd.notna(text_cell):
+                question = str(text_cell).strip()
+                answer_parts: List[str] = []
                 i += 1
-                while i < n and pd.isna(df.iloc[i,0]):
-                    a = df.iloc[i,1]
-                    if pd.notna(a): ans_parts.append(str(a).strip())
+                # collect answer lines
+                while i < n_rows and pd.isna(df.iat[i, 0]):
+                    ans = df.iat[i, 1]
+                    if pd.notna(ans):
+                        answer_parts.append(str(ans).strip())
                     i += 1
-                self.records.append({"source":self.file_path, "section":self.section,
-                                     "field":q, "value":"\n".join(ans_parts)})
+                self.records.append({
+                    "source": self.file_path,
+                    "section": self.section,
+                    "field": question,
+                    "value": "\n".join(answer_parts)
+                })
             else:
                 i += 1
         return self.records
 
     def to_json(self, output_path: str) -> None:
-        if not self.records: self.parse()
-        with open(output_path,'w',encoding='utf-8') as f:
-            json.dump(self.records,f,indent=2,ensure_ascii=False)
+        if not self.records:
+            self.parse()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(self.records, f, indent=2, ensure_ascii=False)
 
 
 class ExcelAnswerLibraryParser:
     """
-    Parses Answer Library XLSX into JSON.
-    Expects 'ID','Question','Answer_Response*', plus metadata.
+    Parses an Answer Library Excel file with columns:
+      - 'ID'
+      - 'Question'
+      - 'Answer_Response*' columns
+      - optional 'Alternate Questions', 'Answer_No/Yes', 'Section Name', 'Tags'
     """
-    def __init__(self, file_path: str, sheet_name: Optional[Union[str,int]]=0):
+    def __init__(self,
+                 file_path: str,
+                 sheet_name: Optional[Union[str, int]] = 0):
         self.file_path = file_path
         self.sheet_name = sheet_name
-        self.records: List[Dict[str,Optional[Union[str,List[str]]]]] = []
+        self.records: List[Dict[str, Union[str, List[str]]]] = []
 
-    def parse(self) -> List[Dict[str,Optional[Union[str,List[str]]]]]:
+    def parse(self) -> List[Dict[str, Union[str, List[str]]]]:
         df = pd.read_excel(self.file_path, sheet_name=self.sheet_name)
-        answer_cols = [c for c in df.columns if str(c).startswith('Answer_Response')]
-        for _,row in df.iterrows():
-            base = {'source':self.file_path, 'id':str(row.get('ID','')).strip(),
-                    'question':str(row.get('Question','')).strip(),
-                    'alternate_questions':[], 'answers':[]}
-            alt = row.get('Alternate Questions')
-            if pd.notna(alt):
-                base['alternate_questions'] = [a.strip() for a in str(alt).split(';') if a.strip()]
+        answer_cols = [c for c in df.columns if str(c).startswith("Answer_Response")]
+        for _, row in df.iterrows():
+            rec: Dict[str, Union[str, List[str]]] = {
+                "source": self.file_path,
+                "id": str(row.get("ID", "")).strip(),
+                "question": str(row.get("Question", "")).strip(),
+                "alternate_questions": [],
+                "answers": []
+            }
+            # alternate questions
+            alt_q = row.get("Alternate Questions")
+            if pd.notna(alt_q):
+                rec["alternate_questions"] = [
+                    a.strip() for a in str(alt_q).split(";") if a.strip()
+                ]
+            # answer responses
             for col in answer_cols:
-                v = row.get(col)
-                if pd.notna(v) and str(v).strip(): base['answers'].append(str(v).strip())
-            yn = row.get('Answer_No/Yes')
-            if pd.notna(yn): base['yes_no'] = str(yn).strip()
-            sec = row.get('Section Name')
-            if pd.notna(sec): base['section'] = str(sec).strip()
-            tags = row.get('Tags')
-            if pd.notna(tags): base['tags'] = [t.strip() for t in str(tags).split(';') if t.strip()]
-            self.records.append(base)
+                val = row.get(col)
+                if pd.notna(val) and str(val).strip():
+                    rec["answers"].append(str(val).strip())
+            # yes/no
+            yn = row.get("Answer_No/Yes")
+            if pd.notna(yn):
+                rec["yes_no"] = str(yn).strip()
+            # section name
+            sec = row.get("Section Name")
+            if pd.notna(sec):
+                rec["section"] = str(sec).strip()
+            # tags
+            tags = row.get("Tags")
+            if pd.notna(tags):
+                rec["tags"] = [t.strip() for t in str(tags).split(";") if t.strip()]
+            self.records.append(rec)
         return self.records
 
     def to_json(self, output_path: str) -> None:
-        if not self.records: self.parse()
-        with open(output_path,'w',encoding='utf-8') as f:
-            json.dump(self.records,f,indent=2,ensure_ascii=False)
+        if not self.records:
+            self.parse()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(self.records, f, indent=2, ensure_ascii=False)
 
 
 class MixedDocParser:
     """
-    DOCX parser capturing headings, paragraphs, 2-col Q&A, multi-col tables.
+    Single-pass DOCX parser. Captures:
+      - Headings (by style or numeric pattern)
+      - Normal paragraphs
+      - 2-column Q&A tables
+      - Multi-column data tables
     """
-    HEADING_PATTERN = re.compile(r'^(\d+(?:\.\d+)+)\s+.*')
+    HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+)+)\s+.*")
 
-    def __init__(self,file_path:str):
+    def __init__(self, file_path: str):
         self.file_path = file_path
-        self.records:List[Dict] = []
-        self.current_section = 'Document'
+        self.current_section: str = "Document"
+        self.records: List[Dict[str, Union[str, Dict[str, str]]]] = []
 
-    def parse(self)->List[Dict]:
+    def parse(self) -> List[Dict[str, Union[str, Dict[str, str]]]]:
         doc = docx.Document(self.file_path)
         for block in iter_block_items(doc):
-            if isinstance(block,Paragraph): self._handle_paragraph(block)
-            elif isinstance(block,Table): self._handle_table(block)
+            if isinstance(block, Paragraph):
+                self._handle_paragraph(block)
+            elif isinstance(block, Table):
+                self._handle_table(block)
         return self.records
 
-    def _handle_paragraph(self,p:Paragraph):
-        txt = p.text.strip()
-        if not txt: return
-        style = p.style.name.lower() if p.style else ''
-        if style.startswith('heading'):
-            self.current_section = txt
-            self.records.append({'source':self.file_path,'type':'heading','section':txt})
+    def _handle_paragraph(self, paragraph: Paragraph):
+        text = paragraph.text.strip()
+        if not text:
+            return
+        style = paragraph.style.name.lower() if paragraph.style else ""
+        if style.startswith("heading") or self.HEADING_PATTERN.match(text):
+            # treat as heading
+            self.current_section = text
+            self.records.append({
+                "source": self.file_path,
+                "type": "heading",
+                "section": text
+            })
         else:
-            m = self.HEADING_PATTERN.match(txt)
-            if m:
-                self.current_section = txt
-                self.records.append({'source':self.file_path,'type':'heading','section':txt})
-            else:
-                self.records.append({'source':self.file_path,'type':'paragraph',
-                                     'section':self.current_section,'text':txt})
+            # normal paragraph
+            self.records.append({
+                "source": self.file_path,
+                "type": "paragraph",
+                "section": self.current_section,
+                "text": text
+            })
 
-    def _handle_table(self,tbl:Table):
-        n = len(tbl.columns)
-        if n==2: self._parse_2col_qa(tbl)
-        else: self._parse_multi_col(tbl)
+    def _handle_table(self, table: Table):
+        n_cols = len(table.columns)
+        if n_cols == 2:
+            self._parse_2col_qa(table)
+        else:
+            self._parse_multi_col(table)
 
-    def _parse_2col_qa(self,tbl:Table):
-        cur_q=None; ans_parts:List[str]=[]
+    def _parse_2col_qa(self, table: Table):
+        current_q: Optional[str] = None
+        current_a: List[str] = []
+
         def flush():
-            nonlocal cur_q,ans_parts
-            if cur_q is not None:
-                self.records.append({'source':self.file_path,'type':'table_qa',
-                    'section':self.current_section,'field':cur_q,
-                    'value':'\n'.join(ans_parts).strip()})
-        for row in tbl.rows:
-            c0=row.cells[0].text.strip(); c1=row.cells[1].text.strip()
-            if c0 and c1:
-                flush(); cur_q,ans_parts=c0,[c1]
-            elif not c0 and c1 and cur_q is not None:
-                ans_parts.append(c1)
-            else:
-                if c0: flush(); cur_q,ans_parts=c0,[]
+            nonlocal current_q, current_a
+            if current_q is not None:
+                self.records.append({
+                    "source": self.file_path,
+                    "type": "table_qa",
+                    "section": self.current_section,
+                    "field": current_q,
+                    "value": "\n".join(current_a).strip()
+                })
+
+        for row in table.rows:
+            col0 = row.cells[0].text.strip()
+            col1 = row.cells[1].text.strip()
+            if col0 and col1:
+                flush()
+                current_q, current_a = col0, [col1]
+            elif not col0 and col1 and current_q is not None:
+                current_a.append(col1)
+            elif col0 and not col1:
+                flush()
+                current_q, current_a = col0, []
         flush()
 
-    def _parse_multi_col(self,tbl:Table):
-        rows=[[c.text.strip() for c in r.cells] for r in tbl.rows]
-        if not rows: return
-        hdr=rows[0]
-        for i,row in enumerate(rows[1:],start=1):
-            rec={hdr[j]:row[j] if j<len(row) else '' for j in range(len(hdr))}
-            self.records.append({'source':self.file_path,'type':'table_data',
-                                'section':self.current_section,'row_index':i,'data':rec})
+    def _parse_multi_col(self, table: Table):
+        # header row
+        headers = [c.text.strip() for c in table.rows[0].cells]
+        for idx, row in enumerate(table.rows[1:], start=1):
+            data = {headers[i]: row.cells[i].text.strip() for i in range(len(headers))}
+            self.records.append({
+                "source": self.file_path,
+                "type": "table_data",
+                "section": self.current_section,
+                "row_index": idx,
+                "data": data
+            })
 
-    def to_json(self,out:str)->None:
-        if not self.records: self.parse()
-        with open(out,'w',encoding='utf-8') as f:
-            json.dump(self.records,f,indent=2,ensure_ascii=False)
+    def to_json(self, output_path: str) -> None:
+        if not self.records:
+            self.parse()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(self.records, f, indent=2, ensure_ascii=False)
 
 
 class LoopioExcelParser:
     """
-    Converts Loopio XLSX to Responsive JSON format.
+    Parses Loopio-formatted Excel into a JSON library of Q&A entries.
+    Expects columns (case-insensitive):
+      - 'Library Entry Id'
+      - 'Question *'
+      - 'Answer *'
+      - optional 'Stack', 'Category', 'Sub-Category', 'Tags', 'Alternate Question 1-5'
     """
-    def __init__(self,file_path:str):
-        self.file_path=file_path
-        self.records:List[Dict]=[]
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        self.records: List[Dict[str, Union[str, List[str]]]] = []
 
-    def parse(self)->List[Dict]:
-        df=pd.read_excel(self.file_path,engine='openpyxl')
-        df.columns=[c.lower().strip() if isinstance(c,str) else c for c in df.columns]
-        for _,r in df.iterrows():
-            q=str(r.get('question *','')).strip()
-            a=str(r.get('answer *','')).strip()
-            if not q or not a: continue
-            ans=[x.strip() for x in a.split(';') if x.strip()] or [a]
-            tags=[t.strip() for t in str(r.get('stack','')).split(',') if t.strip()]
-            cat=str(r.get('category','')).strip(); sub=str(r.get('sub-category','')).strip()
-            if cat and sub: sec=f"{cat} > {sub}"
-            elif cat: sec=cat
-            else: sec='General'
-            alts=[]
-            for i in range(1,6):
-                col=f'alternate question {i}'
-                v=str(r.get(col,'')).strip()
-                if v and v.lower()!='nan': alts.append(v)
-            rec={'id':str(r.get('library entry id',f"loopio_{len(self.records)}")).strip(),
-                 'question':q,'answers':ans,'section':sec,'tags':tags,
-                 'source':os.path.basename(self.file_path),'alternate_questions':alts}
-            self.records.append(rec)
+    def parse(self) -> List[Dict[str, Union[str, List[str]]]]:
+        df = pd.read_excel(self.file_path, engine="openpyxl")
+        df.columns = [
+            c.lower().strip() if isinstance(c, str) else c
+            for c in df.columns
+        ]
+        for _, row in df.iterrows():
+            q = str(row.get("question *", "")).strip()
+            a = str(row.get("answer *", "")).strip()
+            if not q or not a:
+                continue
+            answers = [ans.strip() for ans in a.split(";") if ans.strip()] or [a]
+            tags = [
+                t.strip() for t in str(row.get("stack", "")).split(",") if t.strip()
+            ]
+            cat = str(row.get("category", "")).strip()
+            sub = str(row.get("sub-category", "")).strip()
+            section = "General"
+            if cat and sub:
+                section = f"{cat} > {sub}"
+            elif cat:
+                section = cat
+            # alternate questions
+            alts: List[str] = []
+            for i in range(1, 6):
+                col = f"alternate question {i}"
+                v = str(row.get(col, "")).strip()
+                if v and v.lower() != "nan":
+                    alts.append(v)
+            entry_id = str(row.get("library entry id", f"loopio_{len(self.records)}")).strip()
+
+            self.records.append({
+                "id": entry_id,
+                "question": q,
+                "answers": answers,
+                "section": section,
+                "tags": tags,
+                "source": os.path.basename(self.file_path),
+                "alternate_questions": alts
+            })
         return self.records
 
-    def to_json(self,out:str)->None:
-        if not self.records: self.parse()
-        with open(out,'w',encoding='utf-8') as f:
-            json.dump(self.records,f,indent=2,ensure_ascii=False)
+    def to_json(self, output_path: str) -> None:
+        if not self.records:
+            self.parse()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(self.records, f, indent=2, ensure_ascii=False)
 
 
-def detect_and_parse_excel_file(file_path:str,output_dir:str='./parsed_json_outputs')->bool:
+def detect_and_parse_excel_file(file_path: str,
+                                output_dir: str = "./parsed_json_outputs") -> bool:
     """
-    Auto-detects Loopio vs standard XLSX, outputs JSON. Returns True if Loopio.
+    Detects Loopio vs. standard questionnaire/answer library Excel.
+    Writes JSON to output_dir and returns True if Loopio format handled.
     """
-    os.makedirs(output_dir,exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     try:
-        samp=pd.read_excel(file_path,engine='openpyxl',nrows=5)
-        cols=[str(c).lower().strip() for c in samp.columns]
-        if all(ic in cols for ic in ['library entry id','question *','answer *']):
-            print(f"Detected Loopio format: {file_path}")
-            recs=LoopioExcelParser(file_path).parse()
-            out=os.path.join(output_dir,f"{os.path.splitext(os.path.basename(file_path))[0]}.json")
-            with open(out,'w',encoding='utf-8') as f: json.dump(recs,f,indent=2,ensure_ascii=False)
-            print(f"✅ Created {len(recs)} Loopio records in {out}")
+        sample = pd.read_excel(file_path, engine="openpyxl", nrows=5)
+        cols = [str(c).lower().strip() for c in sample.columns]
+        indicators = ["library entry id", "question *", "answer *"]
+        if all(ind in cols for ind in indicators):
+            parser = LoopioExcelParser(file_path)
+            recs = parser.parse()
+            out_path = os.path.join(
+                output_dir,
+                f"{os.path.splitext(os.path.basename(file_path))[0]}.json"
+            )
+            parser.to_json(out_path)
+            print(f"Detected Loopio format: created {len(recs)} records at {out_path}")
             return True
         else:
-            print(f"File appears standard format: {file_path}")
+            print(f"Standard format detected: {file_path}")
             return False
     except Exception as e:
-        print(f"❌ Error processing {file_path}: {e}")
+        print(f"Error processing {file_path}: {e}")
         return False
 
 
-def process_standard_excel_file(file_path:str)->bool:
+def process_standard_excel_file(file_path: str,
+                                output_dir: str = "./parsed_json_outputs") -> None:
     """
-    Placeholder for existing custom XLSX parsers.
+    Fallback to process questionnaire or answer library Excel.
     """
-    print(f"Processing standard Excel file: {file_path}")
-    # Insert original logic here (e.g. ExcelQuestionnaireParser, ExcelAnswerLibraryParser)
-    return True
+    # Try questionnaire first
+    q_parser = ExcelQuestionnaireParser(file_path)
+    q_recs = q_parser.parse()
+    if q_recs:
+        q_out = os.path.join(output_dir, f"questionnaire_{os.path.basename(file_path)}.json")
+        q_parser.to_json(q_out)
+        print(f"Questionnaire parsed: {len(q_recs)} records at {q_out}")
+        return
 
-
-def process_excel_file_with_detection(file_path:str)->bool:
-    """
-    Wrapper to process XLSX with auto-detection.
-    Returns True if handled by Loopio, False if fallback.
-    """
-    if detect_and_parse_excel_file(file_path):
-        return True
+    # Else try answer library
+    a_parser = ExcelAnswerLibraryParser(file_path)
+    a_recs = a_parser.parse()
+    if a_recs:
+        a_out = os.path.join(output_dir, f"answers_{os.path.basename(file_path)}.json")
+        a_parser.to_json(a_out)
+        print(f"Answer library parsed: {len(a_recs)} records at {a_out}")
     else:
-        return process_standard_excel_file(file_path)
+        print(f"No records parsed from {file_path}")
 
 
-if __name__ == '__main__':
+def process_excel_file_with_detection(file_path: str,
+                                      output_dir: str = "./parsed_json_outputs") -> None:
+    """
+    Attempts Loopio detection, else falls back to standard Excel parsers.
+    """
+    handled = detect_and_parse_excel_file(file_path, output_dir)
+    if not handled:
+        process_standard_excel_file(file_path, output_dir)
+
+
+if __name__ == "__main__":
     # Example usage:
-    # DOCX parsing
-    # doc_path='/path/to/file.docx'
-    # parser=MixedDocParser(doc_path)
-    # records=parser.parse()
-    # for r in records[:10]: print(r)
-    # parser.to_json('out.json')
-
-    # Auto-process Excel
-    # files=['AIP Q&As Backup.xlsx','Answer LibraryBUKPF-09-05.xlsx']
-    # for f in files: process_excel_file_with_detection(f)
+    # process_excel_file_with_detection("YourFile.xlsx")
+    # parser = MixedDocParser("YourDoc.docx")
+    # records = parser.parse()
+    # parser.to_json("out_doc.json")
     pass
