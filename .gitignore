@@ -1,3 +1,6 @@
 .env
 __pycache__/
 .pytest_cache/
+
+structured_extraction/data_sources/
+structured_extraction/parsed_json_outputs/
