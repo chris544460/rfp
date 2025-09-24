@@ -8,7 +8,7 @@ This script guides a user through the typical pipeline:
    ``parsed_json_outputs/``).
 3. Optionally rebuild the aggregated datasets produced by
    ``structured_extraction/prepare_data.py`` (outputs stored in
-   ``prepared_data/``).
+   ``structured_extraction/parsed_json_outputs/``).
 
 Running the script presents a small interactive menu allowing the user to:
 
@@ -22,7 +22,6 @@ manages the otherwise multi-step process.
 from __future__ import annotations
 
 import runpy
-import shutil
 from pathlib import Path
 from typing import List, Optional
 
@@ -32,9 +31,10 @@ from structured_extraction.parser import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_SOURCES_DIR = BASE_DIR / "structured_extraction" / "data_sources"
-PARSED_OUTPUT_DIR = Path("parsed_json_outputs")
-PREPARED_OUTPUT_DIR = Path("prepared_data")
+STRUCTURED_EXTRACTION_DIR = BASE_DIR / "structured_extraction"
+DATA_SOURCES_DIR = STRUCTURED_EXTRACTION_DIR / "data_sources"
+PARSED_OUTPUT_DIR = STRUCTURED_EXTRACTION_DIR / "parsed_json_outputs"
+PREPARED_OUTPUT_DIR = PARSED_OUTPUT_DIR
 
 
 def ensure_directories() -> None:
@@ -120,11 +120,9 @@ def run_prepare_data() -> None:
     runpy.run_module("structured_extraction.prepare_data", run_name="__main__")
 
     for filename in ["embedding_data.json", "fine_tuning_data.json"]:
-        produced = Path(filename)
+        produced = PREPARED_OUTPUT_DIR / filename
         if produced.exists():
-            destination = PREPARED_OUTPUT_DIR / filename
-            shutil.move(str(produced), str(destination))
-            print(f"Moved {produced} -> {destination}")
+            print(f"Output available at {produced}")
         else:
             print(f"Expected output '{filename}' was not created.")
 
