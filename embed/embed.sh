@@ -2,7 +2,7 @@
 
 # (1) PURE "answer-only" index (w=0.0)
 python3 embed/encode.py \
-  --file structured_extraction/embedding_data.json \
+  --file structured_extraction/parsed_json_outputs/embedding_data.json \
   --output vector_store/answer \
   --workers 4 \
   --model text-embedding-ada-002 \
@@ -10,7 +10,7 @@ python3 embed/encode.py \
 
 # (2) PURE "question-only" index (w=1.0)
 python3 embed/encode.py \
-  --file structured_extraction/embedding_data.json \
+  --file structured_extraction/parsed_json_outputs/embedding_data.json \
   --output vector_store/question \
   --workers 4 \
   --model text-embedding-ada-002 \
@@ -18,7 +18,7 @@ python3 embed/encode.py \
 
 # (3) BLENDED index (e.g. w=0.65)
 python3 embed/encode.py \
-  --file structured_extraction/embedding_data.json \
+  --file structured_extraction/parsed_json_outputs/embedding_data.json \
   --output vector_store/blend \
   --workers 4 \
   --model text-embedding-ada-002 \
