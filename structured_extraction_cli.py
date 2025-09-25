@@ -24,6 +24,8 @@ manages the otherwise multi-step process.
 from __future__ import annotations
 
 import runpy
+import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -129,6 +131,26 @@ def run_prepare_data() -> None:
             print(f"Expected output '{filename}' was not created.")
 
 
+def _record_errors(errors: List[tuple[str, str]]) -> None:
+    """Persist error details to the log file."""
+
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    lines = [
+        f"Run at {timestamp}",
+        "------------------------------",
+    ]
+    for subject, tb in errors:
+        lines.append(f"Subject: {subject}")
+        lines.append(tb.rstrip())
+        lines.append("------------------------------")
+
+    ERROR_LOG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(
+        "\nEncountered errors while processing all files. "
+        f"Details recorded in {ERROR_LOG_PATH}."
+    )
+
+
 def parse_all_data_source_files() -> None:
     """Parse every file in ``structured_extraction/data_sources`` and rebuild data."""
 
@@ -138,11 +160,25 @@ def parse_all_data_source_files() -> None:
         return
 
     print("\nParsing all files in structured_extraction/data_sources ...")
+    errors: List[tuple[str, str]] = []
     for path in files:
         print(f"\nProcessing {path.name}...")
-        parse_file(path)
+        try:
+            parse_file(path)
+        except Exception:  # pragma: no cover - defensive logging
+            print(
+                f"An error occurred while processing {path.name}. Skipping and continuing."
+            )
+            errors.append((path.name, traceback.format_exc()))
 
-    run_prepare_data()
+    try:
+        run_prepare_data()
+    except Exception:  # pragma: no cover - defensive logging
+        print("An error occurred while regenerating prepared data. Skipping.")
+        errors.append(("prepare_data", traceback.format_exc()))
+
+    if errors:
+        _record_errors(errors)
 
 
 def prompt_for_action() -> str:
@@ -187,3 +223,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
+ERROR_LOG_PATH = BASE_DIR / "parse_all_errors.txt"
