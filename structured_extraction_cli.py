@@ -13,7 +13,9 @@ This script guides a user through the typical pipeline:
 Running the script presents a small interactive menu allowing the user to:
 
 * Choose a file from ``structured_extraction/data_sources`` (or provide a custom path).
-* Decide whether to parse the file or regenerate prepared data assets.
+* Parse every file in ``structured_extraction/data_sources`` before regenerating prepared
+  data assets.
+* Regenerate prepared data assets without parsing.
 
 The implementation keeps everything in one place so a single command
 manages the otherwise multi-step process.
@@ -127,19 +129,36 @@ def run_prepare_data() -> None:
             print(f"Expected output '{filename}' was not created.")
 
 
+def parse_all_data_source_files() -> None:
+    """Parse every file in ``structured_extraction/data_sources`` and rebuild data."""
+
+    files = list_data_source_files()
+    if not files:
+        print("\nNo files found in structured_extraction/data_sources.")
+        return
+
+    print("\nParsing all files in structured_extraction/data_sources ...")
+    for path in files:
+        print(f"\nProcessing {path.name}...")
+        parse_file(path)
+
+    run_prepare_data()
+
+
 def prompt_for_action() -> str:
     """Ask the user what action they want to perform."""
 
     print("\nWhat would you like to do?")
     print("  1) Parse a file (DOCX/Excel -> JSON)")
     print("  2) Regenerate prepared data outputs")
+    print("  3) Parse all files then regenerate prepared data")
     print("  Q) Quit")
 
     while True:
         action = input("Choice: ").strip().lower()
-        if action in {"1", "2", "q"}:
+        if action in {"1", "2", "3", "q"}:
             return action
-        print("Please choose 1, 2, or Q.")
+        print("Please choose 1, 2, 3, or Q.")
 
 
 def main() -> None:
@@ -159,6 +178,8 @@ def main() -> None:
             parse_file(path)
         elif action == "2":
             run_prepare_data()
+        elif action == "3":
+            parse_all_data_source_files()
 
 
 if __name__ == "__main__":
