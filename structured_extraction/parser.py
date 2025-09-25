@@ -309,6 +309,7 @@ def detect_and_parse_excel_file(file_path: str,
         cols = [str(c).lower().strip() for c in sample.columns]
         indicators = ["library entry id", "question *", "answer *"]
         if all(ind in cols for ind in indicators):
+            print(f"Using Loopio export parser for {file_path}")
             parser = LoopioExcelParser(file_path)
             recs = parser.parse()
             out_path = os.path.join(
@@ -335,6 +336,7 @@ def process_standard_excel_file(file_path: str,
     q_parser = ExcelQuestionnaireParser(file_path)
     q_recs = q_parser.parse()
     if q_recs:
+        print(f"Using questionnaire export parser for {file_path}")
         q_out = os.path.join(output_dir, f"questionnaire_{os.path.basename(file_path)}.json")
         q_parser.to_json(q_out)
         print(f"Questionnaire parsed: {len(q_recs)} records at {q_out}")
@@ -344,6 +346,7 @@ def process_standard_excel_file(file_path: str,
     a_parser = ExcelAnswerLibraryParser(file_path)
     a_recs = a_parser.parse()
     if a_recs:
+        print(f"Using responsive export parser for {file_path}")
         a_out = os.path.join(output_dir, f"answers_{os.path.basename(file_path)}.json")
         a_parser.to_json(a_out)
         print(f"Answer library parsed: {len(a_recs)} records at {a_out}")
