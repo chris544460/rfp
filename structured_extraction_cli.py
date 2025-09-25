@@ -39,6 +39,7 @@ STRUCTURED_EXTRACTION_DIR = BASE_DIR / "structured_extraction"
 DATA_SOURCES_DIR = STRUCTURED_EXTRACTION_DIR / "data_sources"
 PARSED_OUTPUT_DIR = STRUCTURED_EXTRACTION_DIR / "parsed_json_outputs"
 PREPARED_OUTPUT_DIR = PARSED_OUTPUT_DIR
+ERROR_LOG_PATH = STRUCTURED_EXTRACTION_DIR / "parse_all_errors.txt"
 
 
 def ensure_directories() -> None:
@@ -223,4 +224,3 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
-ERROR_LOG_PATH = BASE_DIR / "parse_all_errors.txt"
