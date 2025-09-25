@@ -298,33 +298,99 @@ class LoopioExcelParser:
 
 
 def detect_and_parse_excel_file(file_path: str,
-                                output_dir: str = "./parsed_json_outputs") -> bool:
+                                output_dir: str = "./parsed_json_outputs") -> Optional[str]:
     """
-    Detects Loopio vs. standard questionnaire/answer library Excel.
-    Writes JSON to output_dir and returns True if Loopio format handled.
+    Detects which Excel parser to use based on worksheet headers/content.
+
+    Returns the detected parser name ("loopio", "answer_library", or "questionnaire")
+    after writing JSON output. If no parser can be confidently chosen, returns None
+    so the caller can fall back to heuristic parsing.
     """
     os.makedirs(output_dir, exist_ok=True)
+
+    def _serialize(parser, output_path: str, success_message: str) -> bool:
+        records = parser.parse()
+        if not records:
+            return False
+        parser.to_json(output_path)
+        print(success_message.format(count=len(records), path=output_path))
+        return True
+
     try:
         sample = pd.read_excel(file_path, engine="openpyxl", nrows=5)
-        cols = [str(c).lower().strip() for c in sample.columns]
-        indicators = ["library entry id", "question *", "answer *"]
-        if all(ind in cols for ind in indicators):
-            print(f"Using Loopio export parser for {file_path}")
-            parser = LoopioExcelParser(file_path)
-            recs = parser.parse()
-            out_path = os.path.join(
-                output_dir,
-                f"{os.path.splitext(os.path.basename(file_path))[0]}.json"
-            )
-            parser.to_json(out_path)
-            print(f"Detected Loopio format: created {len(recs)} records at {out_path}")
-            return True
-        else:
-            print(f"Standard format detected: {file_path}")
-            return False
-    except Exception as e:
-        print(f"Error processing {file_path}: {e}")
-        return False
+    except Exception as exc:
+        print(f"Error processing {file_path}: {exc}")
+        return None
+
+    cols = [str(c).lower().strip() for c in sample.columns if pd.notna(c)]
+    basename = os.path.basename(file_path)
+    stem = os.path.splitext(basename)[0]
+
+    # Loopio export detection
+    loopio_indicators = {"library entry id", "question *", "answer *"}
+    if loopio_indicators.issubset(set(cols)):
+        print(f"Using Loopio export parser for {file_path}")
+        parser = LoopioExcelParser(file_path)
+        out_path = os.path.join(output_dir, f"{stem}.json")
+        if _serialize(
+            parser,
+            out_path,
+            "Detected Loopio format: created {count} records at {path}"
+        ):
+            return "loopio"
+        print(f"Loopio indicators found but no records parsed for {file_path}")
+        return None
+
+    # Answer library export detection
+    has_answer_cols = any(col.startswith("answer_response") for col in cols)
+    if "question" in cols and has_answer_cols:
+        print(f"Using responsive export parser for {file_path}")
+        parser = ExcelAnswerLibraryParser(file_path)
+        out_path = os.path.join(output_dir, f"answers_{basename}.json")
+        if _serialize(
+            parser,
+            out_path,
+            "Answer library parsed: {count} records at {path}"
+        ):
+            return "answer_library"
+        print(f"Responsive export indicators found but no records parsed for {file_path}")
+        return None
+
+    # Questionnaire detection – look for exactly two populated columns when
+    # ignoring header rows. This format typically stores keys in column 0 and
+    # question/answer text in column 1.
+    try:
+        sample_no_header = pd.read_excel(
+            file_path, engine="openpyxl", header=None, nrows=10
+        )
+    except Exception:
+        sample_no_header = None
+
+    if sample_no_header is not None:
+        populated_columns = []
+        for col in sample_no_header.columns:
+            col_values = [
+                str(val).strip()
+                for val in sample_no_header[col].dropna()
+                if str(val).strip()
+            ]
+            if col_values:
+                populated_columns.append(col)
+
+        if len(populated_columns) == 2:
+            print(f"Using questionnaire export parser for {file_path}")
+            parser = ExcelQuestionnaireParser(file_path)
+            out_path = os.path.join(output_dir, f"questionnaire_{basename}.json")
+            if _serialize(
+                parser,
+                out_path,
+                "Questionnaire parsed: {count} records at {path}"
+            ):
+                return "questionnaire"
+            print(f"Questionnaire indicators found but no records parsed for {file_path}")
+
+    print(f"Could not auto-detect parser for {file_path}")
+    return None
 
 
 def process_standard_excel_file(file_path: str,
@@ -359,8 +425,8 @@ def process_excel_file_with_detection(file_path: str,
     """
     Attempts Loopio detection, else falls back to standard Excel parsers.
     """
-    handled = detect_and_parse_excel_file(file_path, output_dir)
-    if not handled:
+    detected = detect_and_parse_excel_file(file_path, output_dir)
+    if detected is None:
         process_standard_excel_file(file_path, output_dir)
 
 
