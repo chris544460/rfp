@@ -52,6 +52,8 @@ def _resolve_live_azure_config() -> Optional[Tuple[str, str, str]]:
 
 @pytest.fixture(autouse=True)
 def clear_azure_env(monkeypatch):
+    if os.getenv("RUN_LIVE_AZURE_TEST") == "1":
+        return
     monkeypatch.delenv("AZURE_FEEDBACK_CONNECTION_STRING", raising=False)
     monkeypatch.delenv("AZURE_FEEDBACK_CONTAINER", raising=False)
     monkeypatch.delenv("AZURE_FEEDBACK_BLOB", raising=False)
@@ -251,7 +253,7 @@ def test_feedback_store_azure_append_failure(monkeypatch, tmp_path: Path):
 
 
 @pytest.mark.live_azure
-def test_feedback_store_live_azure(tmp_path: Path):
+def test_feedback_store_live_azure(tmp_path: Path, monkeypatch):
     if os.getenv("RUN_LIVE_AZURE_TEST") != "1":
         pytest.skip("Set RUN_LIVE_AZURE_TEST=1 to enable live Azure test")
 
@@ -262,6 +264,10 @@ def test_feedback_store_live_azure(tmp_path: Path):
         )
 
     connection, container, blob_name = resolved
+
+    monkeypatch.setenv("AZURE_FEEDBACK_CONNECTION_STRING", connection)
+    monkeypatch.setenv("AZURE_FEEDBACK_CONTAINER", container)
+    monkeypatch.setenv("AZURE_FEEDBACK_BLOB", blob_name)
 
     try:
         from azure.storage.blob import BlobServiceClient
