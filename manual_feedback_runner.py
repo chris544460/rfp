@@ -236,7 +236,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             import traceback
 
             print("\nTraceback (most recent call last):")
-            traceback.print_exception(exc)
+            traceback.print_exc()
         return 1
 
     account_name = _infer_account_name(connection)
