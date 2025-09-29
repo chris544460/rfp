@@ -110,36 +110,48 @@ class FeedbackStore:
         blob_env: str = "AZURE_FEEDBACK_BLOB",
     ) -> None:
         self._fieldnames = list(fieldnames)
-        self._local = LocalFeedbackStore(fieldnames, local_path)
 
         connection_string = os.getenv(connection_string_env)
         container_name = os.getenv(container_env)
         blob_name = os.getenv(blob_env)
 
+        self._azure: Optional[AzureBlobFeedbackStore] = None
         self.azure_error: Optional[str] = None
-        if connection_string and container_name and blob_name:
+        self._azure_configured = bool(connection_string and container_name and blob_name)
+
+        if self._azure_configured:
             try:
                 self._azure = AzureBlobFeedbackStore(
                     self._fieldnames,
-                    connection_string,
-                    container_name,
-                    blob_name,
+                    connection_string or "",
+                    container_name or "",
+                    blob_name or "",
                 )
             except Exception as exc:
                 self.azure_error = str(exc)
-                self._azure = None
+            self._local = None
         else:
-            self._azure = None
+            self._local = LocalFeedbackStore(fieldnames, local_path)
 
     def append(self, row: Dict[str, str]) -> None:
         normalized = {key: row.get(key, "") for key in self._fieldnames}
-        if self._azure is not None:
+        if self._azure_configured:
+            if self._azure is None:
+                raise FeedbackStorageError(
+                    self.azure_error or "Azure feedback storage is not available"
+                )
             try:
                 self._azure.append(normalized)
                 return
             except FeedbackStorageError as exc:
                 self.azure_error = str(exc)
-        self._local.append(normalized)
+                raise
+
+        if self._local is not None:
+            self._local.append(normalized)
+            return
+
+        raise FeedbackStorageError("Azure feedback storage unavailable and local fallback disabled")
 
 
 def build_feedback_store(fieldnames: Iterable[str], local_path: Path) -> FeedbackStore:

@@ -189,8 +189,89 @@ def test_feedback_store_azure_append(monkeypatch, tmp_path: Path):
 
     expected_payload = json.dumps(record, ensure_ascii=False) + "\n"
     assert fake_blocks == [expected_payload]
-    assert local_file.read_text(encoding="utf-8") == ""
+    assert not local_file.exists()
     assert store.azure_error is None
+
+
+def test_feedback_store_azure_append_failure(monkeypatch, tmp_path: Path):
+    connection = "UseDevelopmentStorage=true"
+    container = "feedback"
+    blob_name = "feedback-log.ndjson"
+
+    monkeypatch.setenv("AZURE_FEEDBACK_CONNECTION_STRING", connection)
+    monkeypatch.setenv("AZURE_FEEDBACK_CONTAINER", container)
+    monkeypatch.setenv("AZURE_FEEDBACK_BLOB", blob_name)
+
+    class FailingAppendBlobClient:
+        def __init__(self, conn: str, cont: str, blob: str) -> None:
+            self.conn = conn
+            self.container = cont
+            self.blob = blob
+
+        @classmethod
+        def from_connection_string(cls, conn: str, cont: str, blob: str):
+            return cls(conn, cont, blob)
+
+        def get_blob_properties(self):  # pragma: no cover
+            raise Exception("missing")
+
+        def create_append_blob(self):
+            pass
+
+        def append_block(self, payload: str):
+            raise RuntimeError("simulated failure")
+
+    class FakeBlobServiceClient:
+        def __init__(self, conn: str) -> None:
+            self.conn = conn
+
+        @classmethod
+        def from_connection_string(cls, conn: str):
+            return cls(conn)
+
+        def get_container_client(self, name: str):
+            class _Container:
+                def create_container(self_inner):
+                    pass
+
+            self.container_name = name
+            return _Container()
+
+    class FakeResourceExistsError(Exception):
+        pass
+
+    azure_pkg = types.ModuleType("azure")
+    azure_core = types.ModuleType("azure.core")
+    azure_core_ex = types.ModuleType("azure.core.exceptions")
+    azure_core_ex.ResourceExistsError = FakeResourceExistsError
+    azure_storage = types.ModuleType("azure.storage")
+    azure_storage_blob = types.ModuleType("azure.storage.blob")
+    azure_storage_blob.BlobServiceClient = FakeBlobServiceClient
+    azure_storage_blob.AppendBlobClient = FailingAppendBlobClient
+
+    azure_storage.blob = azure_storage_blob
+    azure_pkg.core = azure_core
+    azure_pkg.storage = azure_storage
+    azure_core.exceptions = azure_core_ex
+
+    monkeypatch.setitem(sys.modules, "azure", azure_pkg)
+    monkeypatch.setitem(sys.modules, "azure.core", azure_core)
+    monkeypatch.setitem(sys.modules, "azure.core.exceptions", azure_core_ex)
+    monkeypatch.setitem(sys.modules, "azure.storage", azure_storage)
+    monkeypatch.setitem(sys.modules, "azure.storage.blob", azure_storage_blob)
+
+    module = load_feedback_module()
+    store = module.FeedbackStore(fieldnames=FIELDNAMES, local_path=tmp_path / "local.ndjson")
+
+    with pytest.raises(module.FeedbackStorageError) as excinfo:
+        store.append({
+            "timestamp": "2025-01-01T00:03:00Z",
+            "session_id": "sess-fail",
+            "user_id": "user-fail",
+            "feedback_source": "chat",
+        })
+
+    assert "simulated failure" in str(excinfo.value)
 
 
 @pytest.mark.live_azure
@@ -228,7 +309,7 @@ def test_feedback_store_live_azure(tmp_path: Path):
     if store.azure_error:
         pytest.fail(f"Azure append failed: {store.azure_error}")
 
-    assert not local_file.exists() or local_file.read_text(encoding="utf-8") == ""
+    assert not local_file.exists()
 
     blob_client = BlobServiceClient.from_connection_string(connection).get_blob_client(
         container=container, blob=blob_name
