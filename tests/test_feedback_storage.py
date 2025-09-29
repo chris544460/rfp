@@ -25,9 +25,6 @@ def load_feedback_module():
     return module
 
 
-FeedbackStore = load_feedback_module().FeedbackStore
-
-
 FIELDNAMES = [
     "timestamp",
     "session_id",
