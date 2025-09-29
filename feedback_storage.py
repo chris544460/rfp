@@ -80,25 +80,8 @@ class AzureBlobFeedbackStore:
         return json.dumps(ordered, ensure_ascii=False)
 
 
-class LocalFeedbackStore:
-    """Fallback feedback store writing NDJSON locally."""
-
-    def __init__(self, fieldnames: Iterable[str], path: Path) -> None:
-        self._fieldnames = list(fieldnames)
-        self._path = path
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        if not self._path.exists():
-            with self._path.open("w", encoding="utf-8") as fp:
-                fp.write("")
-
-    def append(self, row: Dict[str, str]) -> None:
-        ordered = {key: row.get(key, "") for key in self._fieldnames}
-        with self._path.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(ordered, ensure_ascii=False) + "\n")
-
-
 class FeedbackStore:
-    """Coordinator that prefers Azure but falls back to local CSV."""
+    """Feedback storage that requires Azure Blob Storage when configured."""
 
     def __init__(
         self,
@@ -129,29 +112,23 @@ class FeedbackStore:
                 )
             except Exception as exc:
                 self.azure_error = str(exc)
-            self._local = None
-        else:
-            self._local = LocalFeedbackStore(fieldnames, local_path)
 
     def append(self, row: Dict[str, str]) -> None:
         normalized = {key: row.get(key, "") for key in self._fieldnames}
-        if self._azure_configured:
-            if self._azure is None:
-                raise FeedbackStorageError(
-                    self.azure_error or "Azure feedback storage is not available"
-                )
-            try:
-                self._azure.append(normalized)
-                return
-            except FeedbackStorageError as exc:
-                self.azure_error = str(exc)
-                raise
-
-        if self._local is not None:
-            self._local.append(normalized)
-            return
-
-        raise FeedbackStorageError("Azure feedback storage unavailable and local fallback disabled")
+        if not self._azure_configured:
+            raise FeedbackStorageError(
+                "Azure feedback storage is not configured. Set AZURE_FEEDBACK_CONNECTION_STRING, "
+                "AZURE_FEEDBACK_CONTAINER, and AZURE_FEEDBACK_BLOB."
+            )
+        if self._azure is None:
+            raise FeedbackStorageError(
+                self.azure_error or "Azure feedback storage is not available"
+            )
+        try:
+            self._azure.append(normalized)
+        except FeedbackStorageError as exc:
+            self.azure_error = str(exc)
+            raise
 
 
 def build_feedback_store(fieldnames: Iterable[str], local_path: Path) -> FeedbackStore:
