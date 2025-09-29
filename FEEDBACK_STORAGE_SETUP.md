@@ -40,7 +40,7 @@ Azure issue immediately (no local backup is written).
 
 If you prefer a zero-pytest sanity check, run the standalone script:
 
-1. Export `AZURE_FEEDBACK_CONNECTION_STRING`, `AZURE_FEEDBACK_CONTAINER`, and `AZURE_FEEDBACK_BLOB`.
+1. Provide `AZURE_FEEDBACK_CONNECTION_STRING`, `AZURE_FEEDBACK_CONTAINER`, and `AZURE_FEEDBACK_BLOB` either via exported environment variables or by placing them in a `.env` file.
 2. Optionally inspect the payload with `python manual_feedback_runner.py --dry-run`.
-3. Run `python manual_feedback_runner.py` to append a sample record that mirrors the Streamlit feedback schema.
+3. Run `python manual_feedback_runner.py` (use `--env-file` to point at a non-default dotenv path) to append a sample record that mirrors the Streamlit feedback schema.
 4. The script prints the blob URI and JSON payload so you can confirm the entry in Azure Storage Explorer or the Azure portal.

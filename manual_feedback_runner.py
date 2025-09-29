@@ -21,6 +21,13 @@ from uuid import uuid4
 
 from feedback_storage import FeedbackStorageError, build_feedback_store
 
+try:
+    from dotenv import load_dotenv
+except ImportError as exc:  # pragma: no cover - optional dependency guard
+    raise SystemExit(
+        "python-dotenv is required to load environment variables from .env files"
+    ) from exc
+
 
 FEEDBACK_FIELDS: Iterable[str] = [
     "timestamp",
@@ -166,7 +173,25 @@ def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
         action="store_true",
         help="Print the payload without sending it to Azure.",
     )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help="Optional path to a .env file with Azure credentials (defaults to '.env').",
+    )
     return parser.parse_args(argv)
+
+
+def _load_env_file(env_file: Path) -> None:
+    if env_file.exists():
+        load_dotenv(dotenv_path=env_file)
+    else:
+        # Fallback to default loading behaviour, which checks the working directory tree.
+        # This keeps compatibility when variables are already exported.
+        if env_file == Path(".env"):
+            load_dotenv()
+        else:
+            raise SystemExit(f"Specified env file not found: {env_file}")
 
 
 def _infer_account_name(connection_string: str) -> Optional[str]:
@@ -180,6 +205,8 @@ def _infer_account_name(connection_string: str) -> Optional[str]:
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = _parse_args(argv)
+
+    _load_env_file(args.env_file)
 
     connection = _resolve_env("AZURE_FEEDBACK_CONNECTION_STRING")
     container = _resolve_env("AZURE_FEEDBACK_CONTAINER")
