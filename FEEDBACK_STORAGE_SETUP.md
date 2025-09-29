@@ -25,6 +25,9 @@ locally to `feedback_log.ndjson` so you can troubleshoot without data loss.
 ### Integration Test (Optional)
 
 - Export `RUN_LIVE_AZURE_TEST=1` alongside the feedback environment variables.
-- Run `pytest tests/test_feedback_storage.py -k live_azure` to append a unique
-  record and verify the blob contents. The test skips automatically when the
-  Azure environment is not configured.
+- Ensure the Azure connection details are available either through the
+  environment (`AZURE_FEEDBACK_*`) or by editing `MANUAL_AZURE_TEST_CONFIG` at
+  the top of `tests/test_feedback_storage.py` with temporary credentials.
+- Run `pytest tests/test_feedback_storage.py -k live_azure -vv -rs` to append a
+  unique record and verify the blob contents. The test reports the specific skip
+  reason whenever the configuration is incomplete.
