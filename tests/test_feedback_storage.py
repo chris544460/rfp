@@ -60,40 +60,19 @@ def clear_azure_env(monkeypatch):
     monkeypatch.delenv("AZURE_FEEDBACK_BLOB", raising=False)
 
 
-def test_feedback_store_appends_ndjson(tmp_path: Path):
+def test_feedback_store_requires_azure_configuration(tmp_path: Path):
     module = load_feedback_module()
-    target = tmp_path / "feedback.ndjson"
-    store = module.FeedbackStore(fieldnames=FIELDNAMES, local_path=target)
+    store = module.FeedbackStore(fieldnames=FIELDNAMES, local_path=tmp_path / "unused.ndjson")
 
-    store.append({
-        "timestamp": "2025-01-01T00:00:00Z",
-        "session_id": "sess-1",
-        "user_id": "user-1",
-        "feedback_source": "chat",
-    })
-    store.append({
-        "timestamp": "2025-01-01T00:01:00Z",
-        "session_id": "sess-2",
-        "user_id": "user-2",
-        "feedback_source": "document",
-    })
+    with pytest.raises(module.FeedbackStorageError) as excinfo:
+        store.append({
+            "timestamp": "2025-01-01T00:00:00Z",
+            "session_id": "sess-1",
+            "user_id": "user-1",
+            "feedback_source": "chat",
+        })
 
-    lines = target.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 2
-    first, second = map(json.loads, lines)
-
-    assert first == {
-        "timestamp": "2025-01-01T00:00:00Z",
-        "session_id": "sess-1",
-        "user_id": "user-1",
-        "feedback_source": "chat",
-    }
-    assert second == {
-        "timestamp": "2025-01-01T00:01:00Z",
-        "session_id": "sess-2",
-        "user_id": "user-2",
-        "feedback_source": "document",
-    }
+    assert "not configured" in str(excinfo.value)
 
 
 def test_feedback_store_azure_append(monkeypatch, tmp_path: Path):

@@ -1,9 +1,10 @@
 # Azure Feedback Storage Configuration
 
 The Streamlit app now writes user feedback through `feedback_storage.FeedbackStore`.
-When Azure settings are provided, feedback is written exclusively to the Azure append
-blob (no local fallback). Without Azure configuration, entries are stored locally in
-`feedback_log.ndjson`.
+The feedback logger requires Azure configuration; when the required environment
+variables are set, records are written exclusively to the Azure append blob (no local
+copy). If the variables are absent, attempts to log feedback raise an error so you can
+provide the credentials before capturing user feedback.
 
 - Set the environment variables below for the Streamlit runtime:
   - `AZURE_FEEDBACK_CONNECTION_STRING`: your storage account connection string.
