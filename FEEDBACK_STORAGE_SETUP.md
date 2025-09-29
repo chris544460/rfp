@@ -21,3 +21,10 @@ following to persist feedback in Azure.
 With these values set, feedback submissions append JSON lines directly to the Azure
 append blob. If the configuration is missing or invalid, the app saves feedback
 locally to `feedback_log.ndjson` so you can troubleshoot without data loss.
+
+### Integration Test (Optional)
+
+- Export `RUN_LIVE_AZURE_TEST=1` alongside the feedback environment variables.
+- Run `pytest tests/test_feedback_storage.py -k live_azure` to append a unique
+  record and verify the blob contents. The test skips automatically when the
+  Azure environment is not configured.
