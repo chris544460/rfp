@@ -59,7 +59,11 @@ def clear_azure_env(monkeypatch):
     monkeypatch.delenv("AZURE_FEEDBACK_BLOB", raising=False)
 
 
-def test_feedback_store_requires_azure_configuration(tmp_path: Path):
+def test_feedback_store_requires_azure_configuration(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("AZURE_FEEDBACK_CONNECTION_STRING", raising=False)
+    monkeypatch.delenv("AZURE_FEEDBACK_CONTAINER", raising=False)
+    monkeypatch.delenv("AZURE_FEEDBACK_BLOB", raising=False)
+    monkeypatch.setenv("RUN_LIVE_AZURE_TEST", "0")
     module = load_feedback_module()
     store = module.FeedbackStore(fieldnames=FIELDNAMES, local_path=tmp_path / "unused.ndjson")
 
