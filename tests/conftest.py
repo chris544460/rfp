@@ -1,6 +1,10 @@
 import sys
 import types
 
+from dotenv import load_dotenv
+
+load_dotenv(override=False)
+
 
 if "openpyxl" not in sys.modules:
     stub = types.ModuleType("openpyxl")
