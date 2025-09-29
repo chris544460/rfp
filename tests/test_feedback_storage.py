@@ -4,6 +4,7 @@ import os
 import sys
 import types
 from pathlib import Path
+from typing import Optional, Tuple
 from uuid import uuid4
 
 import pytest
@@ -33,6 +34,23 @@ FIELDNAMES = [
     "user_id",
     "feedback_source",
 ]
+
+
+MANUAL_AZURE_TEST_CONFIG = {
+    "connection_string": "",
+    "container": "",
+    "blob_name": "",
+}
+
+
+def _resolve_live_azure_config() -> Optional[Tuple[str, str, str]]:
+    connection = os.getenv("AZURE_FEEDBACK_CONNECTION_STRING") or MANUAL_AZURE_TEST_CONFIG["connection_string"].strip()
+    container = os.getenv("AZURE_FEEDBACK_CONTAINER") or MANUAL_AZURE_TEST_CONFIG["container"].strip()
+    blob_name = os.getenv("AZURE_FEEDBACK_BLOB") or MANUAL_AZURE_TEST_CONFIG["blob_name"].strip()
+
+    if connection and container and blob_name:
+        return connection, container, blob_name
+    return None
 
 
 @pytest.fixture(autouse=True)
@@ -180,12 +198,13 @@ def test_feedback_store_live_azure(tmp_path: Path):
     if os.getenv("RUN_LIVE_AZURE_TEST") != "1":
         pytest.skip("Set RUN_LIVE_AZURE_TEST=1 to enable live Azure test")
 
-    connection = os.getenv("AZURE_FEEDBACK_CONNECTION_STRING")
-    container = os.getenv("AZURE_FEEDBACK_CONTAINER")
-    blob_name = os.getenv("AZURE_FEEDBACK_BLOB")
+    resolved = _resolve_live_azure_config()
+    if not resolved:
+        pytest.skip(
+            "Azure feedback configuration missing. Set env vars or populate MANUAL_AZURE_TEST_CONFIG."
+        )
 
-    if not (connection and container and blob_name):
-        pytest.skip("Azure feedback environment variables not configured")
+    connection, container, blob_name = resolved
 
     try:
         from azure.storage.blob import BlobServiceClient
