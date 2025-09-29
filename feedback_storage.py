@@ -71,7 +71,9 @@ class AzureBlobFeedbackStore:
         try:
             self._client().append_block(payload + "\n")
         except Exception as exc:
-            raise FeedbackStorageError("Failed to append feedback to Azure Blob") from exc
+            raise FeedbackStorageError(
+                f"Failed to append feedback to Azure blob '{self._container_name}/{self._blob_name}': {exc}"
+            ) from exc
 
     def _serialize_row(self, row: Dict[str, str]) -> str:
         ordered = {key: row.get(key, "") for key in self._fieldnames}

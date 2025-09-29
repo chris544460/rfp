@@ -30,4 +30,5 @@ locally to `feedback_log.ndjson` so you can troubleshoot without data loss.
   the top of `tests/test_feedback_storage.py` with temporary credentials.
 - Run `pytest tests/test_feedback_storage.py -k live_azure -vv -rs` to append a
   unique record and verify the blob contents. The test reports the specific skip
-  reason whenever the configuration is incomplete.
+  reason whenever the configuration is incomplete, and fails with the full Azure
+  SDK error message if the append call is rejected.

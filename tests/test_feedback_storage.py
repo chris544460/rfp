@@ -225,7 +225,9 @@ def test_feedback_store_live_azure(tmp_path: Path):
 
     store.append(record)
 
-    assert store.azure_error is None
+    if store.azure_error:
+        pytest.fail(f"Azure append failed: {store.azure_error}")
+
     assert not local_file.exists() or local_file.read_text(encoding="utf-8") == ""
 
     blob_client = BlobServiceClient.from_connection_string(connection).get_blob_client(
