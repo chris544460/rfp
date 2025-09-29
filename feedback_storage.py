@@ -1,9 +1,8 @@
-"""Feedback storage utilities supporting Azure Blob Storage."""
+"""Feedback storage utilities supporting Azure Blob Storage (NDJSON)."""
 
 from __future__ import annotations
 
-import csv
-import io
+import json
 import os
 from pathlib import Path
 from typing import Dict, Iterable, Optional
@@ -23,7 +22,7 @@ class FeedbackStorageError(RuntimeError):
 
 
 class AzureBlobFeedbackStore:
-    """Append feedback rows to an Azure Append Blob."""
+    """Append feedback records to an Azure Append Blob."""
 
     def __init__(
         self,
@@ -63,8 +62,6 @@ class AzureBlobFeedbackStore:
                 append_client.get_blob_properties()
             except Exception:
                 append_client.create_append_blob()
-                header = self._serialize_row({name: name for name in self._fieldnames})
-                append_client.append_block(header + "\n")
 
             self._append_client = append_client
         return self._append_client
@@ -77,28 +74,25 @@ class AzureBlobFeedbackStore:
             raise FeedbackStorageError("Failed to append feedback to Azure Blob") from exc
 
     def _serialize_row(self, row: Dict[str, str]) -> str:
-        buffer = io.StringIO()
-        writer = csv.DictWriter(buffer, fieldnames=self._fieldnames)
-        writer.writerow(row)
-        return buffer.getvalue().strip("\r\n")
+        ordered = {key: row.get(key, "") for key in self._fieldnames}
+        return json.dumps(ordered, ensure_ascii=False)
 
 
 class LocalFeedbackStore:
-    """Fallback feedback store writing to a CSV file locally."""
+    """Fallback feedback store writing NDJSON locally."""
 
     def __init__(self, fieldnames: Iterable[str], path: Path) -> None:
         self._fieldnames = list(fieldnames)
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if not self._path.exists():
-            with self._path.open("w", newline="", encoding="utf-8") as fp:
-                writer = csv.DictWriter(fp, fieldnames=self._fieldnames)
-                writer.writeheader()
+            with self._path.open("w", encoding="utf-8") as fp:
+                fp.write("")
 
     def append(self, row: Dict[str, str]) -> None:
-        with self._path.open("a", newline="", encoding="utf-8") as fp:
-            writer = csv.DictWriter(fp, fieldnames=self._fieldnames)
-            writer.writerow(row)
+        ordered = {key: row.get(key, "") for key in self._fieldnames}
+        with self._path.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(ordered, ensure_ascii=False) + "\n")
 
 
 class FeedbackStore:
