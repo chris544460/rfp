@@ -179,6 +179,11 @@ def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
         default=Path(".env"),
         help="Optional path to a .env file with Azure credentials (defaults to '.env').",
     )
+    parser.add_argument(
+        "--show-traceback",
+        action="store_true",
+        help="Print the full Python traceback if the append fails.",
+    )
     return parser.parse_args(argv)
 
 
@@ -225,6 +230,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         store.append(record)
     except FeedbackStorageError as exc:
         print("Failed to append feedback:", exc)
+        if store.azure_error and store.azure_error != str(exc):
+            print("Azure error details:", store.azure_error)
+        if args.show_traceback:
+            import traceback
+
+            print("\nTraceback (most recent call last):")
+            traceback.print_exception(exc)
         return 1
 
     account_name = _infer_account_name(connection)
