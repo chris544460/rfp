@@ -1,33 +1,15 @@
 #!/usr/bin/env python3
-"""Manual end-to-end Azure feedback append test."""
+"""Manual helper to append feedback locally (Streamlit-compatible schema)."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 from uuid import uuid4
-
-# Fix 1: Handle dotenv import properly with better error messages
-try:
-    from dotenv import load_dotenv
-except ImportError as exc:
-    print("ERROR: python-dotenv is required for .env file support.")
-    print("Run: pip install python-dotenv")
-    sys.exit(1)
-
-# Fix 2: Import Azure dependencies at the top to catch issues early
-try:
-    from azure.storage.blob import BlobServiceClient
-    from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
-except ImportError as exc:
-    print("ERROR: Missing Azure dependencies. Please install with:")
-    print("pip install azure-storage-blob")
-    sys.exit(1)
 
 FEEDBACK_FIELDS: Iterable[str] = [
     "timestamp",
@@ -90,18 +72,9 @@ def _build_record(args: argparse.Namespace) -> Dict[str, str]:
     return record
 
 
-def _resolve_env(var_name: str) -> str:
-    value = os.getenv(var_name)
-    if not value:
-        raise SystemExit(
-            f"Environment variable {var_name} is required for Azure feedback storage."
-        )
-    return value
-
-
 def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Append a sample feedback record to the configured Azure append blob.",
+        description="Append a sample feedback record to a local NDJSON log.",
     )
     parser.add_argument(
         "--session-id",
@@ -141,12 +114,12 @@ def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--comment",
-        default="Manual Azure feedback connectivity test.",
+        default="Manual feedback connectivity test.",
         help="Freeform comment to include.",
     )
     parser.add_argument(
         "--question",
-        default="How does the Azure feedback pipeline behave?",
+        default="How does the feedback pipeline behave?",
         help="Question field for parity with chat feedback entries.",
     )
     parser.add_argument(
@@ -169,124 +142,48 @@ def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
         "--local-log",
         type=Path,
         default=Path("manual_feedback_log.ndjson"),
-        help="Local NDJSON path required by FeedbackStore (not written when Azure succeeds).",
+        help="Local NDJSON path that mirrors the Streamlit feedback log.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the payload without sending it to Azure.",
-    )
-    parser.add_argument(
-        "--env-file",
-        type=Path,
-        default=Path(".env"),
-        help="Optional path to a .env file with Azure credentials (defaults to .env).",
+        help="Print the payload without saving it.",
     )
     parser.add_argument(
         "--show-traceback",
         action="store_true",
-        help="Print the full Python traceback if the append fails.",
+        help="Print the full traceback if writing the local file fails.",
     )
     return parser.parse_args(argv)
 
 
-def _load_env_file(env_file: Path) -> None:
-    """Load environment variables from .env file."""
-    try:
-        load_dotenv(dotenv_path=env_file)
-    except Exception as e:
-        print(f"Warning: Could not load {env_file}: {e}")
-        # Fallback to regular env loading
-        if env_file == Path(".env"):
-            load_dotenv()
-
-
-def _infer_account_name(connection_string: str) -> Optional[str]:
-    parts = connection_string.split(";")
-    for part in parts:
-        key, sep, value = part.partition("=")
-        if sep and key.strip().lower() == "accountname":
-            return value.strip()
-    return None
-
-
-def append_feedback_to_azure(
-    connection_string: str,
-    container_name: str,
-    blob_name: str,
-    payload: str,
-) -> None:
-    """Append the payload to an Azure append blob, creating it if needed."""
-    try:
-        service_client = BlobServiceClient.from_connection_string(connection_string)
-        container_client = service_client.get_container_client(container_name)
-        try:
-            container_client.create_container()
-        except ResourceExistsError:
-            pass
-
-        blob_client = container_client.get_blob_client(blob_name)
-
-        try:
-            properties = blob_client.get_blob_properties()
-        except ResourceNotFoundError:
-            properties = None
-
-        if properties is None:
-            try:
-                blob_client.create_append_blob()
-            except ResourceExistsError:
-                pass
-        elif getattr(properties, "blob_type", "").lower() != "appendblob":
-            existing_bytes = blob_client.download_blob().readall()
-            blob_client.delete_blob()
-            blob_client.create_append_blob()
-            if existing_bytes:
-                blob_client.append_block(existing_bytes)
-
-        blob_client.append_block(payload.encode("utf-8"))
-    except Exception as exc:
-        raise SystemExit(f"Failed to append feedback: {exc}")
+def _append_local_log(local_path: Path, record: Dict[str, str]) -> None:
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    with local_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False))
+        handle.write("\n")
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = _parse_args(argv)
-
-    # Load .env file if it exists
-    _load_env_file(args.env_file)
-
-    connection = _resolve_env("AZURE_FEEDBACK_CONNECTION_STRING")
-    container = _resolve_env("AZURE_FEEDBACK_CONTAINER")
-    blob_name = _resolve_env("AZURE_FEEDBACK_BLOB")
-
     record = _build_record(args)
 
     if args.dry_run:
-        print("Dry run - payload not sent")
+        print("Dry run - payload not saved")
         print(json.dumps(record, ensure_ascii=False, indent=2))
         return 0
 
-    # Use the corrected approach instead of FeedbackStore
     try:
-        payload = json.dumps(record, ensure_ascii=False) + "\n"
-        append_feedback_to_azure(connection, container, blob_name, payload)
-    except Exception as exc:
-        print("Failed to append feedback:", exc)
+        _append_local_log(args.local_log, record)
+    except Exception as exc:  # pragma: no cover - file system issues
+        print(f"Failed to write feedback to {args.local_log}: {exc}")
         if args.show_traceback:
             import traceback  # noqa: TCH001
+
             traceback.print_exc()
         return 1
 
-    account_name = _infer_account_name(connection)
-    if account_name:
-        blob_uri = f"https://{account_name}.blob.core.windows.net/{container}/{blob_name}"
-    else:
-        blob_uri = f"https://(your-account).blob.core.windows.net/{container}/{blob_name}"
-
-    print("Successfully appended feedback to Azure!")
-    print(f"Container: {container}")
-    print(f"Blob: {blob_name}")
-    print(f"Blob URI: {blob_uri}")
+    print(f"Feedback saved to {args.local_log.resolve()}")
     print("Payload:")
     print(json.dumps(record, ensure_ascii=False, indent=2))
     return 0
