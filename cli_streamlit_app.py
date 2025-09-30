@@ -34,6 +34,20 @@ from rfp_docx_slot_finder import extract_slots_from_docx
 from rfp_docx_apply_answers import apply_answers_to_docx
 
 
+DEBUG_ENABLED = os.getenv("CLI_STREAMLIT_DEBUG", "0") not in {"", "0", "false", "False"}
+ENV_DEBUG_DEFAULT = DEBUG_ENABLED
+
+
+def set_debug(enabled: bool) -> None:
+    global DEBUG_ENABLED
+    DEBUG_ENABLED = enabled
+
+
+def log_debug(message: str) -> None:
+    if DEBUG_ENABLED:
+        print(f"[DEBUG] {message}")
+
+
 # ---------------------------------------------------------------------------
 # Model presets & option metadata
 # ---------------------------------------------------------------------------
@@ -324,12 +338,23 @@ def process_docx_slots(
     slots = slots_payload.get("slots", [])
     answers_by_id: Dict[str, object] = {}
     total_slots = len(slots)
+    skipped_slots: List[str] = []
     for idx, slot in enumerate(slots, start=1):
         question = (slot.get("question_text") or "").strip()
-        if show_live and question:
+        slot_id = slot.get("id", f"slot_{idx}")
+        if not question:
+            log_debug(f"DOCX slot {slot_id} (index {idx}) had empty question text; storing blank answer")
+            if not show_live:
+                print(f"[WARN] Slot {idx} has no extracted question; skipping.")
+            if show_live:
+                print(f"[Slot {idx}] (no question detected; skipped)")
+            answers_by_id[slot_id] = ""
+            skipped_slots.append(slot_id)
+            continue
+        if show_live:
             print(f"[Slot {idx}] {question}")
         answer = generator(question)
-        answers_by_id[slot.get("id", f"slot_{idx}")] = answer
+        answers_by_id[slot_id] = answer
         if show_live:
             text = answer.get("text", "") if isinstance(answer, dict) else answer
             print(f"  ↳ {text}\n")
@@ -374,6 +399,8 @@ def process_docx_slots(
         "include_citations": include_citations,
         "docx_write_mode": docx_write_mode,
     }
+    if skipped_slots:
+        payload["skipped_slots"] = skipped_slots
     return payload
 
 
@@ -403,10 +430,16 @@ def process_textish(
             "qa_pairs": [],
         }
 
+    processed_questions: List[str] = []
     answers: List[object] = []
     comments: List[List[Tuple[str, str, str, float, str]]] = []
     total = len(questions)
     for idx, question in enumerate(questions, start=1):
+        question = question.strip()
+        if not question:
+            log_debug(f"Text mode question index {idx} was empty; skipping")
+            continue
+        processed_questions.append(question)
         if show_live:
             print(f"[Q{idx}] {question}")
         answer, cmts = answer_question(
@@ -434,11 +467,11 @@ def process_textish(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{input_path.stem}_answered.docx"
-    report_bytes = build_docx(questions, answers, comments, include_comments=include_citations)
+    report_bytes = build_docx(processed_questions, answers, comments, include_comments=include_citations)
     output_path.write_bytes(report_bytes)
 
     qa_pairs = []
-    for question, answer in zip(questions, answers):
+    for question, answer in zip(processed_questions, answers):
         if isinstance(answer, dict):
             text = answer.get("text", "")
         else:
@@ -458,6 +491,8 @@ def process_textish(
 
 
 def run_question_mode(args: argparse.Namespace) -> None:
+    set_debug(bool(getattr(args, "debug", False)) or ENV_DEBUG_DEFAULT)
+
     framework = args.framework or os.getenv("ANSWER_FRAMEWORK", "aladdin")
     model = args.model or (MODEL_OPTIONS[DEFAULT_INDEX] if MODEL_OPTIONS else DEFAULT_MODEL)
     llm = resolve_llm_client(framework, model)
@@ -486,8 +521,23 @@ def run_question_mode(args: argparse.Namespace) -> None:
         for doc in extra_docs:
             print(f"       Extra doc: {doc}")
     print()
+    log_debug(
+        "document_mode "
+        f"input={input_path} output_dir={output_dir} framework={framework} model={model} "
+        f"search_mode={args.search_mode} k={args.k} min_confidence={args.min_confidence} "
+        f"include_citations={include_citations} docx_as_text={args.docx_as_text}"
+    )
+    log_debug(
+        "question_mode "
+        f"framework={framework} model={model} search_mode={args.search_mode} "
+        f"k={args.k} min_confidence={args.min_confidence} include_citations={include_citations}"
+    )
 
     def answer_once(question: str) -> None:
+        if not question or not question.strip():
+            log_debug("Empty question detected; skipping generator call")
+            print("[WARN] Empty question provided; skipping.")
+            return
         if args.response_mode == "preapproved":
             rows = collect_relevant_snippets(
                 q=question,
@@ -570,6 +620,8 @@ def run_question_mode(args: argparse.Namespace) -> None:
 
 
 def run_document_mode(args: argparse.Namespace) -> None:
+    set_debug(bool(getattr(args, "debug", False)) or ENV_DEBUG_DEFAULT)
+
     input_path = Path(args.input).expanduser()
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -646,6 +698,12 @@ def run_document_mode(args: argparse.Namespace) -> None:
             continue
         if key.endswith("file") or key.endswith("_dump"):
             print(f"  {key}: {value}")
+    skipped = result.get("skipped_slots")
+    if skipped:
+        print(
+            f"[WARN] {len(skipped)} slots missing question text were skipped. "
+            "Review the slots JSON for details."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +859,7 @@ def _wizard_question() -> None:
     fund = _prompt_text("Fund tag (press Enter to skip)", default="")
     include_citations = _prompt_bool("Include citations in responses?", True)
     extra_docs = _prompt_paths("Additional documents to include")
+    debug_flag = _prompt_bool("Enable verbose debug logging?", False)
 
     search_mode = "both"
     k = 20
@@ -854,6 +913,7 @@ def _wizard_question() -> None:
         extra_doc=extra_docs or None,
         question=question or None,
         response_mode=response_mode,
+        debug=debug_flag,
     )
 
     try:
@@ -882,6 +942,7 @@ def _wizard_document() -> None:
         "Output directory (press Enter to use document folder)",
         default="",
     )
+    debug_flag = _prompt_bool("Enable verbose debug logging?", False)
 
     framework_default = os.getenv("ANSWER_FRAMEWORK", "aladdin").lower()
     framework_options = ["aladdin", "openai"]
@@ -961,6 +1022,7 @@ def _wizard_document() -> None:
         docx_as_text=docx_as_text,
         docx_write_mode=docx_write_mode,
         show_live=show_live,
+        debug=debug_flag,
     )
 
     try:
@@ -1027,6 +1089,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="extra_doc",
         action="append",
         help="Additional documents to treat as supplemental context",
+    )
+    common.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print verbose debug logs to help troubleshoot",
     )
 
     parser = argparse.ArgumentParser(
