@@ -475,6 +475,18 @@ def run_question_mode(args: argparse.Namespace) -> None:
         extra_docs=extra_docs,
     )
 
+    print("[INFO] Question mode configuration")
+    print(f"       Framework: {framework}")
+    print(f"       Model: {model}")
+    print(f"       Search mode: {args.search_mode}")
+    if args.fund:
+        print(f"       Fund tag: {args.fund}")
+    print(f"       Include citations: {'yes' if include_citations else 'no'}")
+    if extra_docs:
+        for doc in extra_docs:
+            print(f"       Extra doc: {doc}")
+    print()
+
     def answer_once(question: str) -> None:
         if args.response_mode == "preapproved":
             rows = collect_relevant_snippets(
@@ -581,6 +593,25 @@ def run_document_mode(args: argparse.Namespace) -> None:
 
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else input_path.parent
 
+    print("[INFO] Document mode configuration")
+    print(f"       Input: {input_path}")
+    print(f"       Output directory: {output_dir}")
+    print(f"       Framework: {framework}")
+    print(f"       Model: {model}")
+    print(f"       Search mode: {args.search_mode}")
+    if args.fund:
+        print(f"       Fund tag: {args.fund}")
+    print(f"       Include citations: {'yes' if include_citations else 'no'}")
+    print(f"       Max hits: {args.k}")
+    print(f"       Answer length: {args.length}")
+    if args.approx_words:
+        print(f"       Approx words: {args.approx_words}")
+    print(f"       Minimum confidence: {args.min_confidence}")
+    if extra_docs:
+        for doc in extra_docs:
+            print(f"       Extra doc: {doc}")
+    print()
+
     suffix = input_path.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
         result = process_excel(input_path, output_dir, generator, include_citations, args.show_live)
@@ -615,6 +646,352 @@ def run_document_mode(args: argparse.Namespace) -> None:
             continue
         if key.endswith("file") or key.endswith("_dump"):
             print(f"  {key}: {value}")
+
+
+# ---------------------------------------------------------------------------
+# Wizard helpers (interactive UX)
+# ---------------------------------------------------------------------------
+
+
+def _prompt_bool(message: str, default: bool = True) -> bool:
+    suffix = " [Y/n]" if default else " [y/N]"
+    while True:
+        response = input(f"{message}{suffix}: ").strip().lower()
+        if not response:
+            return default
+        if response in {"y", "yes"}:
+            return True
+        if response in {"n", "no"}:
+            return False
+        print("Please answer 'y' or 'n'.")
+
+
+def _prompt_text(message: str, default: Optional[str] = None, required: bool = False) -> str:
+    suffix = f" [{default}]" if default not in (None, "") else ""
+    while True:
+        value = input(f"{message}{suffix}: ").strip()
+        if not value and default is not None:
+            value = default
+        if value or not required:
+            return value
+        print("This value is required.")
+
+
+def _prompt_int(message: str, default: int, minimum: Optional[int] = None) -> int:
+    suffix = f" [{default}]"
+    while True:
+        value = input(f"{message}{suffix}: ").strip()
+        if not value:
+            return default
+        try:
+            result = int(value)
+        except ValueError:
+            print("Enter a whole number.")
+            continue
+        if minimum is not None and result < minimum:
+            print(f"Enter a value >= {minimum}.")
+            continue
+        return result
+
+
+def _prompt_float(message: str, default: float, minimum: Optional[float] = None) -> float:
+    suffix = f" [{default}]"
+    while True:
+        value = input(f"{message}{suffix}: ").strip()
+        if not value:
+            return default
+        try:
+            result = float(value)
+        except ValueError:
+            print("Enter a numeric value.")
+            continue
+        if minimum is not None and result < minimum:
+            print(f"Enter a value >= {minimum}.")
+            continue
+        return result
+
+
+def _prompt_optional_int(message: str, minimum: Optional[int] = None) -> Optional[int]:
+    while True:
+        value = input(f"{message}: ").strip()
+        if not value:
+            return None
+        try:
+            result = int(value)
+        except ValueError:
+            print("Enter a whole number or leave blank to skip.")
+            continue
+        if minimum is not None and result < minimum:
+            print(f"Enter a value >= {minimum} or leave blank to skip.")
+            continue
+        return result
+
+
+def _prompt_choice(
+    message: str,
+    options: Sequence[str],
+    default_index: int = 0,
+    formatter: Optional[Callable[[str], str]] = None,
+) -> str:
+    if not options:
+        raise ValueError("No options provided")
+    default_index = max(0, min(default_index, len(options) - 1))
+    print(message)
+    for idx, option in enumerate(options, start=1):
+        label = formatter(option) if formatter else option
+        default_mark = " *" if idx - 1 == default_index else ""
+        print(f"  {idx}) {label}{default_mark}")
+    while True:
+        response = input(
+            f"Select [1-{len(options)}] (Enter for default {default_index + 1}): "
+        ).strip()
+        if not response:
+            return options[default_index]
+        if response.isdigit():
+            pos = int(response)
+            if 1 <= pos <= len(options):
+                return options[pos - 1]
+        else:
+            for option in options:
+                label = formatter(option) if formatter else option
+                if response.lower() in {option.lower(), label.lower()}:
+                    return option
+        print("Please select a valid option.")
+
+
+def _prompt_paths(message: str) -> List[str]:
+    response = input(f"{message} (comma separated, leave blank for none): ").strip()
+    if not response:
+        return []
+    parts = [part.strip() for part in response.split(",") if part.strip()]
+    return [str(Path(part).expanduser()) for part in parts]
+
+
+def _fund_preview() -> None:
+    tags = load_fund_tags()
+    if tags:
+        preview = ", ".join(tags[:10])
+        more = "" if len(tags) <= 10 else " …"
+        print(f"Known fund tags include: {preview}{more}")
+
+
+def _wizard_question() -> None:
+    print("\n--- Question Mode Wizard ---")
+    _fund_preview()
+
+    framework_default = os.getenv("ANSWER_FRAMEWORK", "aladdin").lower()
+    framework_options = ["aladdin", "openai"]
+    framework_index = 1 if framework_default == "openai" else 0
+    framework = _prompt_choice("Choose framework", framework_options, framework_index)
+
+    model_choices = list(MODEL_OPTIONS) or [DEFAULT_MODEL]
+    try:
+        model_index = model_choices.index(DEFAULT_MODEL)
+    except ValueError:
+        model_index = 0
+    model = _prompt_choice(
+        "Choose model",
+        model_choices,
+        model_index,
+        formatter=lambda m: (
+            f"{MODEL_SHORT_NAMES.get(m, m)} - {MODEL_DESCRIPTIONS.get(m, '')}"
+        ).strip(" -"),
+    )
+
+    fund = _prompt_text("Fund tag (press Enter to skip)", default="")
+    include_citations = _prompt_bool("Include citations in responses?", True)
+    extra_docs = _prompt_paths("Additional documents to include")
+
+    search_mode = "both"
+    k = 20
+    length = "long"
+    approx_words = None
+    min_confidence = 0.0
+
+    if _prompt_bool("Adjust advanced retrieval settings?", False):
+        search_mode = _prompt_text("Search mode", default=search_mode) or search_mode
+        k = _prompt_int("Max hits per question", k, minimum=1)
+        length = _prompt_choice(
+            "Answer length",
+            ["auto", "short", "medium", "long"],
+            ["auto", "short", "medium", "long"].index(length),
+        )
+        approx_words = _prompt_optional_int(
+            "Approximate words per answer (leave blank to skip)",
+            minimum=1,
+        )
+        min_confidence = _prompt_float(
+            "Minimum confidence score",
+            min_confidence,
+            minimum=0.0,
+        )
+
+    if _prompt_bool("Provide a question now? (No opens interactive chat)", True):
+        question = _prompt_text("Enter your question", required=True)
+    else:
+        question = ""
+
+    response_mode = _prompt_choice(
+        "Response style",
+        ["generate", "preapproved"],
+        0,
+        formatter=lambda mode: (
+            "Generate new answers" if mode == "generate" else "Closest pre-approved answers"
+        ),
+    )
+
+    namespace = argparse.Namespace(
+        command="ask",
+        fund=fund or None,
+        framework=framework,
+        model=model,
+        search_mode=search_mode,
+        k=k,
+        min_confidence=min_confidence,
+        length=length,
+        approx_words=approx_words,
+        include_citations=include_citations,
+        extra_doc=extra_docs or None,
+        question=question or None,
+        response_mode=response_mode,
+    )
+
+    try:
+        run_question_mode(namespace)
+    except Exception as exc:  # pragma: no cover - interactive convenience
+        print(f"[ERROR] {exc}")
+
+
+def _wizard_document() -> None:
+    print("\n--- Document Mode Wizard ---")
+
+    while True:
+        raw_path = _prompt_text("Path to document", required=True)
+        input_path = Path(raw_path).expanduser()
+        if input_path.exists():
+            break
+        print(f"File not found: {input_path}")
+
+    suffix = input_path.suffix.lower()
+
+    _fund_preview()
+    fund = _prompt_text("Fund tag (press Enter to skip)", default="")
+    include_citations = _prompt_bool("Include citations in responses?", True)
+    extra_docs = _prompt_paths("Additional documents to include")
+    output_dir = _prompt_text(
+        "Output directory (press Enter to use document folder)",
+        default="",
+    )
+
+    framework_default = os.getenv("ANSWER_FRAMEWORK", "aladdin").lower()
+    framework_options = ["aladdin", "openai"]
+    framework_index = 1 if framework_default == "openai" else 0
+    framework = _prompt_choice("Choose framework", framework_options, framework_index)
+
+    model_choices = list(MODEL_OPTIONS) or [DEFAULT_MODEL]
+    try:
+        model_index = model_choices.index(DEFAULT_MODEL)
+    except ValueError:
+        model_index = 0
+    model = _prompt_choice(
+        "Choose model",
+        model_choices,
+        model_index,
+        formatter=lambda m: (
+            f"{MODEL_SHORT_NAMES.get(m, m)} - {MODEL_DESCRIPTIONS.get(m, '')}"
+        ).strip(" -"),
+    )
+
+    search_mode = "both"
+    k = 20
+    length = "long"
+    approx_words = None
+    min_confidence = 0.0
+
+    if _prompt_bool("Adjust advanced retrieval settings?", False):
+        search_mode = _prompt_text("Search mode", default=search_mode) or search_mode
+        k = _prompt_int("Max hits per question", k, minimum=1)
+        length = _prompt_choice(
+            "Answer length",
+            ["auto", "short", "medium", "long"],
+            ["auto", "short", "medium", "long"].index(length),
+        )
+        approx_words = _prompt_optional_int(
+            "Approximate words per answer (leave blank to skip)",
+            minimum=1,
+        )
+        min_confidence = _prompt_float(
+            "Minimum confidence score",
+            min_confidence,
+            minimum=0.0,
+        )
+
+    docx_as_text = False
+    docx_write_mode = "fill"
+    if suffix == ".docx":
+        docx_as_text = _prompt_bool("Treat DOCX as plain text?", False)
+        if not docx_as_text:
+            docx_write_mode = _prompt_choice(
+                "DOCX write mode",
+                ["fill", "replace", "append"],
+                0,
+                formatter=lambda mode: {
+                    "fill": "Fill empty slots",
+                    "replace": "Overwrite existing answers",
+                    "append": "Append to existing content",
+                }[mode],
+            )
+
+    show_live = _prompt_bool("Show each question/answer while processing?", False)
+
+    namespace = argparse.Namespace(
+        command="document",
+        input=str(input_path),
+        fund=fund or None,
+        framework=framework,
+        model=model,
+        search_mode=search_mode,
+        k=k,
+        min_confidence=min_confidence,
+        length=length,
+        approx_words=approx_words,
+        include_citations=include_citations,
+        extra_doc=extra_docs or None,
+        output_dir=output_dir or None,
+        docx_as_text=docx_as_text,
+        docx_write_mode=docx_write_mode,
+        show_live=show_live,
+    )
+
+    try:
+        run_document_mode(namespace)
+    except Exception as exc:  # pragma: no cover - interactive convenience
+        print(f"[ERROR] {exc}")
+
+
+def run_wizard() -> None:
+    print("RFP Responder CLI Wizard")
+    print("==========================")
+    print("This guided mode mirrors the Streamlit UI with simple prompts.")
+
+    while True:
+        print("\nWhat would you like to do?")
+        print("  1) Process an RFP document")
+        print("  2) Ask questions or chat")
+        print("  3) Quit")
+        choice = input("Select an option [1-3]: ").strip().lower()
+
+        if choice in {"1", "doc", "document"}:
+            _wizard_document()
+        elif choice in {"2", "ask", "chat"}:
+            _wizard_question()
+        elif choice in {"3", "q", "quit", "exit"}:
+            print("Goodbye!")
+            return
+        else:
+            print("Please choose 1, 2, or 3.")
+
+        input("\nPress Enter to return to the menu...")
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +1070,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = list(argv)
+
+    if not argv or "--wizard" in argv:
+        run_wizard()
+        return
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -700,7 +1085,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run_question_mode(args)
     elif args.command == "document":
         run_document_mode(args)
-    else:
+    else:  # pragma: no cover - defensive
         parser.error("Unknown command")
 
 
