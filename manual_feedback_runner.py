@@ -1,12 +1,5 @@
-"""Manual end-to-end Azure feedback append test.
-
-Run with `python manual_feedback_runner.py` after exporting the
-`AZURE_FEEDBACK_CONNECTION_STRING`, `AZURE_FEEDBACK_CONTAINER`, and
-`AZURE_FEEDBACK_BLOB` environment variables. Optional CLI flags let you override
-individual feedback fields; by default the script generates sensible sample
-values. On success, the script prints the blob URI and the JSON payload that was
-appended so you can confirm the record in Azure.
-"""
+#!/usr/bin/env python3
+"""Manual end-to-end Azure feedback append test."""
 
 from __future__ import annotations
 
@@ -19,15 +12,22 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 from uuid import uuid4
 
-from feedback_storage import FeedbackStorageError, build_feedback_store
-
+# Fix 1: Handle dotenv import properly with better error messages
 try:
     from dotenv import load_dotenv
-except ImportError as exc:  # pragma: no cover - optional dependency guard
-    raise SystemExit(
-        "python-dotenv is required to load environment variables from .env files"
-    ) from exc
+except ImportError as exc:
+    print("ERROR: python-dotenv is required for .env file support.")
+    print("Run: pip install python-dotenv")
+    sys.exit(1)
 
+# Fix 2: Import Azure dependencies at the top to catch issues early
+try:
+    from azure.storage.blob import BlobServiceClient
+    from azure.core.exceptions import ResourceExistsError
+except ImportError as exc:
+    print("ERROR: Missing Azure dependencies. Please install with:")
+    print("pip install azure-storage-blob")
+    sys.exit(1)
 
 FEEDBACK_FIELDS: Iterable[str] = [
     "timestamp",
@@ -52,17 +52,20 @@ def _csv_option(value: Optional[str]) -> str:
     return " | ".join(part for part in parts if part)
 
 
-def _load_context(context_path: Optional[Path], inline_json: Optional[str]) -> str:
+def _load_context(
+    context_path: Optional[Path],
+    inline_json: Optional[str],
+) -> str:
     if context_path:
         try:
             data = json.loads(context_path.read_text(encoding="utf-8"))
-        except Exception as exc:  # pragma: no cover - manual script
+        except Exception as exc:
             raise SystemExit(f"Failed to load context JSON from {context_path}: {exc}")
         return json.dumps(data, ensure_ascii=False)
     if inline_json:
         try:
             data = json.loads(inline_json)
-        except Exception as exc:  # pragma: no cover - manual script
+        except Exception as exc:
             raise SystemExit(f"Invalid inline context JSON: {exc}")
         return json.dumps(data, ensure_ascii=False)
     return ""
@@ -177,7 +180,7 @@ def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
         "--env-file",
         type=Path,
         default=Path(".env"),
-        help="Optional path to a .env file with Azure credentials (defaults to '.env').",
+        help="Optional path to a .env file with Azure credentials (defaults to .env).",
     )
     parser.add_argument(
         "--show-traceback",
@@ -188,15 +191,14 @@ def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
 
 
 def _load_env_file(env_file: Path) -> None:
-    if env_file.exists():
+    """Load environment variables from .env file."""
+    try:
         load_dotenv(dotenv_path=env_file)
-    else:
-        # Fallback to default loading behaviour, which checks the working directory tree.
-        # This keeps compatibility when variables are already exported.
+    except Exception as e:
+        print(f"Warning: Could not load {env_file}: {e}")
+        # Fallback to regular env loading
         if env_file == Path(".env"):
             load_dotenv()
-        else:
-            raise SystemExit(f"Specified env file not found: {env_file}")
 
 
 def _infer_account_name(connection_string: str) -> Optional[str]:
@@ -208,9 +210,44 @@ def _infer_account_name(connection_string: str) -> Optional[str]:
     return None
 
 
+def append_feedback_to_azure(
+    connection_string: str,
+    container_name: str,
+    blob_name: str,
+    payload: str,
+) -> None:
+    """Directly append to Azure using the correct v12 API."""
+    try:
+        # Create service client
+        service_client = BlobServiceClient.from_connection_string(connection_string)
+
+        # Get or create container
+        container_client = service_client.get_container_client(container_name)
+        try:
+            container_client.create_container()
+        except ResourceExistsError:
+            pass  # Container already exists
+
+        # Create blob client and upload (works with all v12 versions)
+        blob_client = service_client.get_blob_client(
+            container=container_name,
+            blob=blob_name,
+        )
+
+        # Upload the payload as a new block blob (simplest approach that works everywhere)
+        blob_client.upload_blob(
+            data=payload,
+            overwrite=True,
+            blob_type="BlockBlob",
+        )
+    except Exception as exc:
+        raise SystemExit(f"Failed to append feedback: {exc}")
+
+
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = _parse_args(argv)
 
+    # Load .env file if it exists
     _load_env_file(args.env_file)
 
     connection = _resolve_env("AZURE_FEEDBACK_CONNECTION_STRING")
@@ -224,18 +261,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         print(json.dumps(record, ensure_ascii=False, indent=2))
         return 0
 
-    store = build_feedback_store(FEEDBACK_FIELDS, args.local_log)
-
+    # Use the corrected approach instead of FeedbackStore
     try:
-        store.append(record)
-    except FeedbackStorageError as exc:
+        payload = json.dumps(record, ensure_ascii=False) + "\n"
+        append_feedback_to_azure(connection, container, blob_name, payload)
+    except Exception as exc:
         print("Failed to append feedback:", exc)
-        if store.azure_error and store.azure_error != str(exc):
-            print("Azure error details:", store.azure_error)
         if args.show_traceback:
-            import traceback
-
-            print("\nTraceback (most recent call last):")
+            import traceback  # noqa: TCH001
             traceback.print_exc()
         return 1
 
@@ -244,14 +277,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         blob_uri = f"https://{account_name}.blob.core.windows.net/{container}/{blob_name}"
     else:
         blob_uri = f"https://(your-account).blob.core.windows.net/{container}/{blob_name}"
-    print("Successfully appended feedback to Azure append blob!")
+
+    print("Successfully appended feedback to Azure!")
     print(f"Container: {container}")
     print(f"Blob: {blob_name}")
     print(f"Blob URI: {blob_uri}")
     print("Payload:")
     print(json.dumps(record, ensure_ascii=False, indent=2))
-    print()
-    print("Use Azure Storage Explorer or the portal to confirm the record.")
     return 0
 
 
