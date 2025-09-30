@@ -82,7 +82,22 @@ def _embed(text: str) -> np.ndarray:
     })
     payload = {"text": text, "modelId": SURF_MODEL}
     r = requests.post(SURF_URL, json=payload, headers=hdrs, auth=AUTH, timeout=90)
-    r.raise_for_status()
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as exc:
+        try:
+            detail_payload = r.json()
+            detail = json.dumps(detail_payload)
+        except ValueError:
+            detail = r.text
+        err_msg = (
+            "Surface embedding request failed "
+            f"status={r.status_code} reason={r.reason} "
+            f"model={SURF_MODEL} text_len={len(text)} "
+            f"response={detail[:500]}"
+        )
+        print(f"[vector_search] {err_msg}")
+        raise requests.HTTPError(err_msg, response=r) from exc
     vec = np.asarray(r.json()["vector"], dtype="float32").reshape(1, dim)
     vec /= np.linalg.norm(vec, axis=1, keepdims=True)
     return vec
