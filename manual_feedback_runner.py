@@ -23,7 +23,7 @@ except ImportError as exc:
 # Fix 2: Import Azure dependencies at the top to catch issues early
 try:
     from azure.storage.blob import BlobServiceClient
-    from azure.core.exceptions import ResourceExistsError
+    from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 except ImportError as exc:
     print("ERROR: Missing Azure dependencies. Please install with:")
     print("pip install azure-storage-blob")
@@ -216,30 +216,35 @@ def append_feedback_to_azure(
     blob_name: str,
     payload: str,
 ) -> None:
-    """Directly append to Azure using the correct v12 API."""
+    """Append the payload to an Azure append blob, creating it if needed."""
     try:
-        # Create service client
         service_client = BlobServiceClient.from_connection_string(connection_string)
-
-        # Get or create container
         container_client = service_client.get_container_client(container_name)
         try:
             container_client.create_container()
         except ResourceExistsError:
-            pass  # Container already exists
+            pass
 
-        # Create blob client and upload (works with all v12 versions)
-        blob_client = service_client.get_blob_client(
-            container=container_name,
-            blob=blob_name,
-        )
+        blob_client = container_client.get_blob_client(blob_name)
 
-        # Upload the payload as a new block blob (simplest approach that works everywhere)
-        blob_client.upload_blob(
-            data=payload,
-            overwrite=True,
-            blob_type="BlockBlob",
-        )
+        try:
+            properties = blob_client.get_blob_properties()
+        except ResourceNotFoundError:
+            properties = None
+
+        if properties is None:
+            try:
+                blob_client.create_append_blob()
+            except ResourceExistsError:
+                pass
+        elif getattr(properties, "blob_type", "").lower() != "appendblob":
+            existing_bytes = blob_client.download_blob().readall()
+            blob_client.delete_blob()
+            blob_client.create_append_blob()
+            if existing_bytes:
+                blob_client.append_block(existing_bytes)
+
+        blob_client.append_block(payload.encode("utf-8"))
     except Exception as exc:
         raise SystemExit(f"Failed to append feedback: {exc}")
 
