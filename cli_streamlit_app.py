@@ -512,6 +512,7 @@ def _run_question_listing(
         return
 
     print(f"[INFO] Detected {len(slot_list)} questions:\n")
+    details: List[Tuple[int, str, str]] = []
     for i, slot in enumerate(slot_list, 1):
         q_text = (slot.get("question_text") or "").strip() or "[blank question text]"
         prefix = f"{slot.get('id')} - " if show_ids and slot.get("id") else ""
@@ -519,6 +520,28 @@ def _run_question_listing(
         if show_meta:
             print(json.dumps(slot, indent=2, ensure_ascii=False))
             print()
+
+        detector = (slot.get("meta") or {}).get("detector", "unknown")
+        locator = slot.get("answer_locator") or {}
+        locator_type = locator.get("type", "unknown")
+        if locator_type == "paragraph":
+            loc_desc = f"paragraph index {locator.get('paragraph_index', '?')}"
+        elif locator_type == "paragraph_after":
+            loc_desc = (
+                f"paragraph {locator.get('paragraph_index', '?')} + offset {locator.get('offset', '?')}"
+            )
+        elif locator_type == "table_cell":
+            loc_desc = (
+                f"table index {locator.get('table_index', '?')} (row {locator.get('row', '?')}, col {locator.get('col', '?')})"
+            )
+        else:
+            loc_desc = json.dumps(locator)
+        details.append((i, detector, loc_desc))
+
+    if details:
+        print("\n[INFO] Detection details:")
+        for idx, detector, loc_desc in details:
+            print(f"  {idx}. detector={detector}; locator={loc_desc}")
 
 
 # ---------------------------------------------------------------------------
