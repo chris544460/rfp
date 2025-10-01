@@ -1528,6 +1528,18 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                 "promoted_from": "missing_blank",
             },
         )
+        next_block = blocks[idx + 1] if idx + 1 < len(blocks) else None
+        force_append = False
+        if isinstance(next_block, Paragraph):
+            next_text = (next_block.text or "").strip()
+            if next_text and not _looks_like_question(next_text):
+                force_append = True
+        elif isinstance(next_block, Table):
+            force_append = True
+        if force_append:
+            if slot.meta is None:
+                slot.meta = {}
+            slot.meta["force_append_blank"] = True
         slots.append(slot)
         existing_blocks.add(idx)
 
