@@ -110,15 +110,41 @@ def _normalize_citations(raw: object) -> Dict[str, object]:
             result[str(key)] = {"text": str(val)}
     return result
 
+def _append_with_bold(paragraph: Paragraph, text: str, bold_state: bool) -> bool:
+    """Append text to paragraph, interpreting **markers** as bold toggles."""
+    if not text:
+        return bold_state
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("**", i):
+            bold_state = not bold_state
+            i += 2
+            continue
+        next_marker = text.find("**", i)
+        if next_marker == -1:
+            segment = text[i:]
+            i = length
+        else:
+            segment = text[i:next_marker]
+            i = next_marker
+        if segment:
+            run = paragraph.add_run(segment)
+            if bold_state:
+                run.bold = True
+    return bold_state
+
+
 def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, object]) -> None:
     """Write text and attach Word comments to each [n] marker using Utilities helper."""
     doc = paragraph.part.document
     parts = text.split("\n")
+    bold_state = False
     for li, line in enumerate(parts):
         pos = 0
         for match in _CITATION_RE.finditer(line):
             if match.start() > pos:
-                paragraph.add_run(line[pos:match.start()])
+                bold_state = _append_with_bold(paragraph, line[pos:match.start()], bold_state)
             nums = [n.strip() for n in match.group(1).split(",")]
             for i, num in enumerate(nums):
                 run = paragraph.add_run(f"[{num}]")
@@ -142,7 +168,7 @@ def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[ob
                     paragraph.add_run(" ")
             pos = match.end()
         if pos < len(line):
-            paragraph.add_run(line[pos:])
+            bold_state = _append_with_bold(paragraph, line[pos:], bold_state)
         if li < len(parts) - 1:
             paragraph.add_run().add_break()
 
@@ -525,12 +551,19 @@ def apply_answers_to_docx(
                     skipped_bad_locator += 1
                     continue
 
+                force_after_question = bool(meta.get("force_insert_after_question"))
                 if ltype == "paragraph_after":
                     offset = int(locator.get("offset", 1) or 1)
-                    target = get_target_paragraph_after_anchor(blocks, block_to_para, paragraphs, anchor, offset)
-                    if meta.get("force_append_blank"):
-                        if (target.text or "").strip():
-                            target = insert_paragraph_after(target, "")
+                    if force_after_question:
+                        target = insert_paragraph_after(anchor, "")
+                    else:
+                        target = get_target_paragraph_after_anchor(
+                            blocks,
+                            block_to_para,
+                            paragraphs,
+                            anchor,
+                            offset,
+                        )
                 else:
                     target = anchor
 

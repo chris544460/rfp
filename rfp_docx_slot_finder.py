@@ -1539,7 +1539,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
         if force_append:
             if slot.meta is None:
                 slot.meta = {}
-            slot.meta["force_append_blank"] = True
+            slot.meta["force_insert_after_question"] = True
         slots.append(slot)
         existing_blocks.add(idx)
 
