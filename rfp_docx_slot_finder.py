@@ -46,6 +46,8 @@ import os, re, json, uuid, argparse
 import sys
 import math
 import asyncio
+import hashlib
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Any, Tuple, Union, Set
 from concurrent.futures import ThreadPoolExecutor
@@ -65,6 +67,23 @@ from prompts import read_prompt
 FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "aladdin")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14_research")
 
+FAST_DOCX = os.getenv("RFP_FAST_DOCX", "1") == "1"
+USE_RULES_FIRST = os.getenv("RFP_DOCX_USE_RULES_FIRST", "1") == "1"
+DOCX_CHUNK = int(os.getenv("RFP_DOCX_CHUNK", "40"))
+SKIP_RAWTEXT = os.getenv("RFP_DOCX_SKIP_RAWTEXT", "1") == "1"
+SKIP_CONTEXT_ASSESS = os.getenv("RFP_DOCX_SKIP_CONTEXT_ASSESS", "1") == "1"
+SKIP_ANS_TYPE_LLM = os.getenv("RFP_DOCX_SKIP_ANS_TYPE_LLM", "1") == "1"
+DISABLE_MC_LLM = os.getenv("RFP_DOCX_DISABLE_MC_LLM", "1") == "1"
+
+ENABLE_SLOTS_DISK_CACHE = os.getenv("RFP_ENABLE_SLOTS_DISK_CACHE", "1") == "1"
+CACHE_DIR = Path(os.getenv("RFP_CACHE_DIR", ".rfp_cache"))
+try:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    ENABLE_SLOTS_DISK_CACHE = False
+
+_LLM_CACHE: Dict[Tuple[str, bool, str], str] = {}
+
 
 def _call_llm(prompt: str, json_output: bool = False) -> str:
     """Call the selected LLM framework and record usage."""
@@ -81,6 +100,20 @@ def _call_llm(prompt: str, json_output: bool = False) -> str:
         _record_usage(MODEL, usage)
     except Exception:
         pass
+    return content
+
+
+def _call_llm_cached(prompt: str, json_output: bool = False, model: Optional[str] = None) -> str:
+    """Memoize LLM responses within a single run using prompt hashing."""
+    cache_key = (
+        (model or MODEL),
+        bool(json_output),
+        hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+    )
+    if cache_key in _LLM_CACHE:
+        return _LLM_CACHE[cache_key]
+    content = _call_llm(prompt, json_output=json_output)
+    _LLM_CACHE[cache_key] = content
     return content
 
 # ───────────────────────── models ─────────────────────────
@@ -467,7 +500,7 @@ def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) 
         print(prompt)
         print("--- END PROMPT ---\n")
     try:
-        resp = _call_llm(prompt, json_output=True)
+        resp = _call_llm_cached(prompt, json_output=True)
         if SHOW_TEXT:
             print("\n--- COMPLETION (llm_extract_mc_choices) ---")
             print(resp)
@@ -550,9 +583,11 @@ def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> L
             "block_index": q_block + offset,
         })
     if not choices:
-        dbg("Heuristic MC extraction found no choices; invoking LLM")
-        choices = llm_extract_mc_choices(blocks, q_block)
-        dbg(f"LLM returned choices: {choices}")
+        dbg("Heuristic MC extraction found no choices.")
+        if USE_LLM and not DISABLE_MC_LLM:
+            dbg("Invoking LLM for multiple-choice options.")
+            choices = llm_extract_mc_choices(blocks, q_block)
+            dbg(f"LLM returned choices: {choices}")
     return choices
 
 
@@ -601,7 +636,7 @@ def llm_infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Tabl
         print(prompt)
         print("--- END PROMPT ---\n")
     try:
-        resp = _call_llm(prompt)
+        resp = _call_llm_cached(prompt, model=MODEL)
         if SHOW_TEXT:
             print("\n--- COMPLETION (llm_infer_answer_type) ---")
             print(resp)
@@ -655,6 +690,8 @@ def infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]],
                 return "multiple_choice"
         else:
             break
+    if SKIP_ANS_TYPE_LLM or not USE_LLM:
+        return "text"
     return llm_infer_answer_type(question_text, blocks, q_block)
 
 # ─────────────────── rule-based detectors ───────────────────
@@ -845,7 +882,7 @@ def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
         template = read_prompt("docx_llm_refine")
         prompt = template.format(ctx=ctx)
         try:
-            content = _call_llm(prompt, json_output=True)
+            content = _call_llm_cached(prompt, json_output=True)
             if SHOW_TEXT:
                 print("\n--- PROMPT (llm_refine) ---")
                 print(prompt)
@@ -875,9 +912,10 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -
         print(prompt)
         print("--- END PROMPT ---\n")
     try:
-        content = _call_llm(
+        content = _call_llm_cached(
             prompt,
             json_output=True,
+            model=model,
         )
         js = json.loads(content)
         cand = js.get("slots", []) or []
@@ -952,7 +990,7 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -
 def llm_detect_questions(
     blocks: List[Union[Paragraph, Table]],
     model: str = MODEL,
-    chunk_size: int = 10,
+    chunk_size: int = DOCX_CHUNK,
 ) -> List[int]:
     """Return global block indices that look like questions using only the LLM."""
     # Pre-filter: remove empty blocks or paragraphs with fewer than 4 words
@@ -973,7 +1011,7 @@ def llm_detect_questions(
         if SHOW_TEXT:
             print("\n--- PROMPT (detect_questions) ---\n" + prompt + "\n--- END PROMPT ---\n")
         try:
-            content = _call_llm(prompt, json_output=True)
+            content = _call_llm_cached(prompt, json_output=True, model=model)
             if SHOW_TEXT:
                 print("\n--- COMPLETION (detect_questions) ---\n" + content + "\n--- END COMPLETION ---\n")
             js = json.loads(content)
@@ -1082,7 +1120,7 @@ def llm_detect_questions_raw_text(
         template = read_prompt("extract_questions")
         prompt = template.format(context=context)
         try:
-            content = _call_llm(prompt)
+            content = _call_llm_cached(prompt, model=model)
             lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
         except Exception as e:
             dbg(f"Error in raw text detection page {i}: {e}")
@@ -1116,7 +1154,7 @@ async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int,
     if SHOW_TEXT:
         print(f"\n--- PROMPT (locate_answer q_block={q_block}) ---\n" + prompt + "\n--- END PROMPT ---\n")
     try:
-        content = await asyncio.to_thread(_call_llm, prompt, True)
+        content = await asyncio.to_thread(_call_llm_cached, prompt, True, model)
     except Exception as e:
         dbg(f"LLM error (locate_answer q_block={q_block}): {e}")
         return None
@@ -1151,6 +1189,9 @@ async def llm_locate_answer(blocks: List[Union[Paragraph, Table]], q_block: int,
 async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int, model: str = MODEL) -> bool:
     """Return True if the question likely depends on previous context."""
 
+    if SKIP_CONTEXT_ASSESS or not USE_LLM:
+        return False
+
     start = max(0, q_block - 2)
     end = min(len(blocks), q_block + 1)
     local_blocks = blocks[start:end]
@@ -1158,7 +1199,7 @@ async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int
     template = read_prompt("docx_assess_context")
     prompt = template.format(local_index=q_block - start, excerpt=excerpt)
     try:
-        content = await asyncio.to_thread(_call_llm, prompt, True)
+        content = await asyncio.to_thread(_call_llm_cached, prompt, True, model)
     except Exception as e:
         dbg(f"LLM error (assess_context q_block={q_block}): {e}")
         return False
@@ -1171,6 +1212,18 @@ async def llm_assess_context(blocks: List[Union[Paragraph, Table]], q_block: int
 # ───────────────────────── pipeline ─────────────────────────
 
 def extract_slots_from_docx(path: str) -> Dict[str, Any]:
+    cache_path: Optional[Path] = None
+    if ENABLE_SLOTS_DISK_CACHE:
+        try:
+            digest = hashlib.sha1(Path(path).read_bytes()).hexdigest()
+            cache_path = CACHE_DIR / f"slots_{digest}_{MODEL}_fast{int(FAST_DOCX)}.json"
+            if cache_path.exists():
+                dbg(f"Loading DOCX slots from cache: {cache_path}")
+                return json.loads(cache_path.read_text("utf-8"))
+        except Exception as exc:
+            dbg(f"Slot cache unavailable: {exc}")
+            cache_path = None
+
     doc = docx.Document(path)
     blocks = list(_iter_block_items(doc))
 
@@ -1179,12 +1232,9 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
     for b in blocks:
         if isinstance(b, Paragraph) and "\n" in (b.text or ""):
             for line in b.text.splitlines():
-                # Clone the XML element and create a new Paragraph for each line
                 p = Paragraph(b._p, doc)
-                # Remove all existing runs from the clone
                 for r in list(p.runs):
                     p._p.remove(r._r)
-                # Add a single run containing just this line
                 p.add_run(line)
                 expanded_blocks.append(p)
         else:
@@ -1194,7 +1244,8 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
     dbg(f"extract_slots_from_docx: USE_LLM={USE_LLM}")
     dbg(f"Total blocks: {len(blocks)}")
 
-    # If LLM mode (USE_LLM) is active, skip all rule-based detectors entirely.
+    slots: List[QASlot] = []
+
     if USE_LLM:
         if FRAMEWORK == "openai" and not os.getenv("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY not set; cannot run in pure AI mode.")
@@ -1212,90 +1263,100 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                 )
         llm_model = MODEL
 
-        # Heuristic first: flag paragraphs containing '?' or the word 'please'
-        q_indices_heur: List[int] = []
-        for i, b in enumerate(blocks):
-            if isinstance(b, Paragraph) and b.text:
-                raw = b.text.strip()
-                low = raw.lower()
-                reason = None
-                if '?' in raw:
-                    reason = "contains '?'"
-                elif 'please' in low:
-                    reason = "contains 'please'"
-                if reason:
-                    dbg(f"Heuristic flagged block {i}: {reason} -> {raw}")
-                    q_indices_heur.append(i)
+        if FAST_DOCX and USE_RULES_FIRST:
+            for detector in (
+                detect_para_question_with_blank,
+                detect_two_col_table_q_blank,
+                detect_response_label_then_blank,
+            ):
+                slots.extend(detector(blocks))
+            if not slots:
+                slots = llm_scan_blocks(blocks, model=llm_model)
+        else:
+            q_indices_heur: List[int] = []
+            for i, b in enumerate(blocks):
+                if isinstance(b, Paragraph) and b.text:
+                    raw = b.text.strip()
+                    low = raw.lower()
+                    reason = None
+                    if "?" in raw:
+                        reason = "contains '?'"
+                    elif "please" in low:
+                        reason = "contains 'please'"
+                    if reason:
+                        dbg(f"Heuristic flagged block {i}: {reason} -> {raw}")
+                        q_indices_heur.append(i)
 
-        # Prepare blocks for LLM: those not already flagged
-        remaining_blocks = []
-        global_to_local = {}
-        for gi, b in enumerate(blocks):
-            if gi not in q_indices_heur:
-                local_idx = len(remaining_blocks)
-                remaining_blocks.append(b)
-                global_to_local[local_idx] = gi
+            remaining_blocks: List[Union[Paragraph, Table]] = []
+            global_to_local: Dict[int, int] = {}
+            for gi, b in enumerate(blocks):
+                if gi not in q_indices_heur:
+                    local_idx = len(remaining_blocks)
+                    remaining_blocks.append(b)
+                    global_to_local[local_idx] = gi
 
-        # LLM detection on remaining blocks (chunk size default)
-        local_q_indices = llm_detect_questions(remaining_blocks, model=llm_model)
+            local_q_indices = llm_detect_questions(remaining_blocks, model=llm_model)
+            q_indices_llm = [global_to_local[l] for l in local_q_indices if l in global_to_local]
+            q_indices = sorted(set(q_indices_heur + q_indices_llm))
 
-        # Map local indices back to global
-        q_indices_llm = [global_to_local[l] for l in local_q_indices if l in global_to_local]
-
-        # Combine heuristic and LLM results
-        q_indices = sorted(set(q_indices_heur + q_indices_llm))
-
-        async def process_q_block(qb: int) -> Optional[QASlot]:
-            try:
-                loc = await llm_locate_answer(blocks, qb, window=3, model=llm_model)
-                if loc is None:
+            async def process_q_block(qb: int) -> Optional[QASlot]:
+                try:
+                    loc = await llm_locate_answer(blocks, qb, window=3, model=llm_model)
+                    if loc is None:
+                        return None
+                    q_text = (blocks[qb].text if isinstance(blocks[qb], Paragraph) else "").strip()
+                    slot_obj = QASlot(
+                        id=f"slot_{uuid.uuid4().hex[:8]}",
+                        question_text=q_text,
+                        answer_locator=loc,
+                        answer_type=infer_answer_type(q_text, blocks, qb),
+                        confidence=0.6,
+                        meta={"detector": "two_stage", "q_block": qb},
+                    )
+                    q_par = blocks[qb] if isinstance(blocks[qb], Paragraph) else None
+                    lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
+                    hint, hint_level = derive_outline_hint_and_level(q_text)
+                    slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
+                    slot_obj.meta["needs_context"] = await llm_assess_context(blocks, qb, model=llm_model)
+                    dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
+                    return slot_obj
+                except Exception as err:
+                    dbg(f"Error processing q_block {qb}: {err}")
                     return None
-                q_text = (blocks[qb].text if isinstance(blocks[qb], Paragraph) else "").strip()
-                slot_obj = QASlot(
-                    id=f"slot_{uuid.uuid4().hex[:8]}",
-                    question_text=q_text,
-                    answer_locator=loc,
-                    answer_type=infer_answer_type(q_text, blocks, qb),
-                    confidence=0.6,
-                    meta={"detector": "two_stage", "q_block": qb}
+
+            async def gather_slots() -> List[Optional[QASlot]]:
+                tasks = [asyncio.create_task(process_q_block(qb)) for qb in q_indices]
+                return await asyncio.gather(*tasks)
+
+            slots = [s for s in asyncio.run(gather_slots()) if s]
+
+            if not FAST_DOCX and not SKIP_RAWTEXT:
+                existing_qtexts = {
+                    (s.question_text or "").strip().lower() for s in slots if s.question_text
+                }
+                extra_q_blocks = llm_detect_questions_raw_text(
+                    blocks,
+                    existing_qtexts,
+                    model=llm_model,
                 )
-                # Enrich slot_obj.meta with outline
-                q_par = blocks[qb] if isinstance(blocks[qb], Paragraph) else None
-                lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
-                hint, hint_level = derive_outline_hint_and_level(q_text)
-                slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
-                slot_obj.meta["needs_context"] = await llm_assess_context(blocks, qb, model=llm_model)
-                dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
-                return slot_obj
-            except Exception as e:
-                dbg(f"Error processing q_block {qb}: {e}")
-                return None
+                for qb in extra_q_blocks:
+                    extra_slot = asyncio.run(process_q_block(qb))
+                    if extra_slot:
+                        if extra_slot.meta is None:
+                            extra_slot.meta = {}
+                        extra_slot.meta["detector"] = "raw_text"
+                        slots.append(extra_slot)
 
-        async def gather_slots() -> List[Optional[QASlot]]:
-            tasks = [asyncio.create_task(process_q_block(qb)) for qb in q_indices]
-            return await asyncio.gather(*tasks)
-
-        slots = [s for s in asyncio.run(gather_slots()) if s]
-        existing_qtexts = {s.question_text.strip().lower() for s in slots}
-        extra_q_blocks = llm_detect_questions_raw_text(blocks, existing_qtexts, model=llm_model)
-        for qb in extra_q_blocks:
-            extra_slot = asyncio.run(process_q_block(qb))
-            if extra_slot:
-                if extra_slot.meta is None:
-                    extra_slot.meta = {}
-                extra_slot.meta["detector"] = "raw_text"
-                slots.append(extra_slot)
-        if not slots:  # fallback to legacy single scan
-            slots = llm_scan_blocks(blocks, model=llm_model)
+            if not slots:
+                slots = llm_scan_blocks(blocks, model=llm_model)
     else:
-        # Fallback legacy rule‑based path (only when LLM explicitly disabled)
-        slots: List[QASlot] = []
-        for detector in (detect_para_question_with_blank,
-                         detect_two_col_table_q_blank,
-                         detect_response_label_then_blank):
+        for detector in (
+            detect_para_question_with_blank,
+            detect_two_col_table_q_blank,
+            detect_response_label_then_blank,
+        ):
             slots.extend(detector(blocks))
-        # optional: refine if we still want refinement when LLM disabled (keep off)
-    
+
     for s in slots:
         if s.answer_type == "multiple_choice":
             qb = (s.meta or {}).get("q_block")
@@ -1307,13 +1368,18 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                     s.meta["choices"] = choices
 
     attach_context(slots, blocks)
-    dbg(f"Slot count: {len(slots)}")
-    dbg(f"Final payload preview: {json.dumps({'doc_type': 'docx', 'file': os.path.basename(path), 'slots': [asdict(s) for s in dedupe_slots(slots)]}, indent=2)[:1000]}")
+    deduped_slots = dedupe_slots(slots)
+    dbg(f"Slot count: {len(deduped_slots)}")
     payload = {
         "doc_type": "docx",
         "file": os.path.basename(path),
-        "slots": [asdict(s) for s in dedupe_slots(slots)]
-    }#
+        "slots": [asdict(s) for s in deduped_slots],
+    }
+    if ENABLE_SLOTS_DISK_CACHE and cache_path is not None:
+        try:
+            cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:
+            dbg(f"Unable to write slot cache {cache_path}: {exc}")
     return payload
 
 # ─────────────────── context attachment ───────────────────
