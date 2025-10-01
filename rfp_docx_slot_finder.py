@@ -214,6 +214,18 @@ QUESTION_PHRASES = (
     "can you", "does your", "have you", "who", "when", "where", "why", "which"
 )
 
+
+def _quick_question_candidate(text: str) -> bool:
+    if not text:
+        return False
+    raw = text.strip()
+    if not raw:
+        return False
+    lower = raw.lower()
+    if "?" in raw:
+        return True
+    return any(phrase in lower for phrase in QUESTION_PHRASES)
+
 # ─────────────────── outline / context helpers ───────────────────
 _ENUM_PREFIX_RE = re.compile(
     r"^\s*(?:"
@@ -318,6 +330,14 @@ def _table_cell_text(table: Table, r: int, c: int) -> str:
         return (table.cell(r, c).text or "").strip()
     except Exception:
         return ""
+
+
+def _slot_question_index(slot: QASlot) -> Optional[int]:
+    meta = slot.meta or {}
+    qb = meta.get("q_block")
+    if qb is None:
+        qb = meta.get("block")
+    return qb
 
 # ─────────────────── rich extraction helpers (format-aware) ───────────────────
 
@@ -1318,8 +1338,25 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                 detect_response_label_then_blank,
             ):
                 slots.extend(detector(blocks))
-            if not slots:
-                slots = llm_scan_blocks(blocks, model=llm_model)
+            existing_blocks = {
+                _slot_question_index(s) for s in slots if _slot_question_index(s) is not None
+            }
+            need_aug = not slots
+            if not need_aug:
+                for idx, b in enumerate(blocks):
+                    if idx in existing_blocks:
+                        continue
+                    if isinstance(b, Paragraph) and _quick_question_candidate(b.text or ""):
+                        need_aug = True
+                        break
+            if need_aug:
+                llm_candidates = llm_scan_blocks(blocks, model=llm_model)
+                for cand in llm_candidates:
+                    qb = _slot_question_index(cand)
+                    if qb is None or qb not in existing_blocks:
+                        slots.append(cand)
+                        if qb is not None:
+                            existing_blocks.add(qb)
         else:
             q_indices_heur: List[int] = []
             for i, b in enumerate(blocks):
