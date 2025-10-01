@@ -587,6 +587,7 @@ def _run_question_listing(
     print()
     details: List[Tuple[int, str, str]] = []
     question_blocks = set()
+    heuristic_candidates: List[Tuple[int, str, Dict[str, object]]] = []
     for i, slot in enumerate(slot_list, 1):
         q_text = (slot.get("question_text") or "").strip() or "[blank question text]"
         prefix = f"{slot.get('id')} - " if show_ids and slot.get("id") else ""
@@ -652,14 +653,27 @@ def _run_question_listing(
                     print(f"        ↳ cues: {', '.join(cues)}")
             elif looks_like:
                 cues = diag.get("positives") or []
+                heuristic_candidates.append((idx, text, diag))
                 if cues:
-                    print(f"        ↳ heuristics matched: {', '.join(cues)}")
+                    print(f"        ↳ cues (heuristic only): {', '.join(cues)}")
+                else:
+                    print("        ↳ cues (heuristic only): none recorded")
+                print("        ↳ status: not extracted in slot list")
             else:
                 reasons = diag.get("negatives") or []
                 if reasons:
                     print(f"        ↳ rejected because: {', '.join(reasons)}")
                 else:
                     print("        ↳ rejected because: no question cues detected")
+
+        if heuristic_candidates:
+            print("\n[INFO] Additional heuristic-only questions (not in slots):")
+            for idx, text, diag in heuristic_candidates:
+                preview = text[:160] + ("…" if len(text) > 160 else "")
+                cues = diag.get("positives") or []
+                cue_text = ", ".join(cues) if cues else "none recorded"
+                print(f"  [{idx}] {preview}")
+                print(f"        cues: {cue_text}")
 # ---------------------------------------------------------------------------
 # CLI command implementations
 # ---------------------------------------------------------------------------
