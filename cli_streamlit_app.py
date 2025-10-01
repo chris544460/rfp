@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from textwrap import dedent
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -864,8 +865,11 @@ def run_question_mode(args: argparse.Namespace) -> None:
         else:
             print(payload)
 
+    start_time = time.perf_counter()
     if args.question:
         answer_once(args.question)
+        duration = time.perf_counter() - start_time
+        print(f"\n[INFO] Completed in {duration:.2f} seconds.")
         return
 
     print("[INFO] Enter questions (Ctrl-D to exit).")
@@ -874,10 +878,13 @@ def run_question_mode(args: argparse.Namespace) -> None:
             prompt = input("Question> ").strip()
             if not prompt:
                 continue
+            loop_start = time.perf_counter()
             answer_once(prompt)
-            print()
+            loop_duration = time.perf_counter() - loop_start
+            print(f"[INFO] Response generated in {loop_duration:.2f} seconds.\n")
     except (EOFError, KeyboardInterrupt):
-        print("\n[INFO] Exiting question mode.")
+        total_duration = time.perf_counter() - start_time
+        print(f"\n[INFO] Exiting question mode. Session length: {total_duration:.2f} seconds.")
 
 
 def run_document_mode(args: argparse.Namespace) -> None:
@@ -916,6 +923,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
     print()
 
     suffix = input_path.suffix.lower()
+    start_time = time.perf_counter()
     if list_only:
         _run_question_listing(
             input_path,
@@ -924,6 +932,8 @@ def run_document_mode(args: argparse.Namespace) -> None:
             show_meta=False,
             show_eval=bool(getattr(args, "show_eval", False)),
         )
+        duration = time.perf_counter() - start_time
+        print(f"\n[INFO] Completed in {duration:.2f} seconds.")
         return
 
     generator = build_generator(
@@ -965,6 +975,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             args.show_live,
         )
 
+    duration = time.perf_counter() - start_time
     print("\n[INFO] Document processing complete.")
     for key, value in result.items():
         if value is None:
@@ -977,6 +988,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             f"[WARN] {len(skipped)} slots missing question text were skipped. "
             "Review the slots JSON for details."
         )
+    print(f"[INFO] Completed in {duration:.2f} seconds.")
 
 
 def run_questions_mode(args: argparse.Namespace) -> None:
