@@ -255,59 +255,52 @@ def gen_answer(
         else []
     )
 
-    if intent == "follow_up":
-        history_text = _build_history(indices if indices else None)
-        prompt = (
-            f"{history_text}\n\nFollow-up question: {question}\nAnswer:" if history_text else question
-        )
-        ans, _ = _llm_client.get_completion(prompt)
-        cmts = []
-    else:
-        question_with_ctx = question
-        if indices:
-            ctx_text = " ".join(QUESTION_HISTORY[i - 1] for i in indices)
+    question_with_ctx = question
+    if indices:
+        ctx_text = " ".join(QUESTION_HISTORY[i - 1] for i in indices)
+        if ctx_text:
             question_with_ctx = f"{ctx_text}\n\n{question}"
 
-        if choices:
-            opt_lines = "\n".join(f"{chr(65+i)}. {c}" for i, c in enumerate(choices))
-            mc_question = (
-                f"{question_with_ctx}\n\nOptions:\n{opt_lines}\n\n"
-                "Identify the correct option letter(s). For each correct option, provide a brief explanation "
-                "with citations in square brackets like [1]. Return the result as JSON with keys "
-                "'correct' (list of letters) and 'explanations' (mapping letters to explanations)."
-            )
-            kwargs = {"progress": progress} if progress else {}
-            ans, cmts = answer_question(
-                mc_question,
-                SEARCH_MODE,
-                FUND_TAG,
-                K,
-                None,
-                None,
-                MIN_CONFIDENCE,
-                _llm_client,
-                **kwargs,
-            )
-            ans = _format_mc_answer(ans, choices)
-        else:
-            approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
-            length = None if approx_words is not None else LENGTH_PRESET
+    if choices:
+        opt_lines = "\n".join(f"{chr(65+i)}. {c}" for i, c in enumerate(choices))
+        mc_question = (
+            f"{question_with_ctx}\n\nOptions:\n{opt_lines}\n\n"
+            "Identify the correct option letter(s). For each correct option, provide a brief explanation "
+            "with citations in square brackets like [1]. Return the result as JSON with keys "
+            "'correct' (list of letters) and 'explanations' (mapping letters to explanations)."
+        )
+        kwargs = {"progress": progress} if progress else {}
+        ans, cmts = answer_question(
+            mc_question,
+            SEARCH_MODE,
+            FUND_TAG,
+            K,
+            None,
+            None,
+            MIN_CONFIDENCE,
+            _llm_client,
+            **kwargs,
+        )
+        ans = _format_mc_answer(ans, choices)
+    else:
+        approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
+        length = None if approx_words is not None else LENGTH_PRESET
 
-            kwargs = {"progress": progress} if progress else {}
-            ans, cmts = answer_question(
-                question_with_ctx,
-                SEARCH_MODE,
-                FUND_TAG,
-                K,
-                length,
-                approx_words,
-                MIN_CONFIDENCE,
-                _llm_client,
-                **kwargs,
-            )
+        kwargs = {"progress": progress} if progress else {}
+        ans, cmts = answer_question(
+            question_with_ctx,
+            SEARCH_MODE,
+            FUND_TAG,
+            K,
+            length,
+            approx_words,
+            MIN_CONFIDENCE,
+            _llm_client,
+            **kwargs,
+        )
 
-        if not cmts:
-            ans = NO_SOURCES_MSG
+    if not cmts:
+        ans = NO_SOURCES_MSG
 
     QUESTION_HISTORY.append(question)
     QA_HISTORY.append({"question": question, "answer": ans, "citations": cmts})
