@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+import docx
+from docx.text.paragraph import Paragraph
 
 from cli_app import build_docx, extract_questions, load_input_text
 from qa_core import answer_question, collect_relevant_snippets
@@ -30,7 +32,15 @@ from answer_composer import CompletionsClient, get_openai_completion
 from input_file_reader.interpreter_sheet import collect_non_empty_cells
 from rfp_xlsx_slot_finder import ask_sheet_schema
 from rfp_xlsx_apply_answers import write_excel_answers
-from rfp_docx_slot_finder import extract_slots_from_docx
+from rfp_docx_slot_finder import (
+    QUESTION_PHRASES,
+    USE_SPACY_QUESTION,
+    extract_slots_from_docx,
+    strip_enum_prefix,
+    _ENUM_PREFIX_RE,
+    _iter_block_items,
+    _spacy_docx_is_question,
+)
 from rfp_docx_apply_answers import apply_answers_to_docx
 
 
@@ -490,12 +500,74 @@ def process_textish(
 # ---------------------------------------------------------------------------
 
 
+def _diagnose_paragraph(text: str) -> Dict[str, object]:
+    raw = (text or "").strip()
+    positives: List[str] = []
+    negatives: List[str] = []
+
+    if not raw:
+        negatives.append("blank paragraph")
+        return {
+            "looks_like": False,
+            "positives": positives,
+            "negatives": negatives,
+            "ends_with_q": False,
+        }
+
+    ends_with_q = raw.rstrip().endswith("?")
+    if "?" in raw:
+        positives.append("contains '?'")
+
+    stripped = strip_enum_prefix(raw).strip()
+    lowered = stripped.lower()
+
+    starts_with = next((phrase for phrase in QUESTION_PHRASES if lowered.startswith(phrase)), None)
+    if starts_with:
+        positives.append(f"starts with '{starts_with}'")
+
+    contains_cue = next((phrase for phrase in QUESTION_PHRASES if phrase in lowered), None)
+    if contains_cue and contains_cue != starts_with:
+        positives.append(f"contains '{contains_cue}'")
+
+    if raw.lower().startswith(("question:", "prompt:", "rfp question:")):
+        positives.append("prefixed with question label")
+
+    if _ENUM_PREFIX_RE.match(raw) and contains_cue:
+        positives.append("enumerated with cue phrase")
+
+    if USE_SPACY_QUESTION and _spacy_docx_is_question(raw):
+        positives.append("spaCy detector match")
+
+    looks_like = bool(positives)
+
+    if not looks_like:
+        word_count = len(raw.split())
+        if word_count < 4:
+            negatives.append("fewer than 4 words")
+        if "?" not in raw:
+            negatives.append("no question mark")
+        if not contains_cue:
+            negatives.append("no cue phrase detected")
+        if raw.endswith(":"):
+            negatives.append("ends with ':' (likely label)")
+        if raw.isupper() and len(raw) > 6:
+            negatives.append("all caps (likely heading)")
+
+    return {
+        "looks_like": looks_like,
+        "positives": positives,
+        "negatives": negatives,
+        "ends_with_q": ends_with_q,
+    }
+
+
 def _run_question_listing(
     input_path: Path,
     *,
     docx_as_text: bool,
     show_ids: bool,
     show_meta: bool,
+    show_eval: bool,
 ) -> None:
     if docx_as_text:
         print("[WARN] Question listing is unavailable when --docx-as-text is set.")
@@ -511,8 +583,10 @@ def _run_question_listing(
         print("[INFO] No questions detected in the document.")
         return
 
-    print(f"[INFO] Detected {len(slot_list)} questions:\n")
+    print(f"[INFO] Detected {len(slot_list)} questions:")
+    print()
     details: List[Tuple[int, str, str]] = []
+    question_blocks = set()
     for i, slot in enumerate(slot_list, 1):
         q_text = (slot.get("question_text") or "").strip() or "[blank question text]"
         prefix = f"{slot.get('id')} - " if show_ids and slot.get("id") else ""
@@ -538,12 +612,54 @@ def _run_question_listing(
             loc_desc = json.dumps(locator)
         details.append((i, detector, loc_desc))
 
+        q_block = (slot.get("meta") or {}).get("q_block")
+        if q_block is not None:
+            question_blocks.add(q_block)
+
     if details:
         print("\n[INFO] Detection details:")
         for idx, detector, loc_desc in details:
             print(f"  {idx}. detector={detector}; locator={loc_desc}")
 
-
+    if show_eval:
+        print("\n[INFO] Heuristic evaluation of paragraphs:")
+        doc = docx.Document(str(input_path))
+        block_items = list(_iter_block_items(doc))
+        for idx, block in enumerate(block_items):
+            if not isinstance(block, Paragraph):
+                continue
+            text = (block.text or "").strip()
+            if not text:
+                continue
+            diag = _diagnose_paragraph(text)
+            looks_like = bool(diag.get("looks_like"))
+            ends_q = bool(diag.get("ends_with_q"))
+            label: List[str] = []
+            if idx in question_blocks:
+                label.append("assigned")
+            if looks_like and idx not in question_blocks:
+                label.append("heuristic-match")
+            if ends_q:
+                label.append("ends-with-?")
+            if not label:
+                label.append("ignored")
+            tags = ", ".join(label)
+            preview = text[:160] + ("…" if len(text) > 160 else "")
+            print(f"  [{idx}] {tags}: {preview}")
+            if idx in question_blocks:
+                cues = diag.get("positives") or []
+                if cues:
+                    print(f"        ↳ cues: {', '.join(cues)}")
+            elif looks_like:
+                cues = diag.get("positives") or []
+                if cues:
+                    print(f"        ↳ heuristics matched: {', '.join(cues)}")
+            else:
+                reasons = diag.get("negatives") or []
+                if reasons:
+                    print(f"        ↳ rejected because: {', '.join(reasons)}")
+                else:
+                    print("        ↳ rejected because: no question cues detected")
 # ---------------------------------------------------------------------------
 # CLI command implementations
 # ---------------------------------------------------------------------------
@@ -720,6 +836,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             docx_as_text=args.docx_as_text,
             show_ids=False,
             show_meta=False,
+            show_eval=bool(getattr(args, "show_eval", False)),
         )
         return
 
@@ -788,8 +905,8 @@ def run_questions_mode(args: argparse.Namespace) -> None:
         docx_as_text=False,
         show_ids=bool(getattr(args, "show_ids", False)),
         show_meta=bool(getattr(args, "show_meta", False)),
+        show_eval=bool(getattr(args, "show_eval", False)),
     )
-
 
 # ---------------------------------------------------------------------------
 # Wizard helpers (interactive UX)
@@ -1218,6 +1335,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doc.add_argument("--show-live", action="store_true", help="Print each question/answer as it is produced")
     doc.add_argument(
+        "--show-eval",
+        action="store_true",
+        help="Also display heuristic evaluation when listing questions",
+    )
+    doc.add_argument(
         "--list-questions",
         action="store_true",
         help="For DOCX inputs, list detected questions and exit",
@@ -1231,6 +1353,11 @@ def build_parser() -> argparse.ArgumentParser:
     questions.add_argument("input", help="Path to the DOCX file to inspect")
     questions.add_argument("--show-ids", action="store_true", help="Include slot identifiers in output")
     questions.add_argument("--show-meta", action="store_true", help="Print full slot metadata JSON")
+    questions.add_argument(
+        "--show-eval",
+        action="store_true",
+        help="Show heuristic evaluation for non-question paragraphs",
+    )
     questions.add_argument("--debug", action="store_true", help="Print verbose debug logs")
 
     return parser
