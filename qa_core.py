@@ -12,7 +12,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple, Callable, Set
 
 # Your vector search — keep the original import path you already use.
 # If your project uses a different path, update this import accordingly.
@@ -288,30 +288,37 @@ def answer_question(
             print("[qa_core] renumbered citations")
 
         # 5) Build comments in that order
-        comments = []
+        comments: List[Tuple[str, str, str, float, str]] = []
+        used_rows: Set[int] = set()
         for old in order:
+            idx: Optional[int]
             try:
                 idx = int(old.strip("[]")) - 1
             except Exception:
+                idx = None
                 if DEBUG:
                     print(f"[qa_core] invalid citation token: {old}")
-                continue
-            if 0 <= idx < len(rows):
-                lbl, src, snippet, score, date_str = rows[idx]
-                new_lbl = mapping.get(old, lbl).strip("[]")
-                comments.append((new_lbl, src, snippet, score, date_str))
-                if DEBUG:
-                    short_snippet = snippet.replace("\n", " ")
-                    if len(short_snippet) > 60:
-                        short_snippet = short_snippet[:57] + "..."
-                    print(
-                        f"[qa_core] add comment {new_lbl} from {src} score={score:.3f} snippet='{short_snippet}'"
-                    )
-            else:
+            if idx is None or not (0 <= idx < len(rows)):
                 if DEBUG:
                     print(
-                        f"[qa_core] citation {old} out of range for {len(rows)} snippets"
+                        f"[qa_core] citation {old} out of range; falling back to next available snippet"
                     )
+                idx = next((i for i in range(len(rows)) if i not in used_rows), None)
+                if idx is None:
+                    if DEBUG:
+                        print("[qa_core] no snippets left for fallback")
+                    continue
+            used_rows.add(idx)
+            lbl, src, snippet, score, date_str = rows[idx]
+            new_lbl = mapping.get(old, lbl).strip("[]")
+            comments.append((new_lbl, src, snippet, score, date_str))
+            if DEBUG:
+                short_snippet = snippet.replace("\n", " ")
+                if len(short_snippet) > 60:
+                    short_snippet = short_snippet[:57] + "..."
+                print(
+                    f"[qa_core] add comment {new_lbl} from {src} score={score:.3f} snippet='{short_snippet}'"
+                )
 
         if DEBUG:
             print(f"[qa_core] built {len(comments)} comments for this attempt")
