@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 from textwrap import dedent
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -59,6 +60,89 @@ def set_debug(enabled: bool) -> None:
 def log_debug(message: str) -> None:
     if DEBUG_ENABLED:
         print(f"[DEBUG] {message}")
+
+
+class StageTimer:
+    """Collect fine-grained timing data for CLI workflows."""
+
+    def __init__(self) -> None:
+        self._entries: List[Dict[str, object]] = []
+
+    def track(self, name: str, *, meta: Optional[Dict[str, object]] = None):
+        return _StageTimerContext(self, name, meta)
+
+    def add(self, name: str, seconds: float, *, meta: Optional[Dict[str, object]] = None) -> None:
+        self._entries.append({"name": name, "seconds": seconds, "meta": meta})
+
+    def breakdown(self) -> List[Dict[str, object]]:
+        totals: Dict[str, Dict[str, object]] = defaultdict(lambda: {"name": "", "count": 0, "total": 0.0})
+        for entry in self._entries:
+            slot = totals[entry["name"]]
+            if not slot["name"]:
+                slot["name"] = entry["name"]
+            slot["count"] += 1
+            slot["total"] += float(entry["seconds"])
+        results: List[Dict[str, object]] = []
+        for slot in totals.values():
+            count = slot["count"] or 1
+            slot["avg"] = slot["total"] / count
+            results.append(slot)
+        return sorted(results, key=lambda item: item["total"], reverse=True)
+
+    def records_for(self, name: str) -> List[Dict[str, object]]:
+        return [entry for entry in self._entries if entry["name"] == name]
+
+
+class _StageTimerContext:
+    def __init__(self, timer: StageTimer, name: str, meta: Optional[Dict[str, object]]) -> None:
+        self._timer = timer
+        self._name = name
+        self._meta = meta
+        self._start: Optional[float] = None
+
+    def __enter__(self):
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        end = time.perf_counter()
+        if self._start is None:
+            return
+        self._timer.add(self._name, end - self._start, meta=self._meta)
+
+
+def _emit_timing_report(timer: StageTimer, total_duration: float) -> None:
+    breakdown = timer.breakdown()
+    if not breakdown:
+        return
+
+    print("\n[INFO] Stage timing breakdown:")
+    measured_total = 0.0
+    for entry in breakdown:
+        name = entry["name"]
+        count = entry["count"]
+        total = entry["total"]
+        avg = entry["avg"]
+        measured_total += total
+        print(f"  {name}: {count} call(s), total {total:.2f}s, avg {avg:.2f}s")
+
+    docx_answers = timer.records_for("docx:answer_generation")
+    if docx_answers:
+        slowest = sorted(docx_answers, key=lambda rec: rec["seconds"], reverse=True)[:5]
+        print("  Slowest DOCX answer generations:")
+        for rec in slowest:
+            meta = rec.get("meta") or {}
+            idx = meta.get("slot_index")
+            slot_id = meta.get("slot_id")
+            preview = meta.get("question_preview") or ""
+            if preview and len(preview) > 75:
+                preview = preview[:72] + "…"
+            label = f"slot {idx}" if idx is not None else "slot ?"
+            if slot_id:
+                label += f" ({slot_id})"
+            print(f"    {label}: {rec['seconds']:.2f}s | {preview}")
+
+    print(f"  Measured total: {measured_total:.2f}s of {total_duration:.2f}s overall.")
 
 
 # ---------------------------------------------------------------------------
@@ -293,17 +377,26 @@ def process_excel(
     generator,
     include_citations: bool,
     show_live: bool,
+    *,
+    timer: Optional[StageTimer] = None,
 ) -> Dict[str, object]:
+    timer = timer or StageTimer()
     print("[INFO] Reading Excel workbook …")
-    collect_non_empty_cells(str(input_path))
-    schema = ask_sheet_schema(str(input_path))
+    with timer.track("excel:collect_cells"):
+        collect_non_empty_cells(str(input_path))
+    with timer.track("excel:detect_schema"):
+        schema = ask_sheet_schema(str(input_path))
     answers = []
     total_questions = len(schema)
     for idx, entry in enumerate(schema, start=1):
         question = (entry.get("question_text") or "").strip()
         if show_live and question:
             print(f"[Q{idx}] {question}")
-        answer = generator(question)
+        with timer.track(
+            "excel:answer_generation",
+            meta={"row_index": idx, "question_preview": question[:80]},
+        ):
+            answer = generator(question)
         answers.append(answer)
         if show_live:
             text = answer.get("text", "") if isinstance(answer, dict) else answer
@@ -312,22 +405,25 @@ def process_excel(
             print(f"[INFO] Answered {idx}/{total_questions}", end="\r", flush=True)
     print()
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    with timer.track("excel:prepare_output_dir"):
+        output_dir.mkdir(parents=True, exist_ok=True)
     answered_path = output_dir / f"{input_path.stem}_answered.xlsx"
-    write_excel_answers(
-        schema,
-        answers,
-        str(input_path),
-        str(answered_path),
-        include_comments=include_citations,
-    )
+    with timer.track("excel:write_answers"):
+        write_excel_answers(
+            schema,
+            answers,
+            str(input_path),
+            str(answered_path),
+            include_comments=include_citations,
+        )
     comments_path = answered_path.with_name(answered_path.stem + "_comments.docx")
 
     qa_pairs = []
-    for entry, answer in zip(schema, answers):
-        question_text = (entry.get("question_text") or "").strip()
-        answer_text = answer.get("text", "") if isinstance(answer, dict) else str(answer)
-        qa_pairs.append({"question": question_text, "answer": answer_text})
+    with timer.track("excel:build_qa_pairs"):
+        for entry, answer in zip(schema, answers):
+            question_text = (entry.get("question_text") or "").strip()
+            answer_text = answer.get("text", "") if isinstance(answer, dict) else str(answer)
+            qa_pairs.append({"question": question_text, "answer": answer_text})
 
     payload = {
         "mode": "excel",
@@ -345,9 +441,13 @@ def process_docx_slots(
     include_citations: bool,
     docx_write_mode: str,
     show_live: bool,
+    *,
+    timer: Optional[StageTimer] = None,
 ) -> Dict[str, object]:
+    timer = timer or StageTimer()
     print("[INFO] Extracting slots from DOCX …")
-    slots_payload = extract_slots_from_docx(str(input_path))
+    with timer.track("docx:extract_slots"):
+        slots_payload = extract_slots_from_docx(str(input_path))
     slots = slots_payload.get("slots", [])
     answers_by_id: Dict[str, object] = {}
     total_slots = len(slots)
@@ -356,17 +456,32 @@ def process_docx_slots(
         question = (slot.get("question_text") or "").strip()
         slot_id = slot.get("id", f"slot_{idx}")
         if not question:
-            log_debug(f"DOCX slot {slot_id} (index {idx}) had empty question text; storing blank answer")
-            if not show_live:
-                print(f"[WARN] Slot {idx} has no extracted question; skipping.")
-            if show_live:
-                print(f"[Slot {idx}] (no question detected; skipped)")
-            answers_by_id[slot_id] = ""
-            skipped_slots.append(slot_id)
+            with timer.track(
+                "docx:slot_skipped",
+                meta={"slot_index": idx, "slot_id": slot_id},
+            ):
+                log_debug(
+                    f"DOCX slot {slot_id} (index {idx}) had empty question text; storing blank answer"
+                )
+                if not show_live:
+                    print(f"[WARN] Slot {idx} has no extracted question; skipping.")
+                if show_live:
+                    print(f"[Slot {idx}] (no question detected; skipped)")
+                answers_by_id[slot_id] = ""
+                skipped_slots.append(slot_id)
             continue
         if show_live:
             print(f"[Slot {idx}] {question}")
-        answer = generator(question)
+        question_preview = question[:80]
+        with timer.track(
+            "docx:answer_generation",
+            meta={
+                "slot_index": idx,
+                "slot_id": slot_id,
+                "question_preview": question_preview,
+            },
+        ):
+            answer = generator(question)
         answers_by_id[slot_id] = answer
         if show_live:
             text = answer.get("text", "") if isinstance(answer, dict) else answer
@@ -375,33 +490,37 @@ def process_docx_slots(
             print(f"[INFO] Answered {idx}/{total_slots}", end="\r", flush=True)
     print()
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    with timer.track("docx:prepare_output_dir"):
+        output_dir.mkdir(parents=True, exist_ok=True)
     answered_path = output_dir / f"{input_path.stem}_answered.docx"
     slots_tmp = output_dir / f"{input_path.stem}_slots.json"
     answers_tmp = output_dir / f"{input_path.stem}_answers.json"
 
-    slots_tmp.write_text(json.dumps(slots_payload), encoding="utf-8")
-    answers_tmp.write_text(json.dumps({"by_id": answers_by_id}), encoding="utf-8")
+    with timer.track("docx:write_intermediate_json"):
+        slots_tmp.write_text(json.dumps(slots_payload), encoding="utf-8")
+        answers_tmp.write_text(json.dumps({"by_id": answers_by_id}), encoding="utf-8")
 
-    apply_answers_to_docx(
-        docx_path=str(input_path),
-        slots_json_path=str(slots_tmp),
-        answers_json_path=str(answers_tmp),
-        out_path=str(answered_path),
-        mode=docx_write_mode,
-        generator=None,
-        gen_name="cli_streamlit_app:rag_gen",
-    )
+    with timer.track("docx:apply_answers"):
+        apply_answers_to_docx(
+            docx_path=str(input_path),
+            slots_json_path=str(slots_tmp),
+            answers_json_path=str(answers_tmp),
+            out_path=str(answered_path),
+            mode=docx_write_mode,
+            generator=None,
+            gen_name="cli_streamlit_app:rag_gen",
+        )
 
     qa_pairs = []
-    for slot in slots:
-        question_text = (slot.get("question_text") or "").strip()
-        answer_obj = answers_by_id.get(slot.get("id"))
-        if isinstance(answer_obj, dict):
-            answer_text = answer_obj.get("text", "")
-        else:
-            answer_text = str(answer_obj or "")
-        qa_pairs.append({"question": question_text, "answer": answer_text})
+    with timer.track("docx:build_qa_pairs"):
+        for slot in slots:
+            question_text = (slot.get("question_text") or "").strip()
+            answer_obj = answers_by_id.get(slot.get("id"))
+            if isinstance(answer_obj, dict):
+                answer_text = answer_obj.get("text", "")
+            else:
+                answer_text = str(answer_obj or "")
+            qa_pairs.append({"question": question_text, "answer": answer_text})
 
     payload = {
         "mode": "docx_slots",
@@ -430,10 +549,15 @@ def process_textish(
     include_citations: bool,
     extra_docs: Optional[List[str]],
     show_live: bool,
+    *,
+    timer: Optional[StageTimer] = None,
 ) -> Dict[str, object]:
+    timer = timer or StageTimer()
     print("[INFO] Loading document text …")
-    raw_text = load_input_text(str(input_path))
-    questions = extract_questions(raw_text, llm)
+    with timer.track("text:load_input"):
+        raw_text = load_input_text(str(input_path))
+    with timer.track("text:extract_questions"):
+        questions = extract_questions(raw_text, llm)
 
     if not questions:
         print("[WARN] No questions could be extracted from the document.")
@@ -455,17 +579,21 @@ def process_textish(
         processed_questions.append(question)
         if show_live:
             print(f"[Q{idx}] {question}")
-        answer, cmts = answer_question(
-            question,
-            search_mode,
-            fund,
-            k,
-            length,
-            approx_words,
-            min_confidence,
-            llm,
-            extra_docs=extra_docs,
-        )
+        with timer.track(
+            "text:answer_generation",
+            meta={"question_index": idx, "question_preview": question[:80]},
+        ):
+            answer, cmts = answer_question(
+                question,
+                search_mode,
+                fund,
+                k,
+                length,
+                approx_words,
+                min_confidence,
+                llm,
+                extra_docs=extra_docs,
+            )
         if not include_citations:
             answer = re.sub(r"\[\d+\]", "", answer)
             cmts = []
@@ -478,18 +606,27 @@ def process_textish(
     if not show_live:
         print()
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    with timer.track("text:prepare_output_dir"):
+        output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{input_path.stem}_answered.docx"
-    report_bytes = build_docx(processed_questions, answers, comments, include_comments=include_citations)
-    output_path.write_bytes(report_bytes)
+    with timer.track("text:build_doc"):
+        report_bytes = build_docx(
+            processed_questions,
+            answers,
+            comments,
+            include_comments=include_citations,
+        )
+    with timer.track("text:write_output"):
+        output_path.write_bytes(report_bytes)
 
     qa_pairs = []
-    for question, answer in zip(processed_questions, answers):
-        if isinstance(answer, dict):
-            text = answer.get("text", "")
-        else:
-            text = str(answer)
-        qa_pairs.append({"question": question, "answer": text})
+    with timer.track("text:build_qa_pairs"):
+        for question, answer in zip(processed_questions, answers):
+            if isinstance(answer, dict):
+                text = answer.get("text", "")
+            else:
+                text = str(answer)
+            qa_pairs.append({"question": question, "answer": text})
 
     return {
         "mode": "document_summary",
@@ -890,6 +1027,8 @@ def run_question_mode(args: argparse.Namespace) -> None:
 def run_document_mode(args: argparse.Namespace) -> None:
     set_debug(bool(getattr(args, "debug", False)) or ENV_DEBUG_DEFAULT)
 
+    timer = StageTimer()
+
     input_path = Path(args.input).expanduser()
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -925,15 +1064,17 @@ def run_document_mode(args: argparse.Namespace) -> None:
     suffix = input_path.suffix.lower()
     start_time = time.perf_counter()
     if list_only:
-        _run_question_listing(
-            input_path,
-            docx_as_text=args.docx_as_text,
-            show_ids=False,
-            show_meta=False,
-            show_eval=bool(getattr(args, "show_eval", False)),
-        )
+        with timer.track("docx:list_questions"):
+            _run_question_listing(
+                input_path,
+                docx_as_text=args.docx_as_text,
+                show_ids=False,
+                show_meta=False,
+                show_eval=bool(getattr(args, "show_eval", False)),
+            )
         duration = time.perf_counter() - start_time
         print(f"\n[INFO] Completed in {duration:.2f} seconds.")
+        _emit_timing_report(timer, duration)
         return
 
     generator = build_generator(
@@ -949,7 +1090,14 @@ def run_document_mode(args: argparse.Namespace) -> None:
     )
 
     if suffix in {".xlsx", ".xls"}:
-        result = process_excel(input_path, output_dir, generator, include_citations, args.show_live)
+        result = process_excel(
+            input_path,
+            output_dir,
+            generator,
+            include_citations,
+            args.show_live,
+            timer=timer,
+        )
     elif suffix == ".docx" and not args.docx_as_text:
         result = process_docx_slots(
             input_path,
@@ -958,6 +1106,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             include_citations,
             args.docx_write_mode,
             args.show_live,
+            timer=timer,
         )
     else:
         result = process_textish(
@@ -973,6 +1122,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             include_citations,
             extra_docs,
             args.show_live,
+            timer=timer,
         )
 
     duration = time.perf_counter() - start_time
@@ -989,6 +1139,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             "Review the slots JSON for details."
         )
     print(f"[INFO] Completed in {duration:.2f} seconds.")
+    _emit_timing_report(timer, duration)
 
 
 def run_questions_mode(args: argparse.Namespace) -> None:
