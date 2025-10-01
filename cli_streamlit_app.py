@@ -585,9 +585,14 @@ def _run_question_listing(
 
     print(f"[INFO] Detected {len(slot_list)} questions:")
     print()
+
+    def _normalize_question_text(text: str) -> str:
+        return strip_enum_prefix((text or "").strip()).lower()
+
     details: List[Tuple[int, str, str]] = []
     question_blocks: set[int] = set()
     heuristic_blocks: set[int] = set()
+    slot_lookup: Dict[str, List[Tuple[int, Optional[int], str]]] = {}
     for i, slot in enumerate(slot_list, 1):
         q_text = (slot.get("question_text") or "").strip() or "[blank question text]"
         prefix = f"{slot.get('id')} - " if show_ids and slot.get("id") else ""
@@ -596,7 +601,8 @@ def _run_question_listing(
             print(json.dumps(slot, indent=2, ensure_ascii=False))
             print()
 
-        detector = (slot.get("meta") or {}).get("detector", "unknown")
+        slot_meta = (slot.get("meta") or {})
+        detector = slot_meta.get("detector", "unknown")
         locator = slot.get("answer_locator") or {}
         locator_type = locator.get("type", "unknown")
         if locator_type == "paragraph":
@@ -613,12 +619,49 @@ def _run_question_listing(
             loc_desc = json.dumps(locator)
         details.append((i, detector, loc_desc))
 
-        q_block = (slot.get("meta") or {}).get("q_block")
+        q_block = slot_meta.get("q_block")
         if q_block is not None:
             question_blocks.add(q_block)
-            detector_tag = (slot.get("meta") or {}).get("detector")
-            if detector_tag == "heuristic_promoted":
+            if slot_meta.get("detector") == "heuristic_promoted":
                 heuristic_blocks.add(q_block)
+
+        norm = _normalize_question_text(q_text)
+        if norm:
+            slot_lookup.setdefault(norm, []).append((i, q_block, detector))
+
+    doc = docx.Document(str(input_path))
+    block_items = list(_iter_block_items(doc))
+    heuristic_reasons: Dict[int, str] = {}
+    for idx, block in enumerate(block_items):
+        if not isinstance(block, Paragraph):
+            continue
+        text = (block.text or "").strip()
+        if not text:
+            continue
+        if idx in question_blocks:
+            continue
+        diag = _diagnose_paragraph(text)
+        if not diag.get("looks_like"):
+            continue
+        norm = _normalize_question_text(text)
+        slot_hits = slot_lookup.get(norm, []) if norm else []
+        if slot_hits:
+            slot_ids = ", ".join(str(hit[0]) for hit in slot_hits)
+            detectors = {hit[2] for hit in slot_hits if hit[2] and hit[2] != "unknown"}
+            if any(hit[1] is None for hit in slot_hits):
+                detector_note = f" ({', '.join(sorted(detectors))})" if detectors else ""
+                reason = (
+                    "question text matches slot(s) "
+                    f"{slot_ids} but extractor did not record a paragraph index{detector_note}"
+                )
+            else:
+                reason = f"question text already covered by slot(s) {slot_ids}"
+        else:
+            reason = (
+                "heuristics saw a question, but no safe answer location was identified; "
+                "the extractor skipped slot creation"
+            )
+        heuristic_reasons[idx] = reason
 
     if details:
         print("\n[INFO] Detection details:")
@@ -627,8 +670,6 @@ def _run_question_listing(
 
     if show_eval:
         print("\n[INFO] Heuristic evaluation of paragraphs:")
-        doc = docx.Document(str(input_path))
-        block_items = list(_iter_block_items(doc))
         for idx, block in enumerate(block_items):
             if not isinstance(block, Paragraph):
                 continue
@@ -666,7 +707,11 @@ def _run_question_listing(
                     print(f"        ↳ cues (heuristic only): {', '.join(cues)}")
                 else:
                     print("        ↳ cues (heuristic only): none recorded")
-                print("        ↳ status: not extracted in slot list")
+                reason = heuristic_reasons.get(idx)
+                if reason:
+                    print(f"        ↳ status: not extracted in slot list ({reason})")
+                else:
+                    print("        ↳ status: not extracted in slot list")
             else:
                 reasons = diag.get("negatives") or []
                 if reasons:
