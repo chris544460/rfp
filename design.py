@@ -79,7 +79,7 @@ class StyleColors:
 class StyleCSS:
     """Encapsulates application-wide CSS fragments."""
 
-    PRIMARY_FONT = "'Roboto', sans-serif"
+    PRIMARY_FONT = "'Arial', 'Helvetica Neue', Helvetica, sans-serif"
 
     APP_TITLE_HEADER = "app-title-header"
     CUSTOM_LINE = "custom-line"
