@@ -1504,6 +1504,33 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
         ):
             slots.extend(detector(blocks))
 
+    existing_blocks: Set[int] = {
+        qb for qb in (_slot_question_index(s) for s in slots) if qb is not None
+    }
+    for idx, block in enumerate(blocks):
+        if idx in existing_blocks:
+            continue
+        if not isinstance(block, Paragraph):
+            continue
+        text = (block.text or "").strip()
+        if not text or not _looks_like_question(text):
+            continue
+        locator = AnswerLocator(type="paragraph_after", paragraph_index=idx, offset=1)
+        slot = QASlot(
+            id=f"slot_{uuid.uuid4().hex[:8]}",
+            question_text=text,
+            answer_locator=locator,
+            answer_type=infer_answer_type(text, blocks, idx),
+            confidence=0.35,
+            meta={
+                "detector": "heuristic_promoted",
+                "q_block": idx,
+                "promoted_from": "missing_blank",
+            },
+        )
+        slots.append(slot)
+        existing_blocks.add(idx)
+
     for s in slots:
         if s.answer_type == "multiple_choice":
             qb = (s.meta or {}).get("q_block")

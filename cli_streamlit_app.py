@@ -588,16 +588,6 @@ def _run_question_listing(
     details: List[Tuple[int, str, str]] = []
     question_blocks: set[int] = set()
     heuristic_blocks: set[int] = set()
-
-    doc_obj: Optional[docx.Document] = None
-    block_items: List[object] = []
-
-    def ensure_block_items() -> None:
-        nonlocal doc_obj, block_items
-        if doc_obj is None:
-            doc_obj = docx.Document(str(input_path))
-            block_items = list(_iter_block_items(doc_obj))
-    heuristic_candidates: List[Tuple[int, str, Dict[str, object]]] = []
     for i, slot in enumerate(slot_list, 1):
         q_text = (slot.get("question_text") or "").strip() or "[blank question text]"
         prefix = f"{slot.get('id')} - " if show_ids and slot.get("id") else ""
@@ -626,36 +616,9 @@ def _run_question_listing(
         q_block = (slot.get("meta") or {}).get("q_block")
         if q_block is not None:
             question_blocks.add(q_block)
-
-    ensure_block_items()
-    heuristic_only: List[Tuple[int, str, Dict[str, object]]] = []
-    for idx, block in enumerate(block_items):
-        if not isinstance(block, Paragraph):
-            continue
-        text = (block.text or "").strip()
-        if not text:
-            continue
-        if idx in question_blocks:
-            continue
-        diag = _diagnose_paragraph(text)
-        if not diag.get("looks_like"):
-            continue
-        heuristic_blocks.add(idx)
-        question_blocks.add(idx)
-        heuristic_only.append((idx, text, diag))
-
-    if heuristic_only:
-        start_index = len(slot_list) + 1
-        for offset, (block_idx, text, diag) in enumerate(heuristic_only, start=start_index):
-            preview = text[:160] + ("…" if len(text) > 160 else "")
-            print(f"  {offset}. [heuristic] {preview}")
-            details.append(
-                (
-                    offset,
-                    "heuristic_only",
-                    f"paragraph index {block_idx} (no locator auto-detected)",
-                )
-            )
+            detector_tag = (slot.get("meta") or {}).get("detector")
+            if detector_tag == "heuristic_promoted":
+                heuristic_blocks.add(q_block)
 
     if details:
         print("\n[INFO] Detection details:")
@@ -664,6 +627,8 @@ def _run_question_listing(
 
     if show_eval:
         print("\n[INFO] Heuristic evaluation of paragraphs:")
+        doc = docx.Document(str(input_path))
+        block_items = list(_iter_block_items(doc))
         for idx, block in enumerate(block_items):
             if not isinstance(block, Paragraph):
                 continue
