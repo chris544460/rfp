@@ -64,8 +64,17 @@ def collect_relevant_snippets(
 ) -> List[Tuple[str, str, str, float, str]]:
     """Return the filtered context snippets used for answering a question."""
 
+    q = (q or "").strip()
+
     if DEBUG:
         print(f"[qa_core] collect_relevant_snippets start: q='{q}', mode={mode}, fund={fund}")
+
+    if not q:
+        if DEBUG:
+            print("[qa_core] empty question text; skipping vector search")
+        if progress:
+            progress("Question text is empty; skipping search.")
+        return []
 
     if progress:
         progress("Searching knowledge base for relevant snippets...")
