@@ -486,6 +486,42 @@ def process_textish(
 
 
 # ---------------------------------------------------------------------------
+# Question listing helper
+# ---------------------------------------------------------------------------
+
+
+def _run_question_listing(
+    input_path: Path,
+    *,
+    docx_as_text: bool,
+    show_ids: bool,
+    show_meta: bool,
+) -> None:
+    if docx_as_text:
+        print("[WARN] Question listing is unavailable when --docx-as-text is set.")
+        return
+
+    if input_path.suffix.lower() != ".docx":
+        print("[WARN] Question listing currently supports DOCX files only.")
+        return
+
+    slots_payload = extract_slots_from_docx(str(input_path))
+    slot_list = slots_payload.get("slots", [])
+    if not slot_list:
+        print("[INFO] No questions detected in the document.")
+        return
+
+    print(f"[INFO] Detected {len(slot_list)} questions:\n")
+    for i, slot in enumerate(slot_list, 1):
+        q_text = (slot.get("question_text") or "").strip() or "[blank question text]"
+        prefix = f"{slot.get('id')} - " if show_ids and slot.get("id") else ""
+        print(f"  {i}. {prefix}{q_text}")
+        if show_meta:
+            print(json.dumps(slot, indent=2, ensure_ascii=False))
+            print()
+
+
+# ---------------------------------------------------------------------------
 # CLI command implementations
 # ---------------------------------------------------------------------------
 
@@ -631,17 +667,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
     llm = resolve_llm_client(framework, model)
     extra_docs = ensure_paths_exist(args.extra_doc)
     include_citations = args.include_citations
-    generator = build_generator(
-        search_mode=args.search_mode,
-        fund=args.fund or None,
-        k=args.k,
-        length=args.length,
-        approx_words=args.approx_words,
-        min_confidence=args.min_confidence,
-        include_citations=include_citations,
-        llm=llm,
-        extra_docs=extra_docs,
-    )
+    list_only = bool(getattr(args, "list_questions", False))
 
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else input_path.parent
 
@@ -665,6 +691,27 @@ def run_document_mode(args: argparse.Namespace) -> None:
     print()
 
     suffix = input_path.suffix.lower()
+    if list_only:
+        _run_question_listing(
+            input_path,
+            docx_as_text=args.docx_as_text,
+            show_ids=False,
+            show_meta=False,
+        )
+        return
+
+    generator = build_generator(
+        search_mode=args.search_mode,
+        fund=args.fund or None,
+        k=args.k,
+        length=args.length,
+        approx_words=args.approx_words,
+        min_confidence=args.min_confidence,
+        include_citations=include_citations,
+        llm=llm,
+        extra_docs=extra_docs,
+    )
+
     if suffix in {".xlsx", ".xls"}:
         result = process_excel(input_path, output_dir, generator, include_citations, args.show_live)
     elif suffix == ".docx" and not args.docx_as_text:
@@ -704,6 +751,21 @@ def run_document_mode(args: argparse.Namespace) -> None:
             f"[WARN] {len(skipped)} slots missing question text were skipped. "
             "Review the slots JSON for details."
         )
+
+
+def run_questions_mode(args: argparse.Namespace) -> None:
+    set_debug(bool(getattr(args, "debug", False)) or ENV_DEBUG_DEFAULT)
+
+    input_path = Path(args.input).expanduser()
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    _run_question_listing(
+        input_path,
+        docx_as_text=False,
+        show_ids=bool(getattr(args, "show_ids", False)),
+        show_meta=bool(getattr(args, "show_meta", False)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1132,6 +1194,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="How answers are written back to DOCX templates",
     )
     doc.add_argument("--show-live", action="store_true", help="Print each question/answer as it is produced")
+    doc.add_argument(
+        "--list-questions",
+        action="store_true",
+        help="For DOCX inputs, list detected questions and exit",
+    )
+
+    questions = subparsers.add_parser(
+        "questions",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="List detected questions in a DOCX template",
+    )
+    questions.add_argument("input", help="Path to the DOCX file to inspect")
+    questions.add_argument("--show-ids", action="store_true", help="Include slot identifiers in output")
+    questions.add_argument("--show-meta", action="store_true", help="Print full slot metadata JSON")
+    questions.add_argument("--debug", action="store_true", help="Print verbose debug logs")
 
     return parser
 
@@ -1152,6 +1229,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run_question_mode(args)
     elif args.command == "document":
         run_document_mode(args)
+    elif args.command == "questions":
+        run_questions_mode(args)
     else:  # pragma: no cover - defensive
         parser.error("Unknown command")
 
