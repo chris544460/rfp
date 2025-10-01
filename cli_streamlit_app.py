@@ -586,7 +586,17 @@ def _run_question_listing(
     print(f"[INFO] Detected {len(slot_list)} questions:")
     print()
     details: List[Tuple[int, str, str]] = []
-    question_blocks = set()
+    question_blocks: set[int] = set()
+    heuristic_blocks: set[int] = set()
+
+    doc_obj: Optional[docx.Document] = None
+    block_items: List[object] = []
+
+    def ensure_block_items() -> None:
+        nonlocal doc_obj, block_items
+        if doc_obj is None:
+            doc_obj = docx.Document(str(input_path))
+            block_items = list(_iter_block_items(doc_obj))
     heuristic_candidates: List[Tuple[int, str, Dict[str, object]]] = []
     for i, slot in enumerate(slot_list, 1):
         q_text = (slot.get("question_text") or "").strip() or "[blank question text]"
@@ -617,6 +627,36 @@ def _run_question_listing(
         if q_block is not None:
             question_blocks.add(q_block)
 
+    ensure_block_items()
+    heuristic_only: List[Tuple[int, str, Dict[str, object]]] = []
+    for idx, block in enumerate(block_items):
+        if not isinstance(block, Paragraph):
+            continue
+        text = (block.text or "").strip()
+        if not text:
+            continue
+        if idx in question_blocks:
+            continue
+        diag = _diagnose_paragraph(text)
+        if not diag.get("looks_like"):
+            continue
+        heuristic_blocks.add(idx)
+        question_blocks.add(idx)
+        heuristic_only.append((idx, text, diag))
+
+    if heuristic_only:
+        start_index = len(slot_list) + 1
+        for offset, (block_idx, text, diag) in enumerate(heuristic_only, start=start_index):
+            preview = text[:160] + ("…" if len(text) > 160 else "")
+            print(f"  {offset}. [heuristic] {preview}")
+            details.append(
+                (
+                    offset,
+                    "heuristic_only",
+                    f"paragraph index {block_idx} (no locator auto-detected)",
+                )
+            )
+
     if details:
         print("\n[INFO] Detection details:")
         for idx, detector, loc_desc in details:
@@ -624,8 +664,6 @@ def _run_question_listing(
 
     if show_eval:
         print("\n[INFO] Heuristic evaluation of paragraphs:")
-        doc = docx.Document(str(input_path))
-        block_items = list(_iter_block_items(doc))
         for idx, block in enumerate(block_items):
             if not isinstance(block, Paragraph):
                 continue
@@ -637,7 +675,7 @@ def _run_question_listing(
             ends_q = bool(diag.get("ends_with_q"))
             label: List[str] = []
             if idx in question_blocks:
-                label.append("assigned")
+                label.append("assigned" if idx not in heuristic_blocks else "assigned-heuristic")
             if looks_like and idx not in question_blocks:
                 label.append("heuristic-match")
             if ends_q:
@@ -647,13 +685,18 @@ def _run_question_listing(
             tags = ", ".join(label)
             preview = text[:160] + ("…" if len(text) > 160 else "")
             print(f"  [{idx}] {tags}: {preview}")
-            if idx in question_blocks:
+            if idx in heuristic_blocks:
+                cues = diag.get("positives") or []
+                if cues:
+                    print(f"        ↳ cues (promoted heuristic): {', '.join(cues)}")
+                else:
+                    print("        ↳ cues (promoted heuristic): none recorded")
+            elif idx in question_blocks:
                 cues = diag.get("positives") or []
                 if cues:
                     print(f"        ↳ cues: {', '.join(cues)}")
             elif looks_like:
                 cues = diag.get("positives") or []
-                heuristic_candidates.append((idx, text, diag))
                 if cues:
                     print(f"        ↳ cues (heuristic only): {', '.join(cues)}")
                 else:
@@ -665,15 +708,6 @@ def _run_question_listing(
                     print(f"        ↳ rejected because: {', '.join(reasons)}")
                 else:
                     print("        ↳ rejected because: no question cues detected")
-
-        if heuristic_candidates:
-            print("\n[INFO] Additional heuristic-only questions (not in slots):")
-            for idx, text, diag in heuristic_candidates:
-                preview = text[:160] + ("…" if len(text) > 160 else "")
-                cues = diag.get("positives") or []
-                cue_text = ", ".join(cues) if cues else "none recorded"
-                print(f"  [{idx}] {preview}")
-                print(f"        cues: {cue_text}")
 # ---------------------------------------------------------------------------
 # CLI command implementations
 # ---------------------------------------------------------------------------
