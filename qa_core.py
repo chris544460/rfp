@@ -24,8 +24,8 @@ from answer_composer import CompletionsClient
 from prompts import load_prompts
 
 
-# Default debug flag; always on unless caller toggles.
-DEBUG = True
+# Default debug flag; defaults to True unless explicitly disabled via env.
+DEBUG = os.getenv("RFP_QA_DEBUG", "1").lower() not in {"", "0", "false"}
 
 # Retry the model if we detect citation markers but end up with no comments.
 # Can be overridden via the RFP_COMMENT_RETRIES environment variable.
