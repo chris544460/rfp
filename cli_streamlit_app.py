@@ -22,6 +22,7 @@ import re
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from textwrap import dedent
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -60,6 +61,20 @@ def set_debug(enabled: bool) -> None:
 def log_debug(message: str) -> None:
     if DEBUG_ENABLED:
         print(f"[DEBUG] {message}")
+
+
+def _resolve_concurrency(value: Optional[int]) -> int:
+    env = os.getenv("CLI_STREAMLIT_CONCURRENCY")
+    resolved = value
+    if resolved is None and env:
+        try:
+            resolved = int(env)
+        except ValueError:
+            print(f"[WARN] Invalid CLI_STREAMLIT_CONCURRENCY '{env}'; falling back to default")
+    if resolved is None:
+        cpu_default = max(1, (os.cpu_count() or 4))
+        resolved = min(8, max(2, cpu_default))
+    return max(1, resolved)
 
 
 class StageTimer:
@@ -379,6 +394,7 @@ def process_excel(
     show_live: bool,
     *,
     timer: Optional[StageTimer] = None,
+    concurrency: Optional[int] = None,
 ) -> Dict[str, object]:
     timer = timer or StageTimer()
     print("[INFO] Reading Excel workbook …")
@@ -386,24 +402,57 @@ def process_excel(
         collect_non_empty_cells(str(input_path))
     with timer.track("excel:detect_schema"):
         schema = ask_sheet_schema(str(input_path))
-    answers = []
+
     total_questions = len(schema)
-    for idx, entry in enumerate(schema, start=1):
-        question = (entry.get("question_text") or "").strip()
-        if show_live and question:
-            print(f"[Q{idx}] {question}")
-        with timer.track(
-            "excel:answer_generation",
-            meta={"row_index": idx, "question_preview": question[:80]},
-        ):
-            answer = generator(question)
-        answers.append(answer)
-        if show_live:
-            text = answer.get("text", "") if isinstance(answer, dict) else answer
-            print(f"  ↳ {text}\n")
-        else:
-            print(f"[INFO] Answered {idx}/{total_questions}", end="\r", flush=True)
-    print()
+    answers: List[object] = [""] * total_questions
+    worker_limit = max(1, min(concurrency or 1, total_questions) if total_questions else 1)
+
+    def _generate_excel_answer(question: str):
+        start = time.perf_counter()
+        result = generator(question)
+        duration = time.perf_counter() - start
+        return result, duration
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=worker_limit) as pool:
+        for idx, entry in enumerate(schema, start=1):
+            question = (entry.get("question_text") or "").strip()
+            if show_live and question:
+                print(f"[Q{idx}] {question}")
+            future = pool.submit(_generate_excel_answer, question)
+            futures[future] = {
+                "row_index": idx,
+                "list_index": idx - 1,
+                "question_preview": question[:80],
+            }
+
+        completed = 0
+        scheduled = len(futures)
+        for future in as_completed(futures):
+            meta = futures[future]
+            try:
+                answer, duration = future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                raise RuntimeError(
+                    f"Failed to generate answer for Excel row {meta.get('row_index')}: {exc}"
+                ) from exc
+            answers[meta["list_index"]] = answer
+            timer.add("excel:answer_generation", duration, meta=meta)
+            completed += 1
+            if show_live:
+                text = answer.get("text", "") if isinstance(answer, dict) else answer
+                print(f"  ↳ {text}\n")
+            else:
+                print(
+                    f"[INFO] Answered {completed}/{scheduled}",
+                    end="\r",
+                    flush=True,
+                )
+
+    if not show_live and futures:
+        print()
+    else:
+        print()
 
     with timer.track("excel:prepare_output_dir"):
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -443,6 +492,7 @@ def process_docx_slots(
     show_live: bool,
     *,
     timer: Optional[StageTimer] = None,
+    concurrency: Optional[int] = None,
 ) -> Dict[str, object]:
     timer = timer or StageTimer()
     print("[INFO] Extracting slots from DOCX …")
@@ -452,43 +502,71 @@ def process_docx_slots(
     answers_by_id: Dict[str, object] = {}
     total_slots = len(slots)
     skipped_slots: List[str] = []
-    for idx, slot in enumerate(slots, start=1):
-        question = (slot.get("question_text") or "").strip()
-        slot_id = slot.get("id", f"slot_{idx}")
-        if not question:
-            with timer.track(
-                "docx:slot_skipped",
-                meta={"slot_index": idx, "slot_id": slot_id},
-            ):
-                log_debug(
-                    f"DOCX slot {slot_id} (index {idx}) had empty question text; storing blank answer"
-                )
-                if not show_live:
-                    print(f"[WARN] Slot {idx} has no extracted question; skipping.")
-                if show_live:
-                    print(f"[Slot {idx}] (no question detected; skipped)")
-                answers_by_id[slot_id] = ""
-                skipped_slots.append(slot_id)
-            continue
-        if show_live:
-            print(f"[Slot {idx}] {question}")
-        question_preview = question[:80]
-        with timer.track(
-            "docx:answer_generation",
-            meta={
+    worker_limit = max(1, min(concurrency or 1, total_slots) if total_slots else 1)
+    futures = {}
+
+    def _generate_slot_answer(question: str):
+        start = time.perf_counter()
+        result = generator(question)
+        duration = time.perf_counter() - start
+        return result, duration
+
+    with ThreadPoolExecutor(max_workers=worker_limit) as pool:
+        for idx, slot in enumerate(slots, start=1):
+            question = (slot.get("question_text") or "").strip()
+            slot_id = slot.get("id", f"slot_{idx}")
+            if not question:
+                with timer.track(
+                    "docx:slot_skipped",
+                    meta={"slot_index": idx, "slot_id": slot_id},
+                ):
+                    log_debug(
+                        f"DOCX slot {slot_id} (index {idx}) had empty question text; storing blank answer"
+                    )
+                    if not show_live:
+                        print(f"[WARN] Slot {idx} has no extracted question; skipping.")
+                    if show_live:
+                        print(f"[Slot {idx}] (no question detected; skipped)")
+                    answers_by_id[slot_id] = ""
+                    skipped_slots.append(slot_id)
+                continue
+            if show_live:
+                print(f"[Slot {idx}] {question}")
+            meta = {
                 "slot_index": idx,
                 "slot_id": slot_id,
-                "question_preview": question_preview,
-            },
-        ):
-            answer = generator(question)
-        answers_by_id[slot_id] = answer
-        if show_live:
-            text = answer.get("text", "") if isinstance(answer, dict) else answer
-            print(f"  ↳ {text}\n")
-        else:
-            print(f"[INFO] Answered {idx}/{total_slots}", end="\r", flush=True)
-    print()
+                "question_preview": question[:80],
+            }
+            future = pool.submit(_generate_slot_answer, question)
+            futures[future] = meta
+
+        completed = 0
+        scheduled = len(futures)
+        for future in as_completed(futures):
+            meta = futures[future]
+            try:
+                answer, duration = future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                raise RuntimeError(
+                    f"Failed to generate answer for slot {meta.get('slot_id')}: {exc}"
+                ) from exc
+            timer.add("docx:answer_generation", duration, meta=meta)
+            answers_by_id[meta["slot_id"]] = answer
+            completed += 1
+            if show_live:
+                text = answer.get("text", "") if isinstance(answer, dict) else answer
+                print(f"  ↳ {text}\n")
+            else:
+                print(
+                    f"[INFO] Answered {completed}/{scheduled}",
+                    end="\r",
+                    flush=True,
+                )
+
+    if not show_live and futures:
+        print()
+    else:
+        print()
 
     with timer.track("docx:prepare_output_dir"):
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -551,6 +629,7 @@ def process_textish(
     show_live: bool,
     *,
     timer: Optional[StageTimer] = None,
+    concurrency: Optional[int] = None,
 ) -> Dict[str, object]:
     timer = timer or StageTimer()
     print("[INFO] Loading document text …")
@@ -568,42 +647,80 @@ def process_textish(
         }
 
     processed_questions: List[str] = []
-    answers: List[object] = []
-    comments: List[List[Tuple[str, str, str, float, str]]] = []
-    total = len(questions)
+    question_indices: List[int] = []
     for idx, question in enumerate(questions, start=1):
-        question = question.strip()
-        if not question:
+        stripped = question.strip()
+        if not stripped:
             log_debug(f"Text mode question index {idx} was empty; skipping")
             continue
-        processed_questions.append(question)
-        if show_live:
-            print(f"[Q{idx}] {question}")
-        with timer.track(
-            "text:answer_generation",
-            meta={"question_index": idx, "question_preview": question[:80]},
-        ):
-            answer, cmts = answer_question(
-                question,
-                search_mode,
-                fund,
-                k,
-                length,
-                approx_words,
-                min_confidence,
-                llm,
-                extra_docs=extra_docs,
-            )
-        if not include_citations:
-            answer = re.sub(r"\[\d+\]", "", answer)
-            cmts = []
-        answers.append(answer)
-        comments.append(cmts)
-        if show_live:
-            print(f"  ↳ {answer}\n")
-        else:
-            print(f"[INFO] Answered {idx}/{total}", end="\r", flush=True)
+        processed_questions.append(stripped)
+        question_indices.append(idx)
+
+    total = len(processed_questions)
+    answers: List[object] = [""] * total
+    comments: List[List[Tuple[str, str, str, float, str]]] = [
+        [] for _ in range(total)
+    ]
+    worker_limit = max(1, min(concurrency or 1, total) if total else 1)
+
+    def _generate_text_answer(question: str):
+        start = time.perf_counter()
+        answer, cmts = answer_question(
+            question,
+            search_mode,
+            fund,
+            k,
+            length,
+            approx_words,
+            min_confidence,
+            llm,
+            extra_docs=extra_docs,
+        )
+        duration = time.perf_counter() - start
+        return answer, cmts, duration
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=worker_limit) as pool:
+        for idx, question in enumerate(processed_questions):
+            display_idx = question_indices[idx]
+            if show_live:
+                print(f"[Q{display_idx}] {question}")
+            future = pool.submit(_generate_text_answer, question)
+            futures[future] = {
+                "question_index": display_idx,
+                "list_index": idx,
+                "question_preview": question[:80],
+            }
+
+        completed = 0
+        scheduled = len(futures)
+        for future in as_completed(futures):
+            meta = futures[future]
+            try:
+                answer, cmts, duration = future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                raise RuntimeError(
+                    f"Failed to generate answer for question {meta.get('question_index')}: {exc}"
+                ) from exc
+            if not include_citations:
+                answer = re.sub(r"\[\d+\]", "", answer)
+                cmts = []
+            answers[meta["list_index"]] = answer
+            comments[meta["list_index"]] = cmts
+            timer.add("text:answer_generation", duration, meta=meta)
+            completed += 1
+            if show_live:
+                print(f"  ↳ {answer}\n")
+            else:
+                print(
+                    f"[INFO] Answered {completed}/{scheduled}",
+                    end="\r",
+                    flush=True,
+                )
+
     if not show_live:
+        print()
+    elif futures:
         print()
 
     with timer.track("text:prepare_output_dir"):
@@ -1040,6 +1157,8 @@ def run_document_mode(args: argparse.Namespace) -> None:
     include_citations = args.include_citations
     list_only = bool(getattr(args, "list_questions", False))
 
+    concurrency = _resolve_concurrency(getattr(args, "concurrency", None))
+
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else input_path.parent
 
     print("[INFO] Document mode configuration")
@@ -1048,6 +1167,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
     print(f"       Framework: {framework}")
     print(f"       Model: {model}")
     print(f"       Search mode: {args.search_mode}")
+    print(f"       Concurrency: {concurrency}")
     if args.fund:
         print(f"       Fund tag: {args.fund}")
     print(f"       Include citations: {'yes' if include_citations else 'no'}")
@@ -1097,6 +1217,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             include_citations,
             args.show_live,
             timer=timer,
+            concurrency=concurrency,
         )
     elif suffix == ".docx" and not args.docx_as_text:
         result = process_docx_slots(
@@ -1107,6 +1228,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             args.docx_write_mode,
             args.show_live,
             timer=timer,
+            concurrency=concurrency,
         )
     else:
         result = process_textish(
@@ -1123,6 +1245,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             extra_docs,
             args.show_live,
             timer=timer,
+            concurrency=concurrency,
         )
 
     duration = time.perf_counter() - start_time
@@ -1592,6 +1715,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-questions",
         action="store_true",
         help="For DOCX inputs, list detected questions and exit",
+    )
+    doc.add_argument(
+        "--concurrency",
+        type=int,
+        help="Maximum number of questions to answer in parallel",
     )
 
     questions = subparsers.add_parser(
