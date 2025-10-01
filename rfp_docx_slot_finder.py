@@ -52,6 +52,8 @@ from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Any, Tuple, Union, Set
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
+import spacy
+from spacy.matcher import Matcher
 
 # Load environment variables from a .env file if present
 load_dotenv(override=True)
@@ -74,6 +76,7 @@ SKIP_RAWTEXT = os.getenv("RFP_DOCX_SKIP_RAWTEXT", "1") == "1"
 SKIP_CONTEXT_ASSESS = os.getenv("RFP_DOCX_SKIP_CONTEXT_ASSESS", "1") == "1"
 SKIP_ANS_TYPE_LLM = os.getenv("RFP_DOCX_SKIP_ANS_TYPE_LLM", "1") == "1"
 DISABLE_MC_LLM = os.getenv("RFP_DOCX_DISABLE_MC_LLM", "1") == "1"
+USE_SPACY_QUESTION = os.getenv("RFP_DOCX_USE_SPACY_QUESTION", "1") == "1"
 
 ENABLE_SLOTS_DISK_CACHE = os.getenv("RFP_ENABLE_SLOTS_DISK_CACHE", "1") == "1"
 CACHE_DIR = Path(os.getenv("RFP_CACHE_DIR", ".rfp_cache"))
@@ -83,6 +86,9 @@ except Exception:
     ENABLE_SLOTS_DISK_CACHE = False
 
 _LLM_CACHE: Dict[Tuple[str, bool, str], str] = {}
+_DOCX_NLP = None
+_DOCX_MATCHER = None
+_SPACY_FAILED = False
 
 
 def _call_llm(prompt: str, json_output: bool = False) -> str:
@@ -115,6 +121,45 @@ def _call_llm_cached(prompt: str, json_output: bool = False, model: Optional[str
     content = _call_llm(prompt, json_output=json_output)
     _LLM_CACHE[cache_key] = content
     return content
+
+
+def _ensure_docx_spacy() -> Optional[spacy.language.Language]:
+    global _DOCX_NLP, _DOCX_MATCHER, _SPACY_FAILED
+    if not USE_SPACY_QUESTION or _SPACY_FAILED:
+        return None
+    if _DOCX_NLP is not None:
+        return _DOCX_NLP
+    try:
+        nlp = spacy.load("en_core_web_sm", disable=["ner"])
+    except Exception as exc:
+        dbg(f"spaCy unavailable for DOCX question detection: {exc}")
+        _SPACY_FAILED = True
+        return None
+    matcher = Matcher(nlp.vocab)
+    matcher.add(
+        "IMPERATIVE_QUESTION",
+        [
+            [{"LOWER": "please"}, {"POS": "VERB"}],
+            [{"LOWER": "tell"}, {"LOWER": "me"}, {"POS": {"IN": ["VERB", "ADP"]}}],
+        ],
+    )
+    _DOCX_NLP = nlp
+    _DOCX_MATCHER = matcher
+    return _DOCX_NLP
+
+
+def _spacy_docx_is_question(text: str) -> bool:
+    nlp = _ensure_docx_spacy()
+    if nlp is None:
+        return False
+    doc = nlp(text)
+    if _DOCX_MATCHER and _DOCX_MATCHER(doc):
+        return True
+    if doc and doc[0].tag_ == "VB":
+        return True
+    if any(tok.tag_.startswith("W") for tok in doc):
+        return True
+    return False
 
 # ───────────────────────── models ─────────────────────────
 
@@ -255,6 +300,9 @@ def _looks_like_question(text: str) -> bool:
 
     # If original had an enumeration token and contains a cue anywhere
     if _ENUM_PREFIX_RE.match(t_raw) and any(phrase in t_lower for phrase in QUESTION_PHRASES):
+        return True
+
+    if USE_SPACY_QUESTION and _spacy_docx_is_question(t_raw):
         return True
 
     return False
