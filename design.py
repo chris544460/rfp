@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 # Palette
 
 
-APP_NAME = "AI Deriv Docs"
+APP_NAME = "RFP Responder"
 
 
 class StyleColors:
@@ -82,8 +82,6 @@ class StyleCSS:
     PRIMARY_FONT = "'Roboto', sans-serif"
 
     APP_TITLE_HEADER = "app-title-header"
-    HEADER_SVG_A = "header-svg-a"
-    HEADER_SVG_ALADDIN = "header-svg-aladdin"
     CUSTOM_LINE = "custom-line"
 
     @staticmethod
@@ -105,6 +103,7 @@ class StyleCSS:
 
             .stApp {{
                 padding-top: 0;
+                background-color: {StyleColors.grey_05};
             }}
 
             section[data-testid="stSidebar"] > div:first-child {{
@@ -113,11 +112,12 @@ class StyleCSS:
             }}
 
             div.block-container {{
-                margin: 60px auto 30px auto;
-                padding: 30px 40px;
+                margin: 64px auto 40px auto;
+                padding: 32px 48px;
                 background-color: {StyleColors.white};
                 border: 1px solid {StyleColors.grey_20};
-                border-radius: 3px;
+                border-radius: 0;
+                box-shadow: 0 4px 12px rgba(23, 25, 28, 0.08);
                 max-width: 960px;
             }}
 
@@ -127,9 +127,9 @@ class StyleCSS:
 
             [data-testid="stColumn"] {{
                 background-color: {StyleColors.white};
-                padding: 20px;
+                padding: 24px;
                 border: 1px solid {StyleColors.grey_20};
-                border-radius: 3px;
+                border-radius: 0;
             }}
 
             input[type="text"],
@@ -139,11 +139,23 @@ class StyleCSS:
             textarea,
             select {{
                 border: 1px solid {StyleColors.grey_30};
-                border-radius: 3px;
-                padding: 6px 10px;
-                min-height: 32px;
+                border-radius: 0;
+                padding: 8px 12px;
+                min-height: 34px;
                 background-color: {StyleColors.white};
                 box-shadow: none;
+            }}
+
+            [data-baseweb="input"] > div {{
+                border-radius: 0 !important;
+            }}
+
+            [data-baseweb="select"] > div {{
+                border-radius: 0 !important;
+            }}
+
+            .stMultiSelect [data-baseweb="tag"] {{
+                border-radius: 0 !important;
             }}
 
             input::placeholder,
@@ -155,19 +167,29 @@ class StyleCSS:
             [data-testid="stButton"] button,
             button[kind="secondary"],
             button[kind="primary"] {{
-                border-radius: 3px;
+                border-radius: 0;
                 border: 1px solid {StyleColors.grey_40};
-                padding: 6px 16px;
+                padding: 8px 18px;
                 font-weight: 500;
                 letter-spacing: 0.01em;
                 box-shadow: none;
             }}
 
             [data-testid="stForm"] {{
-                padding: 20px;
+                padding: 24px;
                 border: 1px solid {StyleColors.grey_20};
-                border-radius: 3px;
+                border-radius: 0;
                 background: {StyleColors.grey_05};
+            }}
+
+            [data-testid="stExpander"] {{
+                border: 1px solid {StyleColors.grey_20};
+                border-radius: 0;
+            }}
+
+            [data-testid="stExpander"] > div:first-child {{
+                padding: 12px 16px;
+                background: {StyleColors.grey_10};
             }}
 
             table {{
@@ -200,13 +222,22 @@ class StyleCSS:
                 list-style: decimal;
             }}
 
+            [data-testid="stFileUploaderDropzone"] {{
+                border-radius: 0 !important;
+                border: 1px dashed {StyleColors.grey_30};
+                background: {StyleColors.white};
+            }}
+
+            [data-baseweb="popover"] {{
+                border-radius: 0 !important;
+            }}
+
             iframe {{
                 height: 48px;
             }}
 
             #stDecoration {{
-                background-image: linear-gradient(90deg, {StyleColors.action_blue_60}, {StyleColors.action_blue_30});
-                height: 0rem;
+                display: none;
             }}
 
             [data-testid="stToolbar"] {{
@@ -215,49 +246,31 @@ class StyleCSS:
                 z-index: 100 !important;
             }}
 
-            header {{
+            header.app-top-bar {{
                 position: fixed !important;
                 top: 0 !important;
                 left: 0 !important;
                 right: 0 !important;
-                height: 48px !important;
-                background: {StyleColors.grey_05} !important;
-                z-index: 2 !important;
-                border-bottom: 1px solid {StyleColors.grey_30} !important;
+                height: 56px !important;
+                background: {StyleColors.white} !important;
+                z-index: 10 !important;
+                border-bottom: 1px solid {StyleColors.grey_20} !important;
                 display: flex !important;
                 align-items: center !important;
-                gap: 1rem;
-                padding-left: 1.5rem;
-                font-family: 'BLK Fort', sans-serif !important;
-                font-size: 17px !important;
-                font-weight: 700 !important;
+                padding: 0 32px;
             }}
 
             .{StyleCSS.APP_TITLE_HEADER} {{
                 display: flex;
                 align-items: center;
-                gap: 0.75rem;
+                width: 100%;
             }}
 
-            .{StyleCSS.HEADER_SVG_A} {{
-                height: 2rem;
-                width: 2rem;
-                border-radius: 6px;
-                background-color: {StyleColors.grey_95};
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-            }}
-
-            .{StyleCSS.HEADER_SVG_A} svg {{
-                height: 1.2rem;
-                width: 1.2rem;
-                fill: {StyleColors.grey_05};
-            }}
-
-            .{StyleCSS.HEADER_SVG_ALADDIN} svg {{
-                height: 2.6rem;
-                fill: {StyleColors.grey_95};
+            .app-title-text {{
+                font-size: 18px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                color: {StyleColors.grey_90};
             }}
 
             div.stSlider > div[data-baseweb="slider"] > div > div[role="slider"] {{
@@ -380,28 +393,14 @@ class StyleCSS:
             pio.templates.default = template_name
 
 
-SVG_ALADDIN_A = "M2 14 L7 2 L12 14 Z"
-SVG_ALADDIN_WORDMARK = "M0 12 L0 2 L2 2 L2 12 Z"
-
-
 def display_aladdin_logos_and_app_title() -> None:
     """Render the header logo cluster."""
 
     st.markdown(
         f"""
-        <header>
+        <header class="app-top-bar">
             <div class="{StyleCSS.APP_TITLE_HEADER}">
-                <div class="{StyleCSS.HEADER_SVG_A}">
-                    <svg viewBox="0 0 14 16" xmlns="http://www.w3.org/2000/svg">
-                        <path d="{SVG_ALADDIN_A}" />
-                    </svg>
-                </div>
-                <div class="{StyleCSS.HEADER_SVG_ALADDIN}">
-                    <svg viewBox="0 0 120 28" xmlns="http://www.w3.org/2000/svg">
-                        <path d="{SVG_ALADDIN_WORDMARK}" />
-                    </svg>
-                </div>
-                <span>{APP_NAME}</span>
+                <span class="app-title-text">{APP_NAME}</span>
             </div>
         </header>
         """,
