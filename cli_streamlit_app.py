@@ -22,8 +22,9 @@ import re
 import sys
 from pathlib import Path
 from textwrap import dedent
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import docx
+from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from cli_app import build_docx, extract_questions, load_input_text
@@ -39,6 +40,7 @@ from rfp_docx_slot_finder import (
     strip_enum_prefix,
     _ENUM_PREFIX_RE,
     _iter_block_items,
+    _looks_like_question,
     _spacy_docx_is_question,
 )
 from rfp_docx_apply_answers import apply_answers_to_docx
@@ -632,6 +634,7 @@ def _run_question_listing(
     doc = docx.Document(str(input_path))
     block_items = list(_iter_block_items(doc))
     heuristic_reasons: Dict[int, str] = {}
+    seen_norms: Set[str] = set()
     for idx, block in enumerate(block_items):
         if not isinstance(block, Paragraph):
             continue
@@ -644,6 +647,9 @@ def _run_question_listing(
         if not diag.get("looks_like"):
             continue
         norm = _normalize_question_text(text)
+        prev_seen = bool(norm and norm in seen_norms)
+        if norm:
+            seen_norms.add(norm)
         slot_hits = slot_lookup.get(norm, []) if norm else []
         if slot_hits:
             slot_ids = ", ".join(str(hit[0]) for hit in slot_hits)
@@ -657,10 +663,32 @@ def _run_question_listing(
             else:
                 reason = f"question text already covered by slot(s) {slot_ids}"
         else:
-            reason = (
-                "heuristics saw a question, but no safe answer location was identified; "
-                "the extractor skipped slot creation"
-            )
+            factors: List[str] = []
+            if prev_seen:
+                factors.append("duplicate question text encountered earlier in the document")
+            next_block = block_items[idx + 1] if idx + 1 < len(block_items) else None
+            if isinstance(next_block, Table):
+                factors.append(
+                    "the next block is a table; automatic slot insertion inside tables is disabled"
+                )
+            elif isinstance(next_block, Paragraph):
+                next_text = (next_block.text or "").strip()
+                if next_text and not _looks_like_question(next_text):
+                    factors.append(
+                        "the following paragraph already contains answer text and cannot be overwritten automatically"
+                    )
+                elif not next_text:
+                    factors.append(
+                        "a blank paragraph follows, but the extractor still declined to insert due to prior safeguards"
+                    )
+            else:
+                if next_block is None:
+                    factors.append("question appears at the end of the document")
+            if not factors:
+                factors.append(
+                    "heuristics saw a question, but no safe answer location was identified"
+                )
+            reason = "; ".join(factors) + "; the extractor skipped slot creation"
         heuristic_reasons[idx] = reason
 
     if details:
