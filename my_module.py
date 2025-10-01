@@ -74,6 +74,27 @@ def _build_history(indices: Optional[List[int]] = None) -> str:
             lines.append(f"Sources: {cite_text}")
     return "\n".join(lines)
 
+
+def _debug_print_citations(cmts) -> None:
+    """Emit citation details when debug logging is enabled."""
+
+    if not DEBUG:
+        return
+    if not cmts:
+        print("[my_module] no citations returned")
+        return
+    print("[my_module] citations returned:")
+    for label, source, snippet, score, date_str in cmts:
+        short = (snippet or "").replace("\n", " ").strip()
+        if len(short) > 80:
+            short = short[:77] + "..."
+        score_text = (
+            f"{score:.3f}" if isinstance(score, (int, float)) else str(score)
+        )
+        print(
+            f"  [{label}] {source} | score={score_text} | date={date_str} | {short}"
+        )
+
 def _format_with_or_without_comments(ans: str, cmts):
     """Return answer text plus optional citation metadata."""
     if INCLUDE_COMMENTS:
@@ -281,6 +302,7 @@ def gen_answer(
             _llm_client,
             **kwargs,
         )
+        _debug_print_citations(cmts)
         ans = _format_mc_answer(ans, choices)
     else:
         approx_words: Optional[int] = int(APPROX_WORDS_ENV) if APPROX_WORDS_ENV else None
@@ -298,6 +320,7 @@ def gen_answer(
             _llm_client,
             **kwargs,
         )
+        _debug_print_citations(cmts)
 
     if not cmts:
         ans = NO_SOURCES_MSG
