@@ -96,6 +96,7 @@ class StyleCSS:
             * {{
                 font-family: {StyleCSS.PRIMARY_FONT};
                 font-size: 14px;
+                line-height: 1.5;
             }}
 
             :root {{
@@ -108,28 +109,95 @@ class StyleCSS:
 
             section[data-testid="stSidebar"] > div:first-child {{
                 background-color: {StyleColors.grey_02};
+                border-right: 1px solid {StyleColors.grey_20};
             }}
 
             div.block-container {{
-                margin-left: 0rem;
-                margin-right: 0rem;
-                margin-top: 3.3rem;
-                margin-bottom: 0rem;
-                padding-top: 4rem;
-                padding-bottom: 4rem;
-                padding-left: 1.75rem;
-                padding-right: 1.75rem;
-                background-color: {StyleColors.grey_15};
+                margin: 60px auto 30px auto;
+                padding: 30px 40px;
+                background-color: {StyleColors.white};
+                border: 1px solid {StyleColors.grey_20};
+                border-radius: 3px;
+                max-width: 960px;
             }}
 
             [data-testid="stVerticalBlock"] {{
-                gap: 0.75rem;
+                gap: 15px;
             }}
 
             [data-testid="stColumn"] {{
                 background-color: {StyleColors.white};
-                padding: 1.75rem;
+                padding: 20px;
+                border: 1px solid {StyleColors.grey_20};
+                border-radius: 3px;
+            }}
+
+            input[type="text"],
+            input[type="search"],
+            input[type="number"],
+            input[type="password"],
+            textarea,
+            select {{
                 border: 1px solid {StyleColors.grey_30};
+                border-radius: 3px;
+                padding: 6px 10px;
+                min-height: 32px;
+                background-color: {StyleColors.white};
+                box-shadow: none;
+            }}
+
+            input::placeholder,
+            textarea::placeholder {{
+                font-style: italic;
+                color: {StyleColors.grey_50};
+            }}
+
+            [data-testid="stButton"] button,
+            button[kind="secondary"],
+            button[kind="primary"] {{
+                border-radius: 3px;
+                border: 1px solid {StyleColors.grey_40};
+                padding: 6px 16px;
+                font-weight: 500;
+                letter-spacing: 0.01em;
+                box-shadow: none;
+            }}
+
+            [data-testid="stForm"] {{
+                padding: 20px;
+                border: 1px solid {StyleColors.grey_20};
+                border-radius: 3px;
+                background: {StyleColors.grey_05};
+            }}
+
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+            }}
+
+            th,
+            td {{
+                border: 1px solid {StyleColors.grey_20};
+                padding: 8px 12px;
+                text-align: left;
+            }}
+
+            tr:nth-child(even) {{
+                background: {StyleColors.grey_10};
+            }}
+
+            ul,
+            ol {{
+                padding-left: 20px;
+                margin-bottom: 10px;
+            }}
+
+            .stApp .stMarkdown ul {{
+                list-style: disc;
+            }}
+
+            .stApp .stMarkdown ol {{
+                list-style: decimal;
             }}
 
             iframe {{
