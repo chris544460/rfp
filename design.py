@@ -263,7 +263,24 @@ class StyleCSS:
             .{StyleCSS.APP_TITLE_HEADER} {{
                 display: flex;
                 align-items: center;
+                gap: 16px;
                 width: 100%;
+            }}
+
+            .app-logo {{
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 32px;
+                height: 32px;
+                border: 1px solid {StyleColors.grey_20};
+                background: {StyleColors.white};
+            }}
+
+            .app-logo svg {{
+                width: 18px;
+                height: 18px;
+                fill: {StyleColors.action_blue_60};
             }}
 
             .app-title-text {{
@@ -393,6 +410,13 @@ class StyleCSS:
             pio.templates.default = template_name
 
 
+SVG_APP_LOGO = (
+    "M 5.21777 8.12721 L 6.93725 3.51564 L 8.67305 8.12721 H 5.21777 Z"
+    "M 10.5105 13 H 14 L 8.87581 0.0222083 L 8.86866 0 H 5.13314 L 0 13 "
+    "H 3.40103 L 4.23872 10.7786 H 9.67283 L 10.5105 13 Z"
+)
+
+
 def display_aladdin_logos_and_app_title() -> None:
     """Render the header logo cluster."""
 
@@ -400,6 +424,11 @@ def display_aladdin_logos_and_app_title() -> None:
         f"""
         <header class="app-top-bar">
             <div class="{StyleCSS.APP_TITLE_HEADER}">
+                <span class="app-logo">
+                    <svg viewBox="0 0 14 13" xmlns="http://www.w3.org/2000/svg">
+                        <path d="{SVG_APP_LOGO}" />
+                    </svg>
+                </span>
                 <span class="app-title-text">{APP_NAME}</span>
             </div>
         </header>
