@@ -528,6 +528,9 @@ def apply_answers_to_docx(
                 if ltype == "paragraph_after":
                     offset = int(locator.get("offset", 1) or 1)
                     target = get_target_paragraph_after_anchor(blocks, block_to_para, paragraphs, anchor, offset)
+                    if meta.get("force_append_blank"):
+                        if (target.text or "").strip():
+                            target = insert_paragraph_after(target, "")
                 else:
                     target = anchor
 
