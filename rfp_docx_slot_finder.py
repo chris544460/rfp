@@ -926,8 +926,69 @@ def detect_response_label_then_blank(blocks: List[Union[Paragraph, Table]]) -> L
                                         "q_block": (i - k),
                                         "outline": {"level": ctx_level, "hint": hint}
                                     }
-                                ))
-                                break
+                        ))
+                        break
+    return slots
+
+
+def detect_question_followed_by_text(blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
+    slots: List[QASlot] = []
+    para_index = -1
+
+    for i, block in enumerate(blocks):
+        if isinstance(block, Paragraph):
+            para_index += 1
+            question_text = (block.text or "").strip()
+            if not _looks_like_question(question_text):
+                continue
+
+            paragraph_counter = para_index
+            for j in range(1, 4):
+                if i + j >= len(blocks):
+                    break
+                next_block = blocks[i + j]
+                if isinstance(next_block, Paragraph):
+                    nb_text = (next_block.text or "").strip()
+                    if not nb_text:
+                        continue
+                    if _looks_like_question(nb_text):
+                        break
+                    if _is_blank_para(next_block):
+                        continue
+
+                    answer_para_index = paragraph_counter
+                    for k in range(i + 1, i + j + 1):
+                        if isinstance(blocks[k], Paragraph):
+                            answer_para_index += 1
+
+                    lvl_num = paragraph_level_from_numbering(block)
+                    hint, hint_level = derive_outline_hint_and_level(question_text)
+                    outline_level = lvl_num or hint_level
+
+                    slots.append(
+                        QASlot(
+                            id=f"slot_{uuid.uuid4().hex[:8]}",
+                            question_text=question_text,
+                            answer_locator=AnswerLocator(
+                                type="paragraph",
+                                paragraph_index=answer_para_index,
+                            ),
+                            answer_type=infer_answer_type(question_text, blocks, i),
+                            confidence=0.55,
+                            meta={
+                                "detector": "para_question_followed",
+                                "q_paragraph_index": para_index,
+                                "q_block": i,
+                                "outline": {"level": outline_level, "hint": hint},
+                            },
+                        )
+                    )
+                    break
+                elif isinstance(next_block, Table):
+                    break
+                else:
+                    continue
+
     return slots
 
 # ─────────────────── optional LLM refiner ───────────────────
@@ -1334,6 +1395,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
         if FAST_DOCX and USE_RULES_FIRST:
             for detector in (
                 detect_para_question_with_blank,
+                detect_question_followed_by_text,
                 detect_two_col_table_q_blank,
                 detect_response_label_then_blank,
             ):
