@@ -1367,28 +1367,38 @@ def run_search_mode(args: argparse.Namespace) -> None:
 
         if args.fetch_all:
             if mode == "both":
-                blend_hits: List[Dict[str, object]] = []
                 try:
                     blend_size = index_size("blend")
                 except ValueError:
                     blend_size = 0
                 if blend_size:
-                    blend_hits = search(
+                    hits.extend(
+                        search(
+                            question,
+                            k=blend_size,
+                            mode="blend",
+                            fund_filter=fund_filter,
+                            include_vectors=include_vectors,
+                        )
+                    )
+                hits.extend(
+                    search(
                         question,
-                        k=blend_size,
-                        mode="blend",
+                        k=index_size("question"),
+                        mode="question",
                         fund_filter=fund_filter,
                         include_vectors=include_vectors,
                     )
-                dual_hits = search(
-                    question,
-                    k=index_size("dual"),
-                    mode="dual",
-                    fund_filter=fund_filter,
-                    include_vectors=include_vectors,
                 )
-                hits.extend(blend_hits)
-                hits.extend(dual_hits)
+                hits.extend(
+                    search(
+                        question,
+                        k=index_size("answer"),
+                        mode="answer",
+                        fund_filter=fund_filter,
+                        include_vectors=include_vectors,
+                    )
+                )
             else:
                 target_k = index_size(mode)
                 hits = search(
@@ -1417,7 +1427,16 @@ def run_search_mode(args: argparse.Namespace) -> None:
                     search(
                         question,
                         k=k,
-                        mode="dual",
+                        mode="question",
+                        fund_filter=fund_filter,
+                        include_vectors=include_vectors,
+                    )
+                )
+                hits.extend(
+                    search(
+                        question,
+                        k=k,
+                        mode="answer",
                         fund_filter=fund_filter,
                         include_vectors=include_vectors,
                     )
@@ -1803,7 +1822,7 @@ def _wizard_question() -> None:
     debug_flag = _prompt_bool("Enable verbose debug logging?", False)
 
     search_mode = "both"
-    k = 20
+    k = 10
     length = "long"
     approx_words = None
     min_confidence = 0.0
@@ -2014,7 +2033,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--framework", choices=["aladdin", "openai"], help="Backend framework to use")
     common.add_argument("--model", choices=list(MODEL_OPTIONS), help="Model to use for generation")
     common.add_argument("--search-mode", default="both", help="Search mode passed to backend")
-    common.add_argument("--k", type=int, default=20, help="Maximum retrieved hits per question")
+    common.add_argument("--k", type=int, default=10, help="Maximum retrieved hits per mode")
     common.add_argument("--min-confidence", type=float, default=0.0, help="Minimum document score")
     common.add_argument("--length", choices=["auto", "short", "medium", "long"], default="long")
     common.add_argument("--approx-words", dest="approx_words", type=int, help="Approximate answer length in words")

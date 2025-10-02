@@ -89,18 +89,38 @@ def collect_relevant_snippets(
         print("[qa_core] searching for context snippets")
 
     if mode == "both":
-        hits = search(
-            q,
-            k=k,
-            mode="blend",
-            fund_filter=fund,
-            include_vectors=include_vectors,
-        ) + search(
-            q,
-            k=k,
-            mode="dual",
-            fund_filter=fund,
-            include_vectors=include_vectors,
+        per_mode_k = max(1, k)
+        hits = []
+        try:
+            hits.extend(
+                search(
+                    q,
+                    k=per_mode_k,
+                    mode="blend",
+                    fund_filter=fund,
+                    include_vectors=include_vectors,
+                )
+            )
+        except AssertionError:
+            if DEBUG:
+                print("[qa_core] blend index unavailable; skipping blend search")
+        hits.extend(
+            search(
+                q,
+                k=per_mode_k,
+                mode="question",
+                fund_filter=fund,
+                include_vectors=include_vectors,
+            )
+        )
+        hits.extend(
+            search(
+                q,
+                k=per_mode_k,
+                mode="answer",
+                fund_filter=fund,
+                include_vectors=include_vectors,
+            )
         )
     else:
         hits = search(
