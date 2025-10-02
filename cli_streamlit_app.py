@@ -1717,7 +1717,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--framework", choices=["aladdin", "openai"], help="Backend framework to use")
     common.add_argument("--model", choices=list(MODEL_OPTIONS), help="Model to use for generation")
     common.add_argument("--search-mode", default="both", help="Search mode passed to backend")
-    common.add_argument("--k", type=int, default=6, help="Maximum retrieved hits per question")
+    common.add_argument("--k", type=int, default=20, help="Maximum retrieved hits per question")
     common.add_argument("--min-confidence", type=float, default=0.0, help="Minimum document score")
     common.add_argument("--length", choices=["auto", "short", "medium", "long"], default="long")
     common.add_argument("--approx-words", dest="approx_words", type=int, help="Approximate answer length in words")
