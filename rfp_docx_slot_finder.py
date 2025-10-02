@@ -1723,14 +1723,17 @@ def filter_slots(slots: List[QASlot], blocks: List[Union[Paragraph, Table]]) -> 
             continue
         if resolved != (slot.question_text or "").strip():
             slot.question_text = resolved
+        if _looks_like_question(resolved):
+            cleaned.append(slot)
+            continue
         if meta.get("force_insert_after_question"):
             cleaned.append(slot)
             continue
         if detector not in gated_detectors:
-            cleaned.append(slot)
-            continue
-        if _looks_like_question(resolved):
-            cleaned.append(slot)
+            dbg(
+                "filter_slots dropping slot "
+                f"{slot.id} detector={detector} preview={resolved[:80]} (heuristic veto)"
+            )
             continue
         dbg(
             "filter_slots dropping slot "
