@@ -270,13 +270,19 @@ def select_top_preapproved_answers(question: str, hits: List[Dict[str, object]],
         score = hit.get("score")
         score_repr = f"{score:.3f}" if isinstance(score, (int, float)) else str(score or "unknown")
         date = hit.get("date") or "unknown"
+        origin = hit.get("origin") or "unknown"
+        raw_rank = hit.get("raw_rank")
+        record_id = hit.get("id") or "unknown"
+        rank_line = f"                   Raw rank: {raw_rank}\n" if raw_rank is not None else ""
         formatted.append(
             dedent(
                 f"""
                 {idx}. Source: {source}
                    Score: {score_repr}
                    Date: {date}
-                   Snippet: {snippet}
+                   Origin: {origin}
+                   Record ID: {record_id}
+{rank_line}                   Snippet: {snippet}
                 """
             ).strip()
         )
@@ -368,6 +374,69 @@ def select_top_preapproved_answers(question: str, hits: List[Dict[str, object]],
             add_hit(position)
 
     return selected[:limit] if selected else hits[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Retrieval diagnostics helpers
+# ---------------------------------------------------------------------------
+
+
+def _format_embedding(values: Sequence[float]) -> str:
+    return json.dumps([round(float(v), 6) for v in values])
+
+
+def _write_retrieval_diagnostics(
+    path: str,
+    question: str,
+    diagnostics: Sequence[Dict[str, object]],
+    *,
+    include_embeddings: bool,
+) -> Path:
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.utcnow().isoformat()
+    with destination.open("a", encoding="utf-8") as fh:
+        fh.write(f"=== Retrieval diagnostics @ {now} ===\n")
+        fh.write(f"Question: {question}\n")
+        fh.write(f"Entries: {len(diagnostics)}\n")
+        for entry in diagnostics:
+            fh.write("---\n")
+            fh.write(f"Raw rank: {entry.get('raw_rank')}\n")
+            fh.write(f"Status: {entry.get('status')}\n")
+            label = entry.get("label")
+            if label:
+                fh.write(f"Assigned label: {label}\n")
+            fh.write(f"Origin: {entry.get('origin')}\n")
+            fh.write(f"Vector ID: {entry.get('id')}\n")
+            fh.write(f"FAISS index position: {entry.get('raw_index')}\n")
+            fh.write(f"Score: {entry.get('score')}\n")
+            reason = entry.get("reason")
+            if reason:
+                fh.write(f"Reason: {reason}\n")
+            fh.write(f"Source path: {entry.get('source_path')}\n")
+            source_name = entry.get("source_name")
+            if source_name and source_name != entry.get("source_path"):
+                fh.write(f"Source name: {source_name}\n")
+            fh.write(f"Date: {entry.get('date')}\n")
+            snippet = entry.get("snippet") or ""
+            fh.write(f"Snippet:\n{snippet}\n")
+            if include_embeddings:
+                embedding = entry.get("embedding")
+                if embedding:
+                    fh.write(f"Embedding: {_format_embedding(embedding)}\n")
+                elif entry.get("embedding_error"):
+                    fh.write(f"Embedding: <{entry['embedding_error']}>\n")
+            fh.write("\n")
+        fh.write("=== End diagnostics ===\n\n")
+    return destination
+
+
+def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    choices = "[Y/n]" if default else "[y/N]"
+    answer = input(f"{prompt} {choices} ").strip().lower()
+    if not answer:
+        return default
+    return answer in {"y", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -1122,6 +1191,12 @@ def run_question_mode(args: argparse.Namespace) -> None:
             print("[WARN] Empty question provided; skipping.")
             return
         if args.response_mode == "preapproved":
+            diagnostics: List[Dict[str, object]] = []
+            include_vectors = bool(
+                args.dump_embeddings
+                or args.dump_hits
+                or (args.prompt_dump and not args.question)
+            )
             rows = collect_relevant_snippets(
                 q=question,
                 mode=args.search_mode,
@@ -1131,10 +1206,16 @@ def run_question_mode(args: argparse.Namespace) -> None:
                 llm=llm,
                 extra_docs=extra_docs,
                 progress=lambda msg: print(f"[PROGRESS] {msg}", end="\r", flush=True),
+                diagnostics=diagnostics,
+                include_vectors=include_vectors,
             )
             print()
             hits = []
+            accepted_lookup = {
+                entry.get("label"): entry for entry in diagnostics if entry.get("status") == "accepted"
+            }
             for label, source, snippet, score, date_str in rows:
+                diag_entry = accepted_lookup.get(label)
                 hits.append(
                     {
                         "label": label,
@@ -1142,6 +1223,12 @@ def run_question_mode(args: argparse.Namespace) -> None:
                         "snippet": snippet,
                         "score": score,
                         "date": date_str,
+                        "origin": diag_entry.get("origin") if diag_entry else None,
+                        "raw_rank": diag_entry.get("raw_rank") if diag_entry else None,
+                        "id": diag_entry.get("id") if diag_entry else None,
+                        "raw_index": diag_entry.get("raw_index") if diag_entry else None,
+                        "source_path": diag_entry.get("source_path") if diag_entry else None,
+                        "embedding": diag_entry.get("embedding") if diag_entry else None,
                     }
                 )
             hits = select_top_preapproved_answers(question, hits)
@@ -1156,6 +1243,12 @@ def run_question_mode(args: argparse.Namespace) -> None:
                 reason = hit.get("selection_reason")
                 if reason:
                     print(f"Reason: {reason}")
+                origin = hit.get("origin")
+                if origin:
+                    print(f"Origin: {origin}")
+                raw_rank = hit.get("raw_rank")
+                if raw_rank is not None:
+                    print(f"Raw rank: {raw_rank}")
                 snippet = hit.get("snippet")
                 if snippet:
                     print(snippet)
@@ -1165,7 +1258,41 @@ def run_question_mode(args: argparse.Namespace) -> None:
                 date_str = hit.get("date")
                 if date_str:
                     print(f"Date: {date_str}")
+                retrieval_id = hit.get("id")
+                if retrieval_id:
+                    print(f"Record ID: {retrieval_id}")
+                source_path = hit.get("source_path")
+                if source_path:
+                    print(f"Source path: {source_path}")
                 print()
+            def _maybe_dump() -> None:
+                target_path = args.dump_hits
+                include_emb = bool(args.dump_embeddings)
+                if not target_path and args.prompt_dump and not args.question:
+                    if _prompt_yes_no("Save retrieval diagnostics to a text file?", default=False):
+                        default_name = f"retrieval_debug_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
+                        response = input(
+                            f"Enter file path [{default_name}]: "
+                        ).strip()
+                        target_path = response or default_name
+                        include_emb = (
+                            args.dump_embeddings
+                            or _prompt_yes_no("Include embedding vectors?", default=False)
+                        )
+                if target_path:
+                    try:
+                        _write_retrieval_diagnostics(
+                            target_path,
+                            question,
+                            diagnostics,
+                            include_embeddings=include_emb,
+                        )
+                        print(f"[INFO] Retrieval diagnostics written to {Path(target_path).expanduser()}")
+                    except Exception as exc:  # pragma: no cover - best effort logging
+                        print(f"[WARN] Failed to write diagnostics: {exc}")
+
+            if diagnostics:
+                _maybe_dump()
             return
 
         payload = generator(question)
@@ -1558,6 +1685,9 @@ def _wizard_question() -> None:
         question=question or None,
         response_mode=response_mode,
         debug=debug_flag,
+        dump_hits=None,
+        dump_embeddings=False,
+        prompt_dump=False,
     )
 
     try:
@@ -1667,6 +1797,9 @@ def _wizard_document() -> None:
         docx_write_mode=docx_write_mode,
         show_live=show_live,
         debug=debug_flag,
+        dump_hits=None,
+        dump_embeddings=False,
+        prompt_dump=False,
     )
 
     try:
@@ -1758,6 +1891,23 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["generate", "preapproved"],
         default="generate",
         help="Choose between generating answers or retrieving closest approved snippets",
+    )
+    ask.add_argument(
+        "--dump-hits",
+        dest="dump_hits",
+        help="Append retrieval diagnostics to this path in pre-approved mode",
+    )
+    ask.add_argument(
+        "--dump-embeddings",
+        dest="dump_embeddings",
+        action="store_true",
+        help="Include embedding vectors when dumping retrieval diagnostics",
+    )
+    ask.add_argument(
+        "--prompt-dump",
+        dest="prompt_dump",
+        action="store_true",
+        help="Interactive mode: prompt to save retrieval diagnostics after each question",
     )
 
     doc = subparsers.add_parser(

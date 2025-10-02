@@ -61,6 +61,9 @@ def collect_relevant_snippets(
     llm: CompletionsClient,
     extra_docs: Optional[List[str]] = None,
     progress: Optional[Callable[[str], None]] = None,
+    *,
+    diagnostics: Optional[List[Dict[str, object]]] = None,
+    include_vectors: bool = False,
 ) -> List[Tuple[str, str, str, float, str]]:
     """Return the filtered context snippets used for answering a question."""
 
@@ -76,6 +79,9 @@ def collect_relevant_snippets(
             progress("Question text is empty; skipping search.")
         return []
 
+    if diagnostics is not None:
+        diagnostics.clear()
+
     if progress:
         progress("Searching knowledge base for relevant snippets...")
 
@@ -83,11 +89,27 @@ def collect_relevant_snippets(
         print("[qa_core] searching for context snippets")
 
     if mode == "both":
-        hits = search(q, k=k, mode="blend", fund_filter=fund) + search(
-            q, k=k, mode="dual", fund_filter=fund
+        hits = search(
+            q,
+            k=k,
+            mode="blend",
+            fund_filter=fund,
+            include_vectors=include_vectors,
+        ) + search(
+            q,
+            k=k,
+            mode="dual",
+            fund_filter=fund,
+            include_vectors=include_vectors,
         )
     else:
-        hits = search(q, k=k, mode=mode, fund_filter=fund)
+        hits = search(
+            q,
+            k=k,
+            mode=mode,
+            fund_filter=fund,
+            include_vectors=include_vectors,
+        )
 
     if extra_docs:
         if DEBUG:
@@ -118,23 +140,10 @@ def collect_relevant_snippets(
     low_confidence = 0
     duplicate_or_empty = 0
 
-    for h in hits:
+    for idx_raw, h in enumerate(hits, 1):
         score = float(h.get("cosine", 0.0))
         doc_id = h.get("id", "unknown")
-        if score < min_confidence:
-            low_confidence += 1
-            if DEBUG:
-                print(
-                    f"[qa_core] filter out id={doc_id} score={score:.3f} < min_confidence {min_confidence}"
-                )
-            continue
-        txt = (h.get("text") or "").strip()
-        if not txt or txt in seen_snippets:
-            duplicate_or_empty += 1
-            if DEBUG:
-                reason = "empty" if not txt else "duplicate"
-                print(f"[qa_core] filter out id={doc_id} {reason} snippet")
-            continue
+        src_origin = str(h.get("origin") or mode)
         meta = h.get("meta", {}) or {}
         src_path = str(meta.get("source", "")) or "unknown"
         src_name = Path(src_path).name if src_path else "unknown"
@@ -152,9 +161,84 @@ def collect_relevant_snippets(
         except Exception:
             date_str = "unknown"
 
+        if score < min_confidence:
+            low_confidence += 1
+            if DEBUG:
+                print(
+                    f"[qa_core] filter out id={doc_id} score={score:.3f} < min_confidence {min_confidence}"
+                )
+            if diagnostics is not None:
+                entry = {
+                        "raw_rank": idx_raw,
+                        "id": doc_id,
+                        "score": score,
+                        "origin": src_origin,
+                        "status": "filtered_low_confidence",
+                        "reason": f"score {score:.3f} < min_confidence {min_confidence:.3f}",
+                        "snippet": (h.get("text") or "").strip(),
+                        "source_path": src_path,
+                        "source_name": src_name,
+                        "date": date_str,
+                    }
+                if include_vectors and "embedding" in h:
+                    entry["embedding"] = h.get("embedding")
+                if include_vectors and "embedding_error" in h:
+                    entry["embedding_error"] = h.get("embedding_error")
+                if "raw_index" in h:
+                    entry["raw_index"] = h.get("raw_index")
+                diagnostics.append(entry)
+            continue
+        txt = (h.get("text") or "").strip()
+        if not txt or txt in seen_snippets:
+            duplicate_or_empty += 1
+            if DEBUG:
+                reason = "empty" if not txt else "duplicate"
+                print(f"[qa_core] filter out id={doc_id} {reason} snippet")
+            if diagnostics is not None:
+                entry = {
+                        "raw_rank": idx_raw,
+                        "id": doc_id,
+                        "score": score,
+                        "origin": src_origin,
+                        "status": "filtered_duplicate" if txt else "filtered_empty",
+                        "reason": "duplicate snippet" if txt else "empty snippet",
+                        "snippet": txt,
+                        "source_path": src_path,
+                        "source_name": src_name,
+                        "date": date_str,
+                    }
+                if include_vectors and "embedding" in h:
+                    entry["embedding"] = h.get("embedding")
+                if include_vectors and "embedding_error" in h:
+                    entry["embedding_error"] = h.get("embedding_error")
+                if "raw_index" in h:
+                    entry["raw_index"] = h.get("raw_index")
+                diagnostics.append(entry)
+            continue
+
         lbl = f"[{len(rows)+1}]"
         rows.append((lbl, src_name, txt, score, date_str))
         seen_snippets.add(txt)
+        if diagnostics is not None:
+            entry: Dict[str, object] = {
+                "raw_rank": idx_raw,
+                "id": doc_id,
+                "score": score,
+                "origin": src_origin,
+                "status": "accepted",
+                "label": lbl,
+                "snippet": txt,
+                "source_path": src_path,
+                "source_name": src_name,
+                "date": date_str,
+            }
+            if include_vectors and "embedding" in h:
+                entry["embedding"] = h.get("embedding")
+            if include_vectors and "embedding_error" in h:
+                entry["embedding_error"] = h.get("embedding_error")
+            if "raw_index" in h:
+                entry["raw_index"] = h.get("raw_index")
+            diagnostics.append(entry)
         if DEBUG:
             print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
 

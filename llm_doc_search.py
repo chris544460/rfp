@@ -231,5 +231,6 @@ def search_uploaded_docs(
                     "text": snippet,
                     "meta": {"source": str(path)},
                     "cosine": 1.0,
+                    "origin": "uploaded_doc",
                 })
     return hits

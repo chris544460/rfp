@@ -115,7 +115,10 @@ def _faiss_search(
     all_ids: List[str],
     qvec: np.ndarray,
     k: int,
-    fund_filter: Optional[str]
+    fund_filter: Optional[str],
+    *,
+    origin: str,
+    include_vectors: bool,
 ) -> List[Dict]:
     """
     Helper: search one FAISS index with over-retrieval, filter by fund_filter,
@@ -126,19 +129,30 @@ def _faiss_search(
     out = []
     cnt = 1
     for dist2, idx_row in zip(D[0], I[0]):
+        row_id = int(idx_row)
+        if row_id < 0:
+            continue
         if fund_filter:
-            rec_tags = _records[idx_row]["metadata"].get("tags", [])
+            rec_tags = _records[row_id]["metadata"].get("tags", [])
             if fund_filter not in rec_tags:
                 continue
-        rec = _records[idx_row]
-        out.append({
+        rec = _records[row_id]
+        entry: Dict[str, object] = {
             "rank": cnt,
-            "id": all_ids[idx_row],
+            "id": all_ids[row_id],
             "text": rec["text"],
             "meta": rec["metadata"],
             "l2_sq": float(dist2),
             "cosine": float(_cosine_from_l2(dist2)),
-        })
+            "origin": origin,
+            "raw_index": row_id,
+        }
+        if include_vectors:
+            try:
+                entry["embedding"] = idx.reconstruct(row_id).astype("float32").tolist()
+            except Exception:
+                entry["embedding_error"] = "reconstruct_failed"
+        out.append(entry)
         cnt += 1
         if cnt > k:
             break
@@ -150,7 +164,8 @@ def search(
     k: int = 6,
     *,
     mode: str = "answer",   # "answer", "question", "blend", or "dual"
-    fund_filter: Optional[str] = None
+    fund_filter: Optional[str] = None,
+    include_vectors: bool = False,
 ) -> List[Dict]:
     """
     Dual-index search:
@@ -168,17 +183,59 @@ def search(
 
     # (2) Single-index modes just invoke _faiss_search directly
     if mode == "answer":
-        return _faiss_search(_answer_index, _answer_ids, qvec, k, fund_filter)
+        return _faiss_search(
+            _answer_index,
+            _answer_ids,
+            qvec,
+            k,
+            fund_filter,
+            origin="vector:answer",
+            include_vectors=include_vectors,
+        )
     if mode == "question":
-        return _faiss_search(_question_index, _question_ids, qvec, k, fund_filter)
+        return _faiss_search(
+            _question_index,
+            _question_ids,
+            qvec,
+            k,
+            fund_filter,
+            origin="vector:question",
+            include_vectors=include_vectors,
+        )
     if mode == "blend":
         assert _blend_index is not None, "No blend index found on disk"
-        return _faiss_search(_blend_index, _blend_ids, qvec, k, fund_filter)
+        return _faiss_search(
+            _blend_index,
+            _blend_ids,
+            qvec,
+            k,
+            fund_filter,
+            origin="vector:blend",
+            include_vectors=include_vectors,
+        )
 
     # (3) mode == "dual": run answer-only and question-only searches in parallel
     with ThreadPoolExecutor(max_workers=2) as executor:
-        future_ans = executor.submit(_faiss_search, _answer_index, _answer_ids, qvec, k, fund_filter)
-        future_qn  = executor.submit(_faiss_search, _question_index, _question_ids, qvec, k, fund_filter)
+        future_ans = executor.submit(
+            _faiss_search,
+            _answer_index,
+            _answer_ids,
+            qvec,
+            k,
+            fund_filter,
+            origin="vector:answer",
+            include_vectors=include_vectors,
+        )
+        future_qn  = executor.submit(
+            _faiss_search,
+            _question_index,
+            _question_ids,
+            qvec,
+            k,
+            fund_filter,
+            origin="vector:question",
+            include_vectors=include_vectors,
+        )
 
         ans_hits = future_ans.result()
         qn_hits  = future_qn.result()
