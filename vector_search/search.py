@@ -253,6 +253,23 @@ def search(
     return best
 
 
+def index_size(mode: str) -> int:
+    """Return the number of records available for the requested mode."""
+
+    mode = mode.lower()
+    if mode == "answer":
+        return len(_answer_ids)
+    if mode == "question":
+        return len(_question_ids)
+    if mode == "blend":
+        if _blend_index is None:
+            raise ValueError("No blend index available on disk")
+        return len(_blend_ids)
+    if mode == "dual":
+        return len(_records)
+    raise ValueError(f"Unknown mode '{mode}'")
+
+
 # --------------------- smoke-test ---------------------
 if __name__ == "__main__":
     print("Answer-only:")
