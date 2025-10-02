@@ -1355,7 +1355,8 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             cache_path = CACHE_DIR / f"slots_{digest}_{MODEL}_fast{int(FAST_DOCX)}.json"
             if cache_path.exists():
                 dbg(f"Loading DOCX slots from cache: {cache_path}")
-                return json.loads(cache_path.read_text("utf-8"))
+                cached_payload = json.loads(cache_path.read_text("utf-8"))
+                return _sanitize_cached_payload(cached_payload)
         except Exception as exc:
             dbg(f"Slot cache unavailable: {exc}")
             cache_path = None
@@ -1574,6 +1575,29 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         except Exception as exc:
             dbg(f"Unable to write slot cache {cache_path}: {exc}")
+    return payload
+
+
+def _sanitize_cached_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure cached slot payloads obey current heuristics and metadata schema."""
+
+    slots = payload.get("slots") or []
+    cleaned: List[Dict[str, Any]] = []
+    for slot in slots:
+        meta = slot.get("meta") or {}
+        if "block" in meta and "q_block" not in meta:
+            meta["q_block"] = meta.pop("block")
+        question = (slot.get("question_text") or "").strip()
+        if not question:
+            dbg(
+                "_sanitize_cached_payload dropping cached slot "
+                f"{slot.get('id', '<unknown>')} blank question text"
+            )
+            continue
+        slot["question_text"] = question
+        slot["meta"] = meta
+        cleaned.append(slot)
+    payload["slots"] = cleaned
     return payload
 
 # ─────────────────── context attachment ───────────────────
