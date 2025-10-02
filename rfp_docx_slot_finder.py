@@ -85,12 +85,13 @@ SKIP_ANS_TYPE_LLM = os.getenv("RFP_DOCX_SKIP_ANS_TYPE_LLM", "1") == "1"
 DISABLE_MC_LLM = os.getenv("RFP_DOCX_DISABLE_MC_LLM", "1") == "1"
 USE_SPACY_QUESTION = os.getenv("RFP_DOCX_USE_SPACY_QUESTION", "1") == "1"
 
-ENABLE_SLOTS_DISK_CACHE = os.getenv("RFP_ENABLE_SLOTS_DISK_CACHE", "1") == "1"
+ENABLE_SLOTS_DISK_CACHE = os.getenv("RFP_ENABLE_SLOTS_DISK_CACHE", "0") == "1"
 CACHE_DIR = Path(os.getenv("RFP_CACHE_DIR", ".rfp_cache"))
-try:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-except Exception:
-    ENABLE_SLOTS_DISK_CACHE = False
+if ENABLE_SLOTS_DISK_CACHE:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        ENABLE_SLOTS_DISK_CACHE = False
 
 _LLM_CACHE: Dict[Tuple[str, bool, str], str] = {}
 _DOCX_NLP = None
