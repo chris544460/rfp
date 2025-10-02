@@ -58,6 +58,13 @@ from spacy.matcher import Matcher
 # Load environment variables from a .env file if present
 load_dotenv(override=True)
 
+VENDORED_SPACY_DIR = Path(__file__).resolve().parent / "vendor" / "spacy_models"
+if VENDORED_SPACY_DIR.exists():
+    vendored = str(VENDORED_SPACY_DIR)
+    if vendored not in sys.path:
+        sys.path.append(vendored)
+    os.environ.setdefault("SPACY_DATA", vendored)
+
 import docx
 from docx.text.paragraph import Paragraph
 from docx.table import Table
