@@ -124,39 +124,49 @@ def _faiss_search(
     Helper: search one FAISS index with over-retrieval, filter by fund_filter,
     and return up to k hits as a list of dicts.
     """
-    over_k = k * 5
-    D, I = idx.search(qvec, over_k)  # squared-L2 distances
-    out = []
-    cnt = 1
-    for dist2, idx_row in zip(D[0], I[0]):
-        row_id = int(idx_row)
-        if row_id < 0:
-            continue
-        if fund_filter:
-            rec_tags = _records[row_id]["metadata"].get("tags", [])
-            if fund_filter not in rec_tags:
+    capacity = len(all_ids)
+    if capacity == 0 or k <= 0:
+        return []
+
+    over_k = min(capacity, max(k * 5, 32))
+
+    while True:
+        D, I = idx.search(qvec, over_k)  # squared-L2 distances
+        out: List[Dict[str, object]] = []
+        cnt = 1
+        for dist2, idx_row in zip(D[0], I[0]):
+            row_id = int(idx_row)
+            if row_id < 0:
                 continue
-        rec = _records[row_id]
-        entry: Dict[str, object] = {
-            "rank": cnt,
-            "id": all_ids[row_id],
-            "text": rec["text"],
-            "meta": rec["metadata"],
-            "l2_sq": float(dist2),
-            "cosine": float(_cosine_from_l2(dist2)),
-            "origin": origin,
-            "raw_index": row_id,
-        }
-        if include_vectors:
-            try:
-                entry["embedding"] = idx.reconstruct(row_id).astype("float32").tolist()
-            except Exception:
-                entry["embedding_error"] = "reconstruct_failed"
-        out.append(entry)
-        cnt += 1
-        if cnt > k:
-            break
-    return out
+            if fund_filter:
+                rec_tags = _records[row_id]["metadata"].get("tags", [])
+                if fund_filter not in rec_tags:
+                    continue
+            rec = _records[row_id]
+            entry: Dict[str, object] = {
+                "rank": cnt,
+                "id": all_ids[row_id],
+                "text": rec["text"],
+                "meta": rec["metadata"],
+                "l2_sq": float(dist2),
+                "cosine": float(_cosine_from_l2(dist2)),
+                "origin": origin,
+                "raw_index": row_id,
+            }
+            if include_vectors:
+                try:
+                    entry["embedding"] = idx.reconstruct(row_id).astype("float32").tolist()
+                except Exception:
+                    entry["embedding_error"] = "reconstruct_failed"
+            out.append(entry)
+            cnt += 1
+            if cnt > k:
+                break
+
+        if len(out) >= k or over_k >= capacity:
+            return out
+
+        over_k = min(capacity, over_k * 2)
 
 
 def search(
