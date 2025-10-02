@@ -48,6 +48,7 @@ from rfp_docx_slot_finder import (
     _spacy_docx_is_question,
 )
 from rfp_docx_apply_answers import apply_answers_to_docx
+from search.vector_search import index_size, search
 
 
 DEBUG_ENABLED = os.getenv("CLI_STREAMLIT_DEBUG", "0") not in {"", "0", "false", "False"}
@@ -1336,6 +1337,174 @@ def run_question_mode(args: argparse.Namespace) -> None:
         print(f"\n[INFO] Exiting question mode. Session length: {total_duration:.2f} seconds.")
 
 
+def _truncate_text(text: str, limit: int) -> str:
+    if limit <= 0 or len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3] + "..."
+
+
+def _format_embedding_preview(values: Sequence[float], *, max_items: int = 8) -> str:
+    if not values:
+        return "[]"
+    head = values[:max_items]
+    body = ", ".join(f"{float(v):.4f}" for v in head)
+    suffix = "" if len(values) <= max_items else ", ..."
+    return f"[{body}{suffix}] (len={len(values)})"
+
+
+def run_search_mode(args: argparse.Namespace) -> None:
+    set_debug(bool(getattr(args, "debug", False)) or ENV_DEBUG_DEFAULT)
+
+    include_vectors = bool(getattr(args, "include_vectors", False))
+    fund_filter = args.fund or None
+    truncate = max(0, getattr(args, "truncate_snippet", 0))
+
+    def _fetch(question: str) -> List[Dict[str, object]]:
+        mode = args.search_mode
+        hits: List[Dict[str, object]] = []
+
+        if args.fetch_all:
+            if mode == "both":
+                blend_hits: List[Dict[str, object]] = []
+                try:
+                    blend_size = index_size("blend")
+                except ValueError:
+                    blend_size = 0
+                if blend_size:
+                    blend_hits = search(
+                        question,
+                        k=blend_size,
+                        mode="blend",
+                        fund_filter=fund_filter,
+                        include_vectors=include_vectors,
+                    )
+                dual_hits = search(
+                    question,
+                    k=index_size("dual"),
+                    mode="dual",
+                    fund_filter=fund_filter,
+                    include_vectors=include_vectors,
+                )
+                hits.extend(blend_hits)
+                hits.extend(dual_hits)
+            else:
+                target_k = index_size(mode)
+                hits = search(
+                    question,
+                    k=target_k,
+                    mode=mode,
+                    fund_filter=fund_filter,
+                    include_vectors=include_vectors,
+                )
+        else:
+            k = max(1, args.k)
+            if mode == "both":
+                try:
+                    hits.extend(
+                        search(
+                            question,
+                            k=k,
+                            mode="blend",
+                            fund_filter=fund_filter,
+                            include_vectors=include_vectors,
+                        )
+                    )
+                except AssertionError:
+                    print("[WARN] Blend index not available; skipping blend search")
+                hits.extend(
+                    search(
+                        question,
+                        k=k,
+                        mode="dual",
+                        fund_filter=fund_filter,
+                        include_vectors=include_vectors,
+                    )
+                )
+            else:
+                hits = search(
+                    question,
+                    k=k,
+                    mode=mode,
+                    fund_filter=fund_filter,
+                    include_vectors=include_vectors,
+                )
+
+        return hits
+
+    def _render(question: str, hits: List[Dict[str, object]]) -> None:
+        if args.json_output:
+            payload = {
+                "question": question,
+                "search_mode": args.search_mode,
+                "fund": fund_filter,
+                "hits": hits,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+
+        if not hits:
+            print("[INFO] No hits returned for this query.")
+            return
+
+        print(f"[INFO] Retrieved {len(hits)} hits for '{question}'.")
+        for idx, hit in enumerate(hits, start=1):
+            cosine = float(hit.get("cosine", 0.0))
+            origin = hit.get("origin") or "unknown"
+            mode_rank = hit.get("rank")
+            raw_index = hit.get("raw_index")
+            record_id = hit.get("id") or "unknown"
+            print(f"--- Hit {idx} ---")
+            print(
+                f"Origin: {origin} | mode-rank: {mode_rank} | cosine: {cosine:.6f} | raw-index: {raw_index}"
+            )
+            print(f"Record ID: {record_id}")
+
+            meta = hit.get("meta") or {}
+            source = meta.get("source")
+            if source:
+                print(f"Source: {source}")
+            tags = meta.get("tags")
+            if tags:
+                print(f"Tags: {', '.join(tags)}")
+
+            snippet = (hit.get("text") or "").strip()
+            if snippet:
+                print("Snippet:")
+                print(_truncate_text(snippet, truncate) if truncate else snippet)
+
+            if include_vectors:
+                emb = hit.get("embedding")
+                if emb:
+                    print(f"Embedding: {_format_embedding_preview(emb)}")
+                elif hit.get("embedding_error"):
+                    print(f"Embedding: <{hit['embedding_error']}>")
+
+            if meta:
+                other_keys = {k: v for k, v in meta.items() if k not in {"source", "tags"}}
+                if other_keys:
+                    print(f"Meta extras: {other_keys}")
+
+        print()
+
+    if args.query:
+        hits = _fetch(args.query)
+        _render(args.query, hits)
+        return
+
+    print("[INFO] Enter queries to inspect vector search results (Ctrl-D to exit).")
+    try:
+        while True:
+            prompt = input("Search> ").strip()
+            if not prompt:
+                continue
+            hits = _fetch(prompt)
+            _render(prompt, hits)
+    except (EOFError, KeyboardInterrupt):
+        print("\n[INFO] Exiting search mode.")
+
+
 def run_document_mode(args: argparse.Namespace) -> None:
     set_debug(bool(getattr(args, "debug", False)) or ENV_DEBUG_DEFAULT)
 
@@ -1911,6 +2080,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Interactive mode: prompt to save retrieval diagnostics after each question",
     )
 
+    search_cmd = subparsers.add_parser(
+        "search",
+        parents=[common],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Run vector search directly and inspect raw hits",
+    )
+    search_cmd.add_argument(
+        "query",
+        nargs="?",
+        help="Question text to search; omit for interactive mode",
+    )
+    search_cmd.add_argument(
+        "--all",
+        dest="fetch_all",
+        action="store_true",
+        help="Retrieve the full index for the selected search mode",
+    )
+    search_cmd.add_argument(
+        "--include-vectors",
+        action="store_true",
+        help="Include embedding vectors in the printed output",
+    )
+    search_cmd.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="Emit results as JSON instead of human-readable text",
+    )
+    search_cmd.add_argument(
+        "--truncate-snippet",
+        dest="truncate_snippet",
+        type=int,
+        default=400,
+        help="Trim snippet text to this many characters (0 disables truncation)",
+    )
+
     doc = subparsers.add_parser(
         "document",
         parents=[common],
@@ -1975,6 +2180,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     if args.command == "ask":
         run_question_mode(args)
+    elif args.command == "search":
+        run_search_mode(args)
     elif args.command == "document":
         run_document_mode(args)
     elif args.command == "questions":
