@@ -1561,7 +1561,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                         s.meta = {}
                     s.meta["choices"] = choices
 
-    slots = filter_slots(slots, blocks)
+    slots, skipped_slots = filter_slots(slots, blocks)
     attach_context(slots, blocks)
     deduped_slots = dedupe_slots(slots)
     dbg(f"Slot count: {len(deduped_slots)}")
@@ -1570,6 +1570,8 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
         "file": os.path.basename(path),
         "slots": [asdict(s) for s in deduped_slots],
     }
+    if skipped_slots:
+        payload["skipped_slots"] = skipped_slots
     if ENABLE_SLOTS_DISK_CACHE and cache_path is not None:
         try:
             cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -1581,12 +1583,16 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
 def _sanitize_cached_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure cached slot payloads obey current heuristics and metadata schema."""
 
+    def _normalize_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
+        meta = dict(meta or {})
+        if "block" in meta and "q_block" not in meta:
+            meta["q_block"] = meta.pop("block")
+        return meta
+
     slots = payload.get("slots") or []
     cleaned: List[Dict[str, Any]] = []
     for slot in slots:
-        meta = slot.get("meta") or {}
-        if "block" in meta and "q_block" not in meta:
-            meta["q_block"] = meta.pop("block")
+        meta = _normalize_meta(slot.get("meta") or {})
         question = (slot.get("question_text") or "").strip()
         if not question:
             dbg(
@@ -1598,6 +1604,21 @@ def _sanitize_cached_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         slot["meta"] = meta
         cleaned.append(slot)
     payload["slots"] = cleaned
+
+    skipped = payload.get("skipped_slots") or []
+    cleaned_skipped: List[Dict[str, Any]] = []
+    for entry in skipped:
+        meta = _normalize_meta(entry.get("meta") or {})
+        question = (entry.get("question_text") or "").strip()
+        if not question:
+            continue
+        entry["question_text"] = question
+        entry["meta"] = meta
+        cleaned_skipped.append(entry)
+    if cleaned_skipped:
+        payload["skipped_slots"] = cleaned_skipped
+    elif "skipped_slots" in payload:
+        payload.pop("skipped_slots", None)
     return payload
 
 # ─────────────────── context attachment ───────────────────
@@ -1706,23 +1727,58 @@ def _resolve_slot_question_text(slot: QASlot, blocks: List[Union[Paragraph, Tabl
     return text
 
 
-def filter_slots(slots: List[QASlot], blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
-    """Drop LLM-derived slots whose questions fail our heuristic/ spaCy checks."""
+_TABLE_PATTERN = re.compile(r"\btable(s)?\b", re.IGNORECASE)
+
+
+def _mentions_table(text: str) -> bool:
+    return bool(_TABLE_PATTERN.search(text))
+
+
+def _record_skip(
+    skipped: List[Dict[str, Any]],
+    slot: QASlot,
+    meta: Dict[str, Any],
+    resolved: str,
+    reason: str,
+) -> None:
+    entry: Dict[str, Any] = {
+        "id": slot.id,
+        "question_text": resolved,
+        "detector": meta.get("detector"),
+        "reason": reason,
+        "meta": dict(meta),
+    }
+    qb = meta.get("q_block")
+    if isinstance(qb, int):
+        entry["q_block"] = qb
+    skipped.append(entry)
+    dbg(
+        "filter_slots dropping slot "
+        f"{slot.id} reason={reason} preview={resolved[:80]}"
+    )
+
+
+def filter_slots(
+    slots: List[QASlot], blocks: List[Union[Paragraph, Table]]
+) -> Tuple[List[QASlot], List[Dict[str, Any]]]:
+    """Drop slots whose questions fail heuristics or reference tables."""
 
     gated_detectors = {"llm_rich", "two_stage", "raw_text"}
     cleaned: List[QASlot] = []
+    skipped: List[Dict[str, Any]] = []
     for slot in slots:
         meta = slot.meta or {}
         detector = meta.get("detector")
         resolved = _resolve_slot_question_text(slot, blocks)
         if not resolved:
-            dbg(
-                "filter_slots dropping slot "
-                f"{slot.id} detector={detector} blank question text"
-            )
+            _record_skip(skipped, slot, meta, resolved, "blank_question_text")
             continue
         if resolved != (slot.question_text or "").strip():
             slot.question_text = resolved
+        if _mentions_table(resolved):
+            meta.setdefault("skip_reason", "table_reference")
+            _record_skip(skipped, slot, meta, resolved, "table_reference")
+            continue
         if _looks_like_question(resolved):
             cleaned.append(slot)
             continue
@@ -1730,16 +1786,10 @@ def filter_slots(slots: List[QASlot], blocks: List[Union[Paragraph, Table]]) -> 
             cleaned.append(slot)
             continue
         if detector not in gated_detectors:
-            dbg(
-                "filter_slots dropping slot "
-                f"{slot.id} detector={detector} preview={resolved[:80]} (heuristic veto)"
-            )
+            _record_skip(skipped, slot, meta, resolved, "heuristic_veto")
             continue
-        dbg(
-            "filter_slots dropping slot "
-            f"{slot.id} detector={detector} preview={resolved[:80]}"
-        )
-    return cleaned
+        _record_skip(skipped, slot, meta, resolved, "llm_veto")
+    return cleaned, skipped
 
 # ───────────────────────── CLI ─────────────────────────
 
