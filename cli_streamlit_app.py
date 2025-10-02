@@ -177,6 +177,7 @@ MODEL_SHORT_NAMES: Dict[str, str] = {
 MODEL_OPTIONS: Sequence[str] = tuple(MODEL_DESCRIPTIONS.keys())
 DEFAULT_MODEL = "o3-2025-04-16_research"
 DEFAULT_INDEX = 0 if DEFAULT_MODEL not in MODEL_OPTIONS else MODEL_OPTIONS.index(DEFAULT_MODEL)
+DOC_DEFAULT_MODEL = "o3-2025-04-16_research"
 
 
 # ---------------------------------------------------------------------------
@@ -1010,7 +1011,10 @@ def run_question_mode(args: argparse.Namespace) -> None:
     set_debug(bool(getattr(args, "debug", False)) or ENV_DEBUG_DEFAULT)
 
     framework = args.framework or os.getenv("ANSWER_FRAMEWORK", "aladdin")
-    model = args.model or (MODEL_OPTIONS[DEFAULT_INDEX] if MODEL_OPTIONS else DEFAULT_MODEL)
+    available_models = MODEL_OPTIONS or (DOC_DEFAULT_MODEL,)
+    model = args.model or DOC_DEFAULT_MODEL
+    if model not in available_models:
+        model = DOC_DEFAULT_MODEL if DOC_DEFAULT_MODEL in available_models else available_models[0]
     llm = resolve_llm_client(framework, model)
     extra_docs = ensure_paths_exist(args.extra_doc)
     include_citations = args.include_citations
@@ -1151,7 +1155,10 @@ def run_document_mode(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     framework = args.framework or os.getenv("ANSWER_FRAMEWORK", "aladdin")
-    model = args.model or (MODEL_OPTIONS[DEFAULT_INDEX] if MODEL_OPTIONS else DEFAULT_MODEL)
+    available_models = MODEL_OPTIONS or (DOC_DEFAULT_MODEL,)
+    model = args.model or DOC_DEFAULT_MODEL
+    if model not in available_models:
+        model = DOC_DEFAULT_MODEL if DOC_DEFAULT_MODEL in available_models else available_models[0]
     llm = resolve_llm_client(framework, model)
     extra_docs = ensure_paths_exist(args.extra_doc)
     include_citations = args.include_citations
