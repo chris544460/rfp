@@ -1111,12 +1111,6 @@ def run_question_mode(args: argparse.Namespace) -> None:
             print(f"       Extra doc: {doc}")
     print()
     log_debug(
-        "document_mode "
-        f"input={input_path} output_dir={output_dir} framework={framework} model={model} "
-        f"search_mode={args.search_mode} k={args.k} min_confidence={args.min_confidence} "
-        f"include_citations={include_citations} docx_as_text={args.docx_as_text}"
-    )
-    log_debug(
         "question_mode "
         f"framework={framework} model={model} search_mode={args.search_mode} "
         f"k={args.k} min_confidence={args.min_confidence} include_citations={include_citations}"
