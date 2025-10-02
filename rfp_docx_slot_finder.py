@@ -1690,21 +1690,27 @@ def filter_slots(slots: List[QASlot], blocks: List[Union[Paragraph, Table]]) -> 
     for slot in slots:
         meta = slot.meta or {}
         detector = meta.get("detector")
+        resolved = _resolve_slot_question_text(slot, blocks)
+        if not resolved:
+            dbg(
+                "filter_slots dropping slot "
+                f"{slot.id} detector={detector} blank question text"
+            )
+            continue
+        if resolved != (slot.question_text or "").strip():
+            slot.question_text = resolved
         if meta.get("force_insert_after_question"):
             cleaned.append(slot)
             continue
         if detector not in gated_detectors:
             cleaned.append(slot)
             continue
-        resolved = _resolve_slot_question_text(slot, blocks)
-        if resolved and _looks_like_question(resolved):
-            if resolved != (slot.question_text or "").strip():
-                slot.question_text = resolved
+        if _looks_like_question(resolved):
             cleaned.append(slot)
             continue
         dbg(
             "filter_slots dropping slot "
-            f"{slot.id} detector={detector} preview={(resolved or slot.question_text or '')[:80]}"
+            f"{slot.id} detector={detector} preview={resolved[:80]}"
         )
     return cleaned
 
