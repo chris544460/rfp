@@ -1233,6 +1233,7 @@ def run_question_mode(args: argparse.Namespace) -> None:
                         "embedding": diag_entry.get("embedding") if diag_entry else None,
                     }
                 )
+            print("[INFO] Reranking pre-approved answers...", flush=True)
             hits = select_top_preapproved_answers(question, hits)
             if not hits:
                 print("[INFO] No relevant pre-approved answers found.")
