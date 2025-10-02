@@ -96,21 +96,54 @@ def prompt_for_file() -> Optional[Path]:
         print("Please select one of the listed options.")
 
 
+def prompt_for_tag_override(source_path: Path) -> Optional[List[str]]:
+    """Ask whether the user wants to override tags for the parsed records."""
+
+    while True:
+        choice = input(
+            f"Assign override tags for '{source_path.name}'? (y/N): "
+        ).strip().lower()
+        if choice in {"", "n", "no"}:
+            return None
+        if choice in {"y", "yes"}:
+            break
+        print("Please answer 'y' or 'n'.")
+
+    tags_raw = input("Enter comma-separated tags to apply: ").strip()
+    tags = [tag.strip() for tag in tags_raw.split(",") if tag.strip()]
+    if not tags:
+        print("No tags provided; leaving tags unchanged.")
+        return None
+    return tags
+
+
 def parse_file(source_path: Path) -> None:
     """Parse DOCX or Excel files into JSON outputs."""
 
     suffix = source_path.suffix.lower()
     if suffix == ".docx":
+        override_tags = prompt_for_tag_override(source_path)
         parser = MixedDocParser(str(source_path))
         records = parser.parse()
         output_path = PARSED_OUTPUT_DIR / f"{source_path.stem}.json"
-        parser.to_json(str(output_path))
+        parser.to_json(str(output_path), override_tags=override_tags)
         print(
             f"Parsed {len(records)} records from '{source_path.name}' "
             f"into {output_path}"
         )
+        if override_tags:
+            printable = ", ".join(override_tags)
+            print(
+                f"Applied override tags [{printable}] to {len(records)} records from "
+                f"'{source_path.name}'."
+            )
     elif suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
-        process_excel_file_with_detection(str(source_path), str(PARSED_OUTPUT_DIR))
+        override_tags = prompt_for_tag_override(source_path)
+        process_excel_file_with_detection(
+            str(source_path),
+            str(PARSED_OUTPUT_DIR),
+            override_tags=override_tags,
+        )
     else:
         print(
             "Unsupported file type. Please provide a DOCX or Excel file "
