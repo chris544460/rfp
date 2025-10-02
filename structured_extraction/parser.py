@@ -1,12 +1,27 @@
 import os
 import re
 import json
-from typing import List, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 import docx
 from docx.text.paragraph import Paragraph
 from docx.table import Table
+
+
+def _apply_tag_override(records: List[Dict[str, Any]], override_tags: Optional[List[str]]) -> None:
+    """Override the ``tags`` key for every record when tags are provided."""
+
+    if not override_tags:
+        return
+
+    normalized = [tag.strip() for tag in override_tags if tag and tag.strip()]
+    if not normalized:
+        return
+
+    for record in records:
+        if isinstance(record, dict):
+            record["tags"] = list(normalized)
 
 
 def iter_block_items(parent):
@@ -64,9 +79,14 @@ class ExcelQuestionnaireParser:
                 i += 1
         return self.records
 
-    def to_json(self, output_path: str) -> None:
+    def to_json(
+        self,
+        output_path: str,
+        override_tags: Optional[List[str]] = None,
+    ) -> None:
         if not self.records:
             self.parse()
+        _apply_tag_override(self.records, override_tags)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(self.records, f, indent=2, ensure_ascii=False)
@@ -124,9 +144,14 @@ class ExcelAnswerLibraryParser:
             self.records.append(rec)
         return self.records
 
-    def to_json(self, output_path: str) -> None:
+    def to_json(
+        self,
+        output_path: str,
+        override_tags: Optional[List[str]] = None,
+    ) -> None:
         if not self.records:
             self.parse()
+        _apply_tag_override(self.records, override_tags)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(self.records, f, indent=2, ensure_ascii=False)
@@ -226,9 +251,14 @@ class MixedDocParser:
                 "data": data
             })
 
-    def to_json(self, output_path: str) -> None:
+    def to_json(
+        self,
+        output_path: str,
+        override_tags: Optional[List[str]] = None,
+    ) -> None:
         if not self.records:
             self.parse()
+        _apply_tag_override(self.records, override_tags)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(self.records, f, indent=2, ensure_ascii=False)
@@ -289,16 +319,24 @@ class LoopioExcelParser:
             })
         return self.records
 
-    def to_json(self, output_path: str) -> None:
+    def to_json(
+        self,
+        output_path: str,
+        override_tags: Optional[List[str]] = None,
+    ) -> None:
         if not self.records:
             self.parse()
+        _apply_tag_override(self.records, override_tags)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(self.records, f, indent=2, ensure_ascii=False)
 
 
-def detect_and_parse_excel_file(file_path: str,
-                                output_dir: str = "./parsed_json_outputs") -> Optional[str]:
+def detect_and_parse_excel_file(
+    file_path: str,
+    output_dir: str = "./parsed_json_outputs",
+    override_tags: Optional[List[str]] = None,
+) -> Optional[str]:
     """
     Detects which Excel parser to use based on worksheet headers/content.
 
@@ -312,8 +350,12 @@ def detect_and_parse_excel_file(file_path: str,
         records = parser.parse()
         if not records:
             return False
-        parser.to_json(output_path)
+        parser.to_json(output_path, override_tags=override_tags)
         print(success_message.format(count=len(records), path=output_path))
+        if override_tags:
+            printable = ", ".join([tag.strip() for tag in override_tags if tag.strip()])
+            if printable:
+                print(f"Applied override tags [{printable}] to {len(records)} records.")
         return True
 
     try:
@@ -393,8 +435,11 @@ def detect_and_parse_excel_file(file_path: str,
     return None
 
 
-def process_standard_excel_file(file_path: str,
-                                output_dir: str = "./parsed_json_outputs") -> None:
+def process_standard_excel_file(
+    file_path: str,
+    output_dir: str = "./parsed_json_outputs",
+    override_tags: Optional[List[str]] = None,
+) -> None:
     """
     Fallback to process questionnaire or answer library Excel.
     """
@@ -404,8 +449,12 @@ def process_standard_excel_file(file_path: str,
     if q_recs:
         print(f"Using questionnaire export parser for {file_path}")
         q_out = os.path.join(output_dir, f"questionnaire_{os.path.basename(file_path)}.json")
-        q_parser.to_json(q_out)
+        q_parser.to_json(q_out, override_tags=override_tags)
         print(f"Questionnaire parsed: {len(q_recs)} records at {q_out}")
+        if override_tags:
+            printable = ", ".join([tag.strip() for tag in override_tags if tag.strip()])
+            if printable:
+                print(f"Applied override tags [{printable}] to {len(q_recs)} records.")
         return
 
     # Else try answer library
@@ -414,20 +463,27 @@ def process_standard_excel_file(file_path: str,
     if a_recs:
         print(f"Using responsive export parser for {file_path}")
         a_out = os.path.join(output_dir, f"answers_{os.path.basename(file_path)}.json")
-        a_parser.to_json(a_out)
+        a_parser.to_json(a_out, override_tags=override_tags)
         print(f"Answer library parsed: {len(a_recs)} records at {a_out}")
+        if override_tags:
+            printable = ", ".join([tag.strip() for tag in override_tags if tag.strip()])
+            if printable:
+                print(f"Applied override tags [{printable}] to {len(a_recs)} records.")
     else:
         print(f"No records parsed from {file_path}")
 
 
-def process_excel_file_with_detection(file_path: str,
-                                      output_dir: str = "./parsed_json_outputs") -> None:
+def process_excel_file_with_detection(
+    file_path: str,
+    output_dir: str = "./parsed_json_outputs",
+    override_tags: Optional[List[str]] = None,
+) -> None:
     """
     Attempts Loopio detection, else falls back to standard Excel parsers.
     """
-    detected = detect_and_parse_excel_file(file_path, output_dir)
+    detected = detect_and_parse_excel_file(file_path, output_dir, override_tags=override_tags)
     if detected is None:
-        process_standard_excel_file(file_path, output_dir)
+        process_standard_excel_file(file_path, output_dir, override_tags=override_tags)
 
 
 if __name__ == "__main__":
