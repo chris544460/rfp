@@ -1084,7 +1084,7 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -
                     answer_locator=AnswerLocator(type="paragraph_after", paragraph_index=q_block, offset=offset),
                     answer_type=infer_answer_type(q_text, blocks, q_block),
                     confidence=0.6,
-                    meta={"detector": "llm_rich", "block": q_block, "offset": offset}
+                    meta={"detector": "llm_rich", "q_block": q_block, "offset": offset}
                 ))
                 dbg(f"Appended slot from candidate: {results[-1]}")
             elif kind == "table_cell":
@@ -1560,6 +1560,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
                         s.meta = {}
                     s.meta["choices"] = choices
 
+    slots = filter_slots(slots, blocks)
     attach_context(slots, blocks)
     deduped_slots = dedupe_slots(slots)
     dbg(f"Slot count: {len(deduped_slots)}")
@@ -1658,6 +1659,54 @@ def dedupe_slots(slots: List[QASlot]) -> List[QASlot]:
         else:
             out.append(s)
     return out
+
+
+def _resolve_slot_question_text(slot: QASlot, blocks: List[Union[Paragraph, Table]]) -> str:
+    text = (slot.question_text or "").strip()
+    if text:
+        return text
+    meta = slot.meta or {}
+    qb = meta.get("q_block")
+    if isinstance(qb, int) and 0 <= qb < len(blocks):
+        block = blocks[qb]
+        if isinstance(block, Paragraph):
+            return (block.text or "").strip()
+        if isinstance(block, Table):
+            row = meta.get("row")
+            col = meta.get("col")
+            try:
+                if row is not None and col is not None:
+                    return (block.cell(int(row), int(col)).text or "").strip()
+            except Exception:
+                pass
+    return text
+
+
+def filter_slots(slots: List[QASlot], blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
+    """Drop LLM-derived slots whose questions fail our heuristic/ spaCy checks."""
+
+    gated_detectors = {"llm_rich", "two_stage", "raw_text"}
+    cleaned: List[QASlot] = []
+    for slot in slots:
+        meta = slot.meta or {}
+        detector = meta.get("detector")
+        if meta.get("force_insert_after_question"):
+            cleaned.append(slot)
+            continue
+        if detector not in gated_detectors:
+            cleaned.append(slot)
+            continue
+        resolved = _resolve_slot_question_text(slot, blocks)
+        if resolved and _looks_like_question(resolved):
+            if resolved != (slot.question_text or "").strip():
+                slot.question_text = resolved
+            cleaned.append(slot)
+            continue
+        dbg(
+            "filter_slots dropping slot "
+            f"{slot.id} detector={detector} preview={(resolved or slot.question_text or '')[:80]}"
+        )
+    return cleaned
 
 # ───────────────────────── CLI ─────────────────────────
 
