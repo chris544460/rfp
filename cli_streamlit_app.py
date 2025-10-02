@@ -838,7 +838,8 @@ def _run_question_listing(
     slots_payload = extract_slots_from_docx(str(input_path))
     slot_list = slots_payload.get("slots", [])
     skipped_entries = slots_payload.get("skipped_slots", [])
-    if not slot_list and not skipped_entries:
+    heuristic_entries = slots_payload.get("heuristic_skips", [])
+    if not slot_list and not skipped_entries and not heuristic_entries:
         print("[INFO] No questions detected in the document.")
         return
 
@@ -890,28 +891,59 @@ def _run_question_listing(
         if norm:
             slot_lookup.setdefault(norm, []).append((i, q_block, detector))
 
+    combined_skips: List[Dict[str, object]] = []
     if skipped_entries:
-        print()
-        print(f"[INFO] Skipped {len(skipped_entries)} question(s):")
         for entry in skipped_entries:
-            q_text = (entry.get("question_text") or "").strip() or "[blank question text]"
-            reason_key = (entry.get("reason") or "").strip()
-            reason_label = {
-                "table_reference": "mentions a table; tables are not supported yet",
-                "blank_question_text": "blank question text",
-                "heuristic_veto": "failed question heuristics",
-                "llm_veto": "LLM candidate rejected by heuristics",
-            }.get(reason_key, reason_key or "unspecified")
+            combined_skips.append(
+                {
+                    "question_text": (entry.get("question_text") or "").strip() or "[blank question text]",
+                    "reason_key": (entry.get("reason") or "").strip() or "unspecified",
+                    "source": "slot_filter",
+                    "paragraph_index": (entry.get("meta") or {}).get("q_block"),
+                }
+            )
+    if heuristic_entries:
+        for entry in heuristic_entries:
+            combined_skips.append(
+                {
+                    "question_text": (entry.get("question_text") or "").strip() or "[blank question text]",
+                    "reason": entry.get("reason", "unspecified"),
+                    "source": "heuristic",
+                    "paragraph_index": entry.get("paragraph_index"),
+                }
+            )
+
+    if combined_skips:
+        print()
+        print(f"[INFO] Skipped {len(combined_skips)} question(s):")
+        for entry in combined_skips:
+            q_text = entry["question_text"]
+            if entry["source"] == "slot_filter":
+                reason_label = {
+                    "table_reference": "mentions a table; tables are not supported yet",
+                    "blank_question_text": "blank question text",
+                    "heuristic_veto": "failed question heuristics",
+                    "llm_veto": "LLM candidate rejected by heuristics",
+                }.get(entry["reason_key"], entry["reason_key"] or "unspecified")
+            else:
+                reason_label = entry.get("reason", "unspecified")
             print(f"  - {q_text} [{reason_label}]")
-            qb = entry.get("q_block")
+            qb = entry.get("paragraph_index")
             if isinstance(qb, int):
-                question_blocks.add(qb)
+                if entry["source"] == "slot_filter":
+                    question_blocks.add(qb)
                 skipped_blocks.add(qb)
-                skipped_reason_by_block[qb] = reason_key
+                skipped_reason_by_block[qb] = reason_label
+                if entry["source"] == "heuristic":
+                    heuristic_blocks.add(qb)
 
     doc = docx.Document(str(input_path))
     block_items = list(_iter_block_items(doc))
-    heuristic_reasons: Dict[int, str] = {}
+    heuristic_reasons: Dict[int, str] = {
+        entry.get("paragraph_index"): entry.get("reason", "")
+        for entry in heuristic_entries
+        if isinstance(entry.get("paragraph_index"), int)
+    }
     seen_norms: Set[str] = set()
     for idx, block in enumerate(block_items):
         if not isinstance(block, Paragraph):
@@ -929,45 +961,48 @@ def _run_question_listing(
         if norm:
             seen_norms.add(norm)
         slot_hits = slot_lookup.get(norm, []) if norm else []
-        if slot_hits:
-            slot_ids = ", ".join(str(hit[0]) for hit in slot_hits)
-            detectors = {hit[2] for hit in slot_hits if hit[2] and hit[2] != "unknown"}
-            if any(hit[1] is None for hit in slot_hits):
-                detector_note = f" ({', '.join(sorted(detectors))})" if detectors else ""
-                reason = (
-                    "question text matches slot(s) "
-                    f"{slot_ids} but extractor did not record a paragraph index{detector_note}"
-                )
-            else:
-                reason = f"question text already covered by slot(s) {slot_ids}"
+        if idx in heuristic_reasons:
+            reason = heuristic_reasons[idx]
         else:
-            factors: List[str] = []
-            if prev_seen:
-                factors.append("duplicate question text encountered earlier in the document")
-            next_block = block_items[idx + 1] if idx + 1 < len(block_items) else None
-            if isinstance(next_block, Table):
-                factors.append(
-                    "the next block is a table; automatic slot insertion inside tables is disabled"
-                )
-            elif isinstance(next_block, Paragraph):
-                next_text = (next_block.text or "").strip()
-                if next_text and not _looks_like_question(next_text):
-                    factors.append(
-                        "the following paragraph already contains answer text and cannot be overwritten automatically"
+            if slot_hits:
+                slot_ids = ", ".join(str(hit[0]) for hit in slot_hits)
+                detectors = {hit[2] for hit in slot_hits if hit[2] and hit[2] != "unknown"}
+                if any(hit[1] is None for hit in slot_hits):
+                    detector_note = f" ({', '.join(sorted(detectors))})" if detectors else ""
+                    reason = (
+                        "question text matches slot(s) "
+                        f"{slot_ids} but extractor did not record a paragraph index{detector_note}"
                     )
-                elif not next_text:
-                    factors.append(
-                        "a blank paragraph follows, but the extractor still declined to insert due to prior safeguards"
-                    )
+                else:
+                    reason = f"question text already covered by slot(s) {slot_ids}"
             else:
-                if next_block is None:
-                    factors.append("question appears at the end of the document")
-            if not factors:
-                factors.append(
-                    "heuristics saw a question, but no safe answer location was identified"
-                )
-            reason = "; ".join(factors) + "; the extractor skipped slot creation"
-        heuristic_reasons[idx] = reason
+                factors: List[str] = []
+                if prev_seen:
+                    factors.append("duplicate question text encountered earlier in the document")
+                next_block = block_items[idx + 1] if idx + 1 < len(block_items) else None
+                if isinstance(next_block, Table):
+                    factors.append(
+                        "the next block is a table; automatic slot insertion inside tables is disabled"
+                    )
+                elif isinstance(next_block, Paragraph):
+                    next_text = (next_block.text or "").strip()
+                    if next_text and not _looks_like_question(next_text):
+                        factors.append(
+                            "the following paragraph already contains answer text and cannot be overwritten automatically"
+                        )
+                    elif not next_text:
+                        factors.append(
+                            "a blank paragraph follows, but the extractor still declined to insert due to prior safeguards"
+                        )
+                else:
+                    if next_block is None:
+                        factors.append("question appears at the end of the document")
+                if not factors:
+                    factors.append(
+                        "heuristics saw a question, but no safe answer location was identified"
+                    )
+                reason = "; ".join(factors) + "; the extractor skipped slot creation"
+            heuristic_reasons[idx] = reason
 
     if details:
         print("\n[INFO] Detection details:")

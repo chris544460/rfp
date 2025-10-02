@@ -1565,6 +1565,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
     slots, skipped_slots = filter_slots(slots, blocks)
     attach_context(slots, blocks)
     deduped_slots = dedupe_slots(slots)
+    heuristic_skips = collect_heuristic_skips(deduped_slots, blocks)
     dbg(f"Slot count: {len(deduped_slots)}")
     payload = {
         "doc_type": "docx",
@@ -1573,6 +1574,8 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
     }
     if skipped_slots:
         payload["skipped_slots"] = skipped_slots
+    if heuristic_skips:
+        payload["heuristic_skips"] = heuristic_skips
     if ENABLE_SLOTS_DISK_CACHE and cache_path is not None:
         try:
             cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -1620,6 +1623,19 @@ def _sanitize_cached_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload["skipped_slots"] = cleaned_skipped
     elif "skipped_slots" in payload:
         payload.pop("skipped_slots", None)
+
+    heuristics = payload.get("heuristic_skips") or []
+    cleaned_heuristic: List[Dict[str, Any]] = []
+    for entry in heuristics:
+        question = (entry.get("question_text") or "").strip()
+        if not question:
+            continue
+        entry["question_text"] = question
+        cleaned_heuristic.append(entry)
+    if cleaned_heuristic:
+        payload["heuristic_skips"] = cleaned_heuristic
+    elif "heuristic_skips" in payload:
+        payload.pop("heuristic_skips", None)
     return payload
 
 # ─────────────────── context attachment ───────────────────
@@ -1649,6 +1665,71 @@ def attach_context(slots: List[QASlot], blocks):
             s.meta = {}
         s.meta["context"] = ctx
         last_at_level[level] = s
+
+def _normalize_question_text(text: str) -> str:
+    return strip_enum_prefix((text or "").strip()).lower()
+
+
+def _diagnose_paragraph(text: str) -> Dict[str, object]:
+    raw = (text or "").strip()
+    positives: List[str] = []
+    negatives: List[str] = []
+
+    if not raw:
+        negatives.append("blank paragraph")
+        return {
+            "looks_like": False,
+            "positives": positives,
+            "negatives": negatives,
+            "ends_with_q": False,
+        }
+
+    ends_with_q = raw.rstrip().endswith("?")
+    if "?" in raw:
+        positives.append("contains '?'")
+
+    stripped = strip_enum_prefix(raw).strip()
+    lowered = stripped.lower()
+
+    starts_with = next((phrase for phrase in QUESTION_PHRASES if lowered.startswith(phrase)), None)
+    if starts_with:
+        positives.append(f"starts with '{starts_with}'")
+
+    contains_cue = next((phrase for phrase in QUESTION_PHRASES if phrase in lowered), None)
+    if contains_cue and contains_cue != starts_with:
+        positives.append(f"contains '{contains_cue}'")
+
+    if raw.lower().startswith(("question:", "prompt:", "rfp question:")):
+        positives.append("prefixed with question label")
+
+    if _ENUM_PREFIX_RE.match(raw) and contains_cue:
+        positives.append("enumerated with cue phrase")
+
+    if USE_SPACY_QUESTION and _spacy_docx_is_question(raw):
+        positives.append("spaCy detector match")
+
+    looks_like = bool(positives)
+
+    if not looks_like:
+        word_count = len(raw.split())
+        if word_count < 4:
+            negatives.append("fewer than 4 words")
+        if "?" not in raw:
+            negatives.append("no question mark")
+        if not contains_cue:
+            negatives.append("no cue phrase detected")
+        if raw.endswith(":"):
+            negatives.append("ends with ':' (likely label)")
+        if raw.isupper() and len(raw) > 6:
+            negatives.append("all caps (likely heading)")
+
+    return {
+        "looks_like": looks_like,
+        "positives": positives,
+        "negatives": negatives,
+        "ends_with_q": ends_with_q,
+    }
+
 
 def dedupe_slots(slots: List[QASlot]) -> List[QASlot]:
     """Collapse slots with identical questions and overlapping locator ranges."""
@@ -1791,6 +1872,99 @@ def filter_slots(
             continue
         _record_skip(skipped, slot, meta, resolved, "llm_veto")
     return cleaned, skipped
+
+
+def collect_heuristic_skips(slots: List[QASlot], blocks: List[Union[Paragraph, Table]]) -> List[Dict[str, Any]]:
+    """Return diagnostics for question-like paragraphs that lack slots."""
+
+    slot_lookup: Dict[str, List[Dict[str, object]]] = {}
+    question_blocks: Set[int] = set()
+
+    for slot in slots:
+        meta = slot.meta or {}
+        qb = meta.get("q_block")
+        if isinstance(qb, int):
+            question_blocks.add(qb)
+        norm = _normalize_question_text(slot.question_text)
+        if norm:
+            slot_lookup.setdefault(norm, []).append(
+                {
+                    "slot_id": slot.id,
+                    "q_block": qb,
+                    "detector": meta.get("detector"),
+                }
+            )
+
+    diagnostics: List[Dict[str, Any]] = []
+    seen_norms: Set[str] = set()
+
+    for idx, block in enumerate(blocks):
+        if not isinstance(block, Paragraph):
+            continue
+        text = (block.text or "").strip()
+        if not text:
+            continue
+        if idx in question_blocks:
+            continue
+
+        diag = _diagnose_paragraph(text)
+        if not diag.get("looks_like"):
+            continue
+
+        norm = _normalize_question_text(text)
+        prev_seen = bool(norm and norm in seen_norms)
+        if norm:
+            seen_norms.add(norm)
+
+        slot_hits = slot_lookup.get(norm, []) if norm else []
+        if slot_hits:
+            slot_ids = ", ".join(item["slot_id"] for item in slot_hits)
+            detectors = sorted({item["detector"] for item in slot_hits if item.get("detector") and item.get("detector") != "unknown"})
+            if any(item.get("q_block") is None for item in slot_hits):
+                detector_note = f" ({', '.join(detectors)})" if detectors else ""
+                reason = (
+                    "question text matches slot(s) "
+                    f"{slot_ids} but extractor did not record a paragraph index{detector_note}"
+                )
+            else:
+                reason = f"question text already covered by slot(s) {slot_ids}"
+        else:
+            factors: List[str] = []
+            next_block = blocks[idx + 1] if idx + 1 < len(blocks) else None
+            if prev_seen:
+                factors.append("duplicate question text encountered earlier in the document")
+            if isinstance(next_block, Table):
+                factors.append(
+                    "the next block is a table; automatic slot insertion inside tables is disabled"
+                )
+            elif isinstance(next_block, Paragraph):
+                next_text = (next_block.text or "").strip()
+                if next_text and not _looks_like_question(next_text):
+                    factors.append(
+                        "the following paragraph already contains answer text and cannot be overwritten automatically"
+                    )
+                elif not next_text:
+                    factors.append(
+                        "a blank paragraph follows, but the extractor still declined to insert due to prior safeguards"
+                    )
+            else:
+                if next_block is None:
+                    factors.append("question appears at the end of the document")
+            if not factors:
+                factors.append("heuristics saw a question, but no safe answer location was identified")
+            reason = "; ".join(factors)
+
+        diagnostics.append(
+            {
+                "paragraph_index": idx,
+                "question_text": text,
+                "reason": reason,
+                "positives": diag.get("positives") or [],
+                "negatives": diag.get("negatives") or [],
+            }
+        )
+
+    return diagnostics
 
 # ───────────────────────── CLI ─────────────────────────
 
