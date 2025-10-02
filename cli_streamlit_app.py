@@ -837,11 +837,12 @@ def _run_question_listing(
 
     slots_payload = extract_slots_from_docx(str(input_path))
     slot_list = slots_payload.get("slots", [])
-    if not slot_list:
+    skipped_entries = slots_payload.get("skipped_slots", [])
+    if not slot_list and not skipped_entries:
         print("[INFO] No questions detected in the document.")
         return
 
-    print(f"[INFO] Detected {len(slot_list)} questions:")
+    print(f"[INFO] Detected {len(slot_list)} question(s):")
     print()
 
     def _normalize_question_text(text: str) -> str:
@@ -850,6 +851,8 @@ def _run_question_listing(
     details: List[Tuple[int, str, str]] = []
     question_blocks: set[int] = set()
     heuristic_blocks: set[int] = set()
+    skipped_blocks: set[int] = set()
+    skipped_reason_by_block: Dict[int, str] = {}
     slot_lookup: Dict[str, List[Tuple[int, Optional[int], str]]] = {}
     for i, slot in enumerate(slot_list, 1):
         q_text = (slot.get("question_text") or "").strip() or "[blank question text]"
@@ -886,6 +889,25 @@ def _run_question_listing(
         norm = _normalize_question_text(q_text)
         if norm:
             slot_lookup.setdefault(norm, []).append((i, q_block, detector))
+
+    if skipped_entries:
+        print()
+        print(f"[INFO] Skipped {len(skipped_entries)} question(s):")
+        for entry in skipped_entries:
+            q_text = (entry.get("question_text") or "").strip() or "[blank question text]"
+            reason_key = (entry.get("reason") or "").strip()
+            reason_label = {
+                "table_reference": "mentions a table; tables are not supported yet",
+                "blank_question_text": "blank question text",
+                "heuristic_veto": "failed question heuristics",
+                "llm_veto": "LLM candidate rejected by heuristics",
+            }.get(reason_key, reason_key or "unspecified")
+            print(f"  - {q_text} [{reason_label}]")
+            qb = entry.get("q_block")
+            if isinstance(qb, int):
+                question_blocks.add(qb)
+                skipped_blocks.add(qb)
+                skipped_reason_by_block[qb] = reason_key
 
     doc = docx.Document(str(input_path))
     block_items = list(_iter_block_items(doc))
@@ -965,7 +987,10 @@ def _run_question_listing(
             ends_q = bool(diag.get("ends_with_q"))
             label: List[str] = []
             if idx in question_blocks:
-                label.append("assigned" if idx not in heuristic_blocks else "assigned-heuristic")
+                if idx in skipped_blocks:
+                    label.append("skipped")
+                else:
+                    label.append("assigned" if idx not in heuristic_blocks else "assigned-heuristic")
             if looks_like and idx not in question_blocks:
                 label.append("heuristic-match")
             if ends_q:
@@ -975,7 +1000,16 @@ def _run_question_listing(
             tags = ", ".join(label)
             preview = text[:160] + ("…" if len(text) > 160 else "")
             print(f"  [{idx}] {tags}: {preview}")
-            if idx in heuristic_blocks:
+            if idx in skipped_blocks:
+                reason_key = skipped_reason_by_block.get(idx, "")
+                reason_label = {
+                    "table_reference": "mentions a table; tables are not supported yet",
+                    "blank_question_text": "blank question text",
+                    "heuristic_veto": "failed question heuristics",
+                    "llm_veto": "LLM candidate rejected by heuristics",
+                }.get(reason_key, reason_key or "unspecified")
+                print(f"        ↳ skipped: {reason_label}")
+            elif idx in heuristic_blocks:
                 cues = diag.get("positives") or []
                 if cues:
                     print(f"        ↳ cues (promoted heuristic): {', '.join(cues)}")
