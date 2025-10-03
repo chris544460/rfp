@@ -340,6 +340,82 @@ def _table_cell_text(table: Table, r: int, c: int) -> str:
         return ""
 
 
+_CELL_PLACEHOLDER_RE = re.compile(r"^(_+|\[\s*(?:insert|enter|provide)[^\]]*\])\s*$", re.IGNORECASE)
+
+
+def _is_blank_cell_text(text: str) -> bool:
+    if text is None:
+        return True
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if _CELL_PLACEHOLDER_RE.match(stripped):
+        return True
+    return False
+
+
+def _table_to_matrix(table: Table) -> List[List[str]]:
+    matrix: List[List[str]] = []
+    try:
+        row_count = len(table.rows)
+        if row_count == 0:
+            return matrix
+        col_count = len(table.columns)
+        for r in range(row_count):
+            row_vals: List[str] = []
+            for c in range(col_count):
+                row_vals.append(_table_cell_text(table, r, c))
+            matrix.append(row_vals)
+    except Exception:
+        return []
+    return matrix
+
+
+def _row_label(matrix: List[List[str]], row: int, exclude_col: int) -> str:
+    if not (0 <= row < len(matrix)):
+        return ""
+    for idx, value in enumerate(matrix[row]):
+        if idx == exclude_col:
+            continue
+        if value and not _is_blank_cell_text(value):
+            return value.strip()
+    return ""
+
+
+def _column_label(matrix: List[List[str]], col: int, upto_row: int) -> str:
+    if not matrix:
+        return ""
+    total_rows = len(matrix)
+    if col < 0 or col >= len(matrix[0]):
+        return ""
+    start = min(max(upto_row, 0), total_rows - 1)
+    for r in range(start, -1, -1):
+        candidate = matrix[r][col]
+        if candidate and not _is_blank_cell_text(candidate):
+            return candidate.strip()
+    # look ahead if nothing above
+    for r in range(start + 1, total_rows):
+        candidate = matrix[r][col]
+        if candidate and not _is_blank_cell_text(candidate):
+            return candidate.strip()
+    return ""
+
+
+def _identify_header_rows(matrix: List[List[str]]) -> Set[int]:
+    header_rows: Set[int] = set()
+    if not matrix:
+        return header_rows
+    header_keywords = {"question", "prompt", "requirement", "item", "description"}
+    answer_keywords = {"response", "answer", "information", "details"}
+    for r, row in enumerate(matrix[:3]):
+        non_blank = [cell.strip().lower() for cell in row if cell and not _is_blank_cell_text(cell)]
+        if not non_blank:
+            continue
+        if header_keywords.intersection(non_blank) and answer_keywords.intersection(non_blank):
+            header_rows.add(r)
+    return header_rows
+
+
 def _slot_question_index(slot: QASlot) -> Optional[int]:
     meta = slot.meta or {}
     qb = meta.get("q_block")
@@ -939,6 +1015,103 @@ def detect_response_label_then_blank(blocks: List[Union[Paragraph, Table]]) -> L
     return slots
 
 
+def _table_question_slots(
+    question_text: str,
+    table: Table,
+    table_index: int,
+    question_block: int,
+) -> List[QASlot]:
+    matrix = _table_to_matrix(table)
+    if not matrix:
+        return []
+    header_rows = _identify_header_rows(matrix)
+    slots: List[QASlot] = []
+    base_prompt = (question_text or "Provide the requested information.").strip()
+    for r, row in enumerate(matrix):
+        for c, value in enumerate(row):
+            if not _is_blank_cell_text(value):
+                continue
+            if r in header_rows:
+                continue
+            row_label = _row_label(matrix, r, c)
+            col_label = _column_label(matrix, c, r - 1)
+            if not row_label and not col_label:
+                continue
+            context_parts: List[str] = []
+            if row_label:
+                context_parts.append(row_label.strip())
+            if col_label and (not row_label or col_label.lower() not in row_label.lower()):
+                context_parts.append(col_label.strip())
+            if not context_parts:
+                context_parts.append(f"Row {r + 1}, Column {c + 1}")
+            context = " / ".join(context_parts)
+            prompt = f"{base_prompt} — {context}. Respond with a concise answer."
+            slot = QASlot(
+                id=f"slot_{uuid.uuid4().hex[:8]}",
+                question_text=prompt,
+                answer_locator=AnswerLocator(
+                    type="table_cell",
+                    table_index=table_index,
+                    row=r,
+                    col=c,
+                ),
+                answer_type="text",
+                confidence=0.65,
+                meta={
+                    "detector": "table_reference_question",
+                    "q_block": question_block,
+                    "table_index": table_index,
+                    "row_index": r,
+                    "column_index": c,
+                    "row_header": row_label,
+                    "column_header": col_label,
+                    "allow_table_reference": True,
+                    "style_hint": "concise",
+                },
+            )
+            slots.append(slot)
+    return slots
+
+
+def detect_question_followed_by_table(blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
+    slots: List[QASlot] = []
+    seen_tables: Set[int] = set()
+    for idx, block in enumerate(blocks):
+        if not isinstance(block, Paragraph):
+            continue
+        text = (block.text or "").strip()
+        if not text:
+            continue
+        if not _mentions_table(text):
+            continue
+        if not (_quick_question_candidate(text) or _looks_like_question(text)):
+            continue
+
+        next_table_index: Optional[int] = None
+        for j in range(idx + 1, len(blocks)):
+            candidate = blocks[j]
+            if isinstance(candidate, Table):
+                next_table_index = j
+                break
+            if isinstance(candidate, Paragraph):
+                paragraph_text = (candidate.text or "").strip()
+                if paragraph_text and not _is_blank_para(candidate):
+                    next_table_index = None
+                    break
+        if next_table_index is None:
+            continue
+        if next_table_index in seen_tables:
+            continue
+
+        table_block = blocks[next_table_index]
+        table_position = _running_table_index(blocks, next_table_index)
+        table_slots = _table_question_slots(text, table_block, table_position, idx)
+        if table_slots:
+            slots.extend(table_slots)
+            seen_tables.add(next_table_index)
+    return slots
+
+
 def detect_question_followed_by_text(blocks: List[Union[Paragraph, Table]]) -> List[QASlot]:
     slots: List[QASlot] = []
     para_index = -1
@@ -1405,6 +1578,7 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
             for detector in (
                 detect_para_question_with_blank,
                 detect_question_followed_by_text,
+                detect_question_followed_by_table,
                 detect_two_col_table_q_blank,
                 detect_response_label_then_blank,
             ):
@@ -1508,6 +1682,8 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
     else:
         for detector in (
             detect_para_question_with_blank,
+            detect_question_followed_by_text,
+            detect_question_followed_by_table,
             detect_two_col_table_q_blank,
             detect_response_label_then_blank,
         ):
@@ -1857,7 +2033,7 @@ def filter_slots(
             continue
         if resolved != (slot.question_text or "").strip():
             slot.question_text = resolved
-        if _mentions_table(resolved):
+        if _mentions_table(resolved) and not meta.get("allow_table_reference"):
             meta.setdefault("skip_reason", "table_reference")
             _record_skip(skipped, slot, meta, resolved, "table_reference")
             continue
