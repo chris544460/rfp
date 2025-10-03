@@ -619,6 +619,35 @@ def _print_table_trace(
             print(f"       answer: {answer_text}")
 
 
+def _is_table_slot(slot: Dict[str, object]) -> bool:
+    locator = slot.get("answer_locator") or {}
+    return (locator or {}).get("type") == "table_cell"
+
+
+def _sanitize_table_answer(answer: object, include_citations: bool) -> object:
+    if isinstance(answer, dict):
+        text = str(answer.get("text", ""))
+    else:
+        text = str(answer or "")
+    text = re.sub(r"\[\d+\]", "", text)
+    parts = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        stripped = stripped.lstrip("-•*→•")
+        parts.append(stripped.strip())
+    prose = " ".join(parts)
+    prose = re.sub(r"\s+", " ", prose).strip()
+    if not prose:
+        prose = "No relevant information available."
+    if not prose.endswith(('.', '!', '?')):
+        prose += '.'
+    if include_citations:
+        return {"text": prose, "citations": {}}
+    return prose
+
+
 def process_docx_slots(
     input_path: Path,
     output_dir: Path,
@@ -648,10 +677,13 @@ def process_docx_slots(
         duration = time.perf_counter() - start
         return result, duration
 
+    slot_lookup: Dict[str, Dict[str, object]] = {}
+
     with ThreadPoolExecutor(max_workers=worker_limit) as pool:
         for idx, slot in enumerate(slots, start=1):
             question = (slot.get("question_text") or "").strip()
             slot_id = slot.get("id", f"slot_{idx}")
+            slot_lookup[slot_id] = slot
             if not question:
                 with timer.track(
                     "docx:slot_skipped",
@@ -688,10 +720,14 @@ def process_docx_slots(
                     f"Failed to generate answer for slot {meta.get('slot_id')}: {exc}"
                 ) from exc
             timer.add("docx:answer_generation", duration, meta=meta)
-            answers_by_id[meta["slot_id"]] = answer
+            slot = slot_lookup.get(meta["slot_id"])
+            processed_answer = answer
+            if slot and _is_table_slot(slot):
+                processed_answer = _sanitize_table_answer(answer, include_citations=False)
+            answers_by_id[meta["slot_id"]] = processed_answer
             completed += 1
             if show_live:
-                text = answer.get("text", "") if isinstance(answer, dict) else answer
+                text = processed_answer.get("text", "") if isinstance(processed_answer, dict) else processed_answer
                 print(f"  ↳ {text}\n")
             else:
                 print(
