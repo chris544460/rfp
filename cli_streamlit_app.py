@@ -555,6 +555,70 @@ def process_excel(
     return payload
 
 
+def _render_table_matrix(table: Table) -> List[List[str]]:
+    return [[(cell.text or "").strip() for cell in row.cells] for row in table.rows]
+
+
+def _print_table_trace(
+    doc: docx.document.Document,
+    slots: List[Dict[str, object]],
+    answers_by_id: Dict[str, object],
+) -> None:
+    grouped: Dict[int, List[Dict[str, object]]] = defaultdict(list)
+    for slot in slots:
+        locator = slot.get("answer_locator") or {}
+        if (locator or {}).get("type") != "table_cell":
+            continue
+        try:
+            t_idx = int(locator.get("table_index"))
+            row = int(locator.get("row", 0))
+            col = int(locator.get("col", 0))
+        except (TypeError, ValueError):
+            continue
+        grouped[t_idx].append({
+            "slot": slot,
+            "row": row,
+            "col": col,
+        })
+
+    if not grouped:
+        print("[TRACE] No table-cell slots detected.")
+        return
+
+    for t_idx in sorted(grouped):
+        if t_idx >= len(doc.tables):
+            print(f"[TRACE] Table {t_idx} missing from document; skipping.")
+            continue
+        table = doc.tables[t_idx]
+        matrix = _render_table_matrix(table)
+        rows = len(matrix)
+        cols = len(matrix[0]) if matrix else 0
+        print(f"[TRACE] Table {t_idx}: {rows} row(s) × {cols} column(s)")
+        for r, row_vals in enumerate(matrix):
+            preview = " | ".join(row_vals)
+            if len(preview) > 160:
+                preview = preview[:157] + "…"
+            print(f"  Row {r}: {preview}")
+        for entry in sorted(grouped[t_idx], key=lambda item: (item["row"], item["col"])):
+            slot = entry["slot"]
+            slot_id = slot.get("id")
+            question = (slot.get("question_text") or "").strip()
+            if len(question) > 160:
+                question = question[:157] + "…"
+            answer_obj = answers_by_id.get(slot_id)
+            if isinstance(answer_obj, dict):
+                answer_text = answer_obj.get("text", "")
+            else:
+                answer_text = str(answer_obj or "")
+            if len(answer_text) > 160:
+                answer_text = answer_text[:157] + "…"
+            row = entry["row"]
+            col = entry["col"]
+            print(f"    ↳ slot {slot_id} → cell({row}, {col})")
+            print(f"       question: {question}")
+            print(f"       answer: {answer_text}")
+
+
 def process_docx_slots(
     input_path: Path,
     output_dir: Path,
@@ -562,6 +626,7 @@ def process_docx_slots(
     include_citations: bool,
     docx_write_mode: str,
     show_live: bool,
+    trace_tables: bool,
     *,
     timer: Optional[StageTimer] = None,
     concurrency: Optional[int] = None,
@@ -683,6 +748,12 @@ def process_docx_slots(
     }
     if skipped_slots:
         payload["skipped_slots"] = skipped_slots
+
+    if trace_tables:
+        print("[TRACE] Rendering table slot assignments…")
+        doc = docx.Document(str(input_path))
+        _print_table_trace(doc, slots, answers_by_id)
+
     return payload
 
 
@@ -1614,6 +1685,7 @@ def run_document_mode(args: argparse.Namespace) -> None:
             include_citations,
             args.docx_write_mode,
             args.show_live,
+            args.docx_trace_tables,
             timer=timer,
             concurrency=concurrency,
         )
@@ -1953,6 +2025,7 @@ def _wizard_document() -> None:
 
     docx_as_text = False
     docx_write_mode = "fill"
+    docx_trace_tables = False
     if suffix == ".docx":
         docx_as_text = _prompt_bool("Treat DOCX as plain text?", False)
         if not docx_as_text:
@@ -1965,6 +2038,10 @@ def _wizard_document() -> None:
                     "replace": "Overwrite existing answers",
                     "append": "Append to existing content",
                 }[mode],
+            )
+            docx_trace_tables = _prompt_bool(
+                "Print table layout and slot assignments?",
+                False,
             )
 
     show_live = _prompt_bool("Show each question/answer while processing?", False)
@@ -1985,6 +2062,7 @@ def _wizard_document() -> None:
         output_dir=output_dir or None,
         docx_as_text=docx_as_text,
         docx_write_mode=docx_write_mode,
+        docx_trace_tables=docx_trace_tables,
         show_live=show_live,
         debug=debug_flag,
         dump_hits=None,
@@ -2150,6 +2228,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["fill", "replace", "append"],
         default="fill",
         help="How answers are written back to DOCX templates",
+    )
+    doc.add_argument(
+        "--docx-trace-tables",
+        action="store_true",
+        help="Print DOCX table layouts and slot assignments while processing",
     )
     doc.add_argument("--show-live", action="store_true", help="Print each question/answer as it is produced")
     doc.add_argument(
