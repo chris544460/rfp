@@ -630,13 +630,26 @@ def _sanitize_table_answer(answer: object, include_citations: bool) -> object:
     else:
         text = str(answer or "")
     text = re.sub(r"\[\d+\]", "", text)
-    parts = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        stripped = stripped.lstrip("-•*→•")
-        parts.append(stripped.strip())
+
+    def _collapse_table_like(line: str) -> str:
+        working = line.replace("\t", " | ").strip()
+        if not working:
+            return ""
+        if set(working) <= {"|", ":", "-", " ", "+", "="}:
+            return ""
+        if "|" in working:
+            segments = [seg.strip(" -") for seg in working.strip("|").split("|")]
+            segments = [seg for seg in segments if seg and set(seg) != {'-'}]
+            working = " ".join(segments)
+        working = working.lstrip("-•*→•").strip()
+        return working
+
+    parts: List[str] = []
+    for raw_line in text.splitlines():
+        collapsed = _collapse_table_like(raw_line)
+        if collapsed:
+            parts.append(collapsed)
+
     prose = " ".join(parts)
     prose = re.sub(r"\s+", " ", prose).strip()
     if not prose:
