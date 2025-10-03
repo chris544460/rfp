@@ -640,7 +640,7 @@ def _sanitize_table_answer(answer: object, include_citations: bool) -> object:
     prose = " ".join(parts)
     prose = re.sub(r"\s+", " ", prose).strip()
     if not prose:
-        prose = "No relevant information available."
+        prose = "No information found."
     if not prose.endswith(('.', '!', '?')):
         prose += '.'
     if include_citations:
