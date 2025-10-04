@@ -22,3 +22,9 @@ workflow fully functional without requiring any cloud credentials.
 
 The `azure-feedback` branch retains the previous Azure Blob integration for when
 remote logging should be re-enabled.
+
+### Azure Connectivity Check (new branch)
+
+- Install the optional Azure SDK dependency: `pip install azure-storage-blob`.
+- Export `AZURE_FEEDBACK_CONNECTION_STRING` (or `AZURE_STORAGE_CONNECTION_STRING`) with your blob storage credentials.
+- Run `python azure_connection_check.py --container YOUR_CONTAINER` to confirm the account and container are reachable. Use `--verbose` for more metadata.
