@@ -8,6 +8,8 @@ import os
 import sys
 from typing import Optional
 
+from dotenv import load_dotenv
+
 try:
     from azure.core.exceptions import ResourceNotFoundError
     from azure.storage.blob import BlobServiceClient
@@ -62,6 +64,8 @@ def _check_container(service: BlobServiceClient, container_name: str) -> None:
 
 def main(argv: Optional[list[str]] = None) -> None:
     args = _parse_args(argv)
+    # Load environment variables from a .env file before resolving credentials.
+    load_dotenv(override=False)
     connection_string = _resolve_connection_string(args.connection_string)
 
     try:
