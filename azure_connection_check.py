@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import uuid
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -47,6 +48,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Optional container name to verify accessibility.",
     )
     parser.add_argument(
+        "--write-probe",
+        action="store_true",
+        help="Attempt to upload and delete a temporary blob to check write permissions (requires --container).",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print additional account metadata when available.",
@@ -60,6 +66,34 @@ def _check_container(service: BlobServiceClient, container_name: str) -> None:
         container_client.get_container_properties()
     except ResourceNotFoundError as exc:
         raise SystemExit(f"Container '{container_name}' not found or inaccessible: {exc}")
+
+
+def _check_write_access(service: BlobServiceClient, container_name: str) -> None:
+    container_client = service.get_container_client(container_name)
+    blob_name = f"azure-connection-check-write-probe-{uuid.uuid4().hex}"
+    blob_client = container_client.get_blob_client(blob_name)
+    payload = b"azure connection check write probe"
+
+    try:
+        blob_client.upload_blob(payload, length=len(payload))
+    except Exception as exc:
+        raise SystemExit(
+            f"Failed to upload probe blob to container '{container_name}'. This credential likely lacks write permissions: {exc}"
+        )
+
+    print(
+        f"Successfully uploaded probe blob '{blob_name}' to container '{container_name}'. Write access appears to be working."
+    )
+
+    try:
+        blob_client.delete_blob()
+    except ResourceNotFoundError:
+        pass
+    except Exception as exc:
+        print(
+            f"WARNING: Unable to delete probe blob '{blob_name}' from container '{container_name}': {exc}",
+            file=sys.stderr,
+        )
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -85,6 +119,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     if args.container:
         _check_container(service_client, args.container)
         print(f"Verified access to container '{args.container}'.")
+
+        if args.write_probe:
+            _check_write_access(service_client, args.container)
+    elif args.write_probe:
+        raise SystemExit("--write-probe requires --container to be set.")
 
 
 if __name__ == "__main__":
