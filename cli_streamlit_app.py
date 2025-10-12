@@ -1111,7 +1111,7 @@ def _run_question_listing(
             q_text = entry["question_text"]
             if entry["source"] == "slot_filter":
                 reason_label = {
-                    "table_reference": "mentions a table; tables are not supported yet",
+                    "table_reference": "references a table",
                     "blank_question_text": "blank question text",
                     "heuristic_veto": "failed question heuristics",
                     "llm_veto": "LLM candidate rejected by heuristics",
@@ -1229,7 +1229,7 @@ def _run_question_listing(
             if idx in skipped_blocks:
                 reason_key = skipped_reason_by_block.get(idx, "")
                 reason_label = {
-                    "table_reference": "mentions a table; tables are not supported yet",
+                    "table_reference": "references a table",
                     "blank_question_text": "blank question text",
                     "heuristic_veto": "failed question heuristics",
                     "llm_veto": "LLM candidate rejected by heuristics",

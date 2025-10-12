@@ -2033,10 +2033,9 @@ def filter_slots(
             continue
         if resolved != (slot.question_text or "").strip():
             slot.question_text = resolved
-        if _mentions_table(resolved) and not meta.get("allow_table_reference"):
-            meta.setdefault("skip_reason", "table_reference")
-            _record_skip(skipped, slot, meta, resolved, "table_reference")
-            continue
+        # Previously, slots mentioning tables were skipped unless explicitly allowed.
+        # Tables are now allowed; do not skip solely due to table references.
+        # Keeping detection utilities for potential diagnostics, but no skip here.
         if _looks_like_question(resolved):
             cleaned.append(slot)
             continue
