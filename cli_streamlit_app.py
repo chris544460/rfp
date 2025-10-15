@@ -207,7 +207,11 @@ def resolve_llm_client(framework: str, model: str):
 
 
 def load_fund_tags() -> List[str]:
-    path = Path("~/derivs-tool/rfp-ai-tool/structured_extraction/embedding_data.json").expanduser()
+    # Use embedding data from the current repository
+    path = (Path(__file__).resolve().parent /
+            "structured_extraction" /
+            "parsed_json_outputs" /
+            "embedding_data.json")
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)

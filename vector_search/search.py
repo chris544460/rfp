@@ -26,13 +26,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-ROOT        = Path("/u1/chrismar/derivs-tool/rfp-ai-tool")
+# Resolve repository root dynamically (two levels up from this file)
+ROOT        = Path(__file__).resolve().parent.parent
 VECTOR_DIR  = ROOT / "vector_store"
 ANSWER_DIR  = VECTOR_DIR / "answer"
 QUESTION_DIR= VECTOR_DIR / "question"
 BLEND_DIR   = VECTOR_DIR / "blend"   # optional
 
-RECORDS_PATH = ROOT / "structured_extraction" / "embedding_data.json"
+RECORDS_PATH = ROOT / "structured_extraction" / "parsed_json_outputs" / "embedding_data.json"
 
 SURF_URL    = os.getenv(
     "SURFACE_EMB_URL",
