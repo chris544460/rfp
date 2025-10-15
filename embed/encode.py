@@ -30,6 +30,12 @@ import faiss
 import requests
 from tqdm import tqdm
 from requests.auth import HTTPBasicAuth
+from requests.adapters import HTTPAdapter
+try:
+    from urllib3.util.retry import Retry
+except Exception:
+    # Fallback for environments where urllib3 Retry import path differs
+    from requests.packages.urllib3.util.retry import Retry  # type: ignore
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,9 +51,37 @@ HEADERS_BASE  = {
     "VND.com.blackrock.API-Key": os.environ["aladdin_studio_api_key"],
 }
 AUTH          = HTTPBasicAuth(os.environ["aladdin_user"], os.environ["aladdin_passwd"])
-RETRIES       = 3
+RETRIES       = 5
 TIMEOUT       = 90  # seconds
 MODEL_DEFAULT = "text-embedding-ada-002"
+
+
+def _build_session() -> requests.Session:
+    """Create a requests Session with retry/backoff for 429 and 5xx.
+
+    - Respects `Retry-After` header when present
+    - Retries POST on 429/500/502/503/504
+    - Connection pool sized for small thread pools
+    """
+    status_forcelist = (429, 500, 502, 503, 504)
+    retry = Retry(
+        total=RETRIES,
+        connect=3,
+        read=3,
+        backoff_factor=1.5,
+        status_forcelist=status_forcelist,
+        allowed_methods={"POST"},
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=16, pool_maxsize=16)
+    sess = requests.Session()
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    return sess
+
+
+SESSION = _build_session()
 
 # I/O helpers
 
@@ -102,12 +136,24 @@ def embed_one(text: str, model: str) -> List[float]:
         HEADERS["VND.com.blackrock.Origin-Timestamp"] = time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
         )
-        r = requests.post(EMB_URL, json=payload, headers=HEADERS, auth=AUTH, timeout=TIMEOUT)
+        r = SESSION.post(EMB_URL, json=payload, headers=HEADERS, auth=AUTH, timeout=TIMEOUT)
         if r.status_code == 200:
             return r.json()["vector"]  # Surface returns "vector" key
+        # If rate limited, honor Retry-After when present; else exponential backoff with jitter
+        retry_after = r.headers.get("Retry-After")
+        if retry_after:
+            try:
+                sleep_for = float(retry_after)
+            except ValueError:
+                sleep_for = attempt * 2.0
+        else:
+            sleep_for = attempt * 2.0
+        if r.status_code == 429:
+            # Light logging to aid troubleshooting without being noisy
+            print("Received 429 Too Many Requests — backing off...")
         if attempt == RETRIES:
             r.raise_for_status()
-        time.sleep(attempt * 2)  # back-off
+        time.sleep(sleep_for)
 
 # ----------------------------------------
 # main
@@ -156,34 +202,51 @@ def main():
     print(f"✔️ {N} records loaded")
     print(f"Embedding with model = '{args.model}', question_weight = {args.weight}")
 
-    # 2) Embed all answer-texts in parallel
-    print("⚙️ Embedding all answer-texts …")
-    ans_vecs: List[List[float]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = [ex.submit(embed_one, txt, args.model) for txt in ans_texts]
-        for f in tqdm(concurrent.futures.as_completed(futures), total=N):
-            ans_vecs.append(f.result())
-    ans_vecs = np.array(ans_vecs, dtype="float32")  # shape = (N, D)
+    # 2) Embed
+    # Preserve order: use executor.map which yields results in input order.
+    # Also avoid embedding the unused side when weight is 0.0 or 1.0.
+    w = float(args.weight)
+    EPS = 1e-9
+    ans_vecs: np.ndarray | None = None
+    q_vecs: np.ndarray | None = None
 
-    # 3) Embed all question-texts in parallel
-    print("⚙️ Embedding all question-texts …")
-    q_vecs: List[List[float]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = [ex.submit(embed_one, txt, args.model) for txt in q_texts]
-        for f in tqdm(concurrent.futures.as_completed(futures), total=N):
-            q_vecs.append(f.result())
-    q_vecs = np.array(q_vecs, dtype="float32")  # shape = (N, D)
+    if w <= EPS:
+        print("⚙️ Embedding all answer-texts … (w≈0: skipping questions)")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
+            ans_vecs_list = list(tqdm(ex.map(lambda t: embed_one(t, args.model), ans_texts), total=N))
+        ans_vecs = np.array(ans_vecs_list, dtype="float32")
+    elif w >= 1.0 - EPS:
+        print("⚙️ Embedding all question-texts … (w≈1: skipping answers)")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
+            q_vecs_list = list(tqdm(ex.map(lambda t: embed_one(t, args.model), q_texts), total=N))
+        q_vecs = np.array(q_vecs_list, dtype="float32")
+    else:
+        print("⚙️ Embedding all answer-texts …")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
+            ans_vecs_list = list(tqdm(ex.map(lambda t: embed_one(t, args.model), ans_texts), total=N))
+        ans_vecs = np.array(ans_vecs_list, dtype="float32")
+
+        print("⚙️ Embedding all question-texts …")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
+            q_vecs_list = list(tqdm(ex.map(lambda t: embed_one(t, args.model), q_texts), total=N))
+        q_vecs = np.array(q_vecs_list, dtype="float32")
 
     # 4) Blend answer-vectors + question-vectors
-    w = args.weight
     print(f"Blending vectors with weight w = {w} …")
-    # Normalize each answer-vector and question-vector to unit length first
-    ans_norm = ans_vecs / np.linalg.norm(ans_vecs, axis=1, keepdims=True)
-    q_norm   = q_vecs   / np.linalg.norm(q_vecs,   axis=1, keepdims=True)
-
-    # Blend and re-normalize
-    blended = (1.0 - w) * ans_norm + w * q_norm
-    blended = blended / np.linalg.norm(blended, axis=1, keepdims=True)  # shape = (N, D)
+    if w <= EPS:
+        # answer-only
+        assert ans_vecs is not None
+        blended = ans_vecs / np.linalg.norm(ans_vecs, axis=1, keepdims=True)
+    elif w >= 1.0 - EPS:
+        # question-only
+        assert q_vecs is not None
+        blended = q_vecs / np.linalg.norm(q_vecs, axis=1, keepdims=True)
+    else:
+        assert ans_vecs is not None and q_vecs is not None
+        ans_norm = ans_vecs / np.linalg.norm(ans_vecs, axis=1, keepdims=True)
+        q_norm   = q_vecs   / np.linalg.norm(q_vecs,   axis=1, keepdims=True)
+        blended  = (1.0 - w) * ans_norm + w * q_norm
+        blended  = blended / np.linalg.norm(blended, axis=1, keepdims=True)
 
     # 5) Build and save FAISS index from blended vectors
     print("Building FAISS index …")
