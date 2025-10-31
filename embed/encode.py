@@ -121,6 +121,48 @@ def save_metadata(ids: List[str], out_dir: Path):
     with open(out_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump({"ids": ids}, f, indent=2)
 
+
+def save_azure_payload(
+    records: List[Dict],
+    vectors: np.ndarray,
+    ids: List[str],
+    output_path: Path,
+) -> None:
+    """
+    Write embeddings + metadata to JSON for Azure AI Search ingestion.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    seen_ids = set()
+    payload: List[Dict[str, object]] = []
+
+    for idx, (rec, vec, rec_id) in enumerate(zip(records, vectors, ids)):
+        base_id = str(rec_id)
+        azure_id = base_id
+        if azure_id in seen_ids:
+            azure_id = f"{base_id}__{idx}"
+        seen_ids.add(azure_id)
+
+        meta = dict(rec.get("metadata", {}))
+
+        payload.append(
+            {
+                "id": azure_id,
+                "content": rec.get("text", ""),
+                "question": meta.get("question", ""),
+                "answer_index": meta.get("answer_index"),
+                "section": meta.get("section"),
+                "tags": meta.get("tags", []),
+                "source": meta.get("source"),
+                "metadata": meta,
+                "embedding": np.asarray(vec, dtype="float32").tolist(),
+            }
+        )
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
 # HTTP wrapper for single-text embedding via Surface
 
 def embed_one(text: str, model: str) -> List[float]:
@@ -174,6 +216,13 @@ def main():
     ap.add_argument(
         "--output", required=True,
         help="Directory where faiss.index and metadata.json will be written."
+    )
+    ap.add_argument(
+        "--azure-output",
+        help=(
+            "Optional path to JSON file containing blended embeddings + metadata "
+            "for Azure AI Search ingestion."
+        ),
     )
     ap.add_argument(
         "--workers", type=int, default=4,
@@ -247,6 +296,11 @@ def main():
         q_norm   = q_vecs   / np.linalg.norm(q_vecs,   axis=1, keepdims=True)
         blended  = (1.0 - w) * ans_norm + w * q_norm
         blended  = blended / np.linalg.norm(blended, axis=1, keepdims=True)
+
+    if args.azure_output:
+        azure_path = Path(args.azure_output)
+        print(f"Writing Azure AI Search payload to {azure_path} …")
+        save_azure_payload(recs, blended, ids, azure_path)
 
     # 5) Build and save FAISS index from blended vectors
     print("Building FAISS index …")
