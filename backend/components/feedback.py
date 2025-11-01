@@ -220,14 +220,39 @@ class FeedbackUI:
             return
 
         button_key = f"feedback_btn_{feedback_key}"
+        dialog_factory = getattr(st, "dialog", None)
+        has_dialog = callable(dialog_factory)
+
         if st.button("Feedback", key=button_key):
-            st.session_state["feedback_dialog_target"] = feedback_key
-            st.session_state["suspend_autorefresh"] = True
+            if has_dialog:
+                st.session_state["feedback_dialog_target"] = feedback_key
+                st.session_state["suspend_autorefresh"] = True
+            else:
+                submitted = self.render_card_feedback_form(
+                    card_index=card_index,
+                    question=question_text,
+                    answer_text=answer_text,
+                    run_context=run_context,
+                    title="How was this answer?",
+                )
+                if submitted:
+                    submitted_map[feedback_key] = True
+                return
+
+        if not has_dialog:
+            self.render_card_feedback_form(
+                card_index=card_index,
+                question=question_text,
+                answer_text=answer_text,
+                run_context=run_context,
+                title="How was this answer?",
+            )
+            return
 
         active_target = st.session_state.get("feedback_dialog_target")
         if active_target == feedback_key:
             dialog_key = f"feedback_dialog_{feedback_key}"
-            with st.dialog("How was this answer?", key=dialog_key):
+            with dialog_factory("How was this answer?", key=dialog_key):
                 container = st.container()
                 submitted = self.render_card_feedback_form(
                     card_index=card_index,
