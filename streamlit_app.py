@@ -571,6 +571,19 @@ def _reset_doc_downloads() -> None:
     st.session_state["doc_downloads"] = {}
 
 
+def _trigger_rerun() -> None:
+    """Request Streamlit to rerun regardless of API availability."""
+    rerun_fn = getattr(st, "experimental_rerun", None)
+    if callable(rerun_fn):
+        rerun_fn()
+        return
+    rerun_fn = getattr(st, "rerun", None)
+    if callable(rerun_fn):
+        rerun_fn()
+        return
+    raise RuntimeError("Streamlit rerun API unavailable; update Streamlit to a newer version.")
+
+
 def _reset_doc_workflow(*, clear_file: bool = False) -> None:
     """Clear cached document workflow artifacts while optionally keeping the file reference."""
     if clear_file:
@@ -1476,7 +1489,7 @@ def main():
             _reset_doc_workflow(clear_file=True)
             st.success("Document cleared. Upload a new file to start again.")
             try:
-                st.rerun()
+                _trigger_rerun()
             except Exception:
                 st.stop()
     if view_mode == "Developer":
@@ -1598,7 +1611,7 @@ def main():
                     pass
                 st.success("Chat history cleared.")
                 try:
-                    st.rerun()
+                    _trigger_rerun()
                 except Exception:
                     pass
         sidebar.markdown("### References")
@@ -1979,7 +1992,7 @@ def main():
                     "extra_doc_names": extra_doc_names,
                 }
                 _schedule_document_job(config)
-                st.experimental_rerun()
+                _trigger_rerun()
 
         job = st.session_state.get("doc_job")
         if job and job.get("status") in {"running", "ready_for_finalize"}:
@@ -2010,7 +2023,7 @@ def main():
             else:
                 if not st.session_state.get("suspend_autorefresh", False):
                     time.sleep(0.25)
-                    st.experimental_rerun()
+                    _trigger_rerun()
         elif job and job.get("status") == "finished":
             _register_job_downloads(job)
             _render_document_job(job, include_citations=include_citations, show_live=show_live)
@@ -2039,7 +2052,7 @@ def main():
                             except Exception:
                                 pass
                             st.success("Saved run cleared.")
-                            st.experimental_rerun()
+                            _trigger_rerun()
             else:
                 st.info("Upload a document and click Run to begin.")
 
