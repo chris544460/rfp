@@ -83,6 +83,8 @@ import re
 import io
 import html
 import contextlib
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from uuid import uuid4
@@ -163,6 +165,9 @@ def initialize_session_state() -> None:
     st.session_state.setdefault("doc_extracted_questions", None)
     st.session_state.setdefault("doc_questions_answered", False)
     st.session_state.setdefault("doc_answers_payload", None)
+    st.session_state.setdefault("doc_job", None)
+    st.session_state.setdefault("suspend_autorefresh", False)
+    st.session_state.setdefault("feedback_dialog_target", None)
 
     try:
         persist_key = st.session_state.get("current_user_id", st.session_state.session_id)
@@ -265,7 +270,9 @@ def render_card_feedback_form(
     question: str,
     answer_text: str,
     run_context: Optional[dict] = None,
-) -> None:
+    container: Optional[Any] = None,
+    title: str = "How was this answer?",
+) -> bool:
     """Render a compact feedback form below a Q/A card.
 
     Uses document-level highlight/improvement tags and records a feedback
@@ -275,9 +282,12 @@ def render_card_feedback_form(
     run_name = (run_context or {}).get("uploaded_name") or "document"
     feedback_key = f"{run_name}_card_{int(card_index)}"
     if submitted_map.get(feedback_key):
-        st.caption("Feedback recorded — thank you!")
-        return
-    with st.expander("How was this answer?", expanded=False):
+        target = container or st
+        target.caption("Feedback recorded — thank you!")
+        return False
+
+    context_manager = container or st.expander(title, expanded=False)
+    with context_manager:
         rating_key = f"card_rating_{feedback_key}"
         rating_choice = st.radio(
             "Overall",
@@ -331,7 +341,8 @@ def render_card_feedback_form(
                 log_feedback(record)
                 submitted_map[feedback_key] = True
                 st.success("Feedback saved — thank you!")
-
+                return True
+    return False
 
 def _shorten_question_label(text: str) -> str:
     cleaned = (text or '').strip()
@@ -405,7 +416,17 @@ def _normalize_citation_entry(comment):
     return [('', '', value, '')]
 
 
-def _render_live_answer(placeholder, answer, comments, include_citations: bool, *, card_index: Optional[int] = None, question_text: Optional[str] = None, run_context: Optional[dict] = None) -> None:
+def _render_live_answer(
+    placeholder,
+    answer,
+    comments,
+    include_citations: bool,
+    *,
+    card_index: Optional[int] = None,
+    question_text: Optional[str] = None,
+    run_context: Optional[dict] = None,
+    feedback_mode: str = "expander",
+) -> None:
     if placeholder is None:
         return
     if isinstance(answer, dict):
@@ -417,45 +438,89 @@ def _render_live_answer(placeholder, answer, comments, include_citations: bool, 
     placeholder.empty()
     with placeholder.container():
         st.markdown(f"**Answer:** {ans_text}")
-        if not include_citations:
-            return
+        if include_citations:
+            raw_items = comments if isinstance(comments, (list, tuple)) else [comments]
+            normalized = []
+            for item in raw_items or []:
+                normalized.extend(_normalize_citation_entry(item))
 
-        raw_items = comments if isinstance(comments, (list, tuple)) else [comments]
-        normalized = []
-        for item in raw_items or []:
-            normalized.extend(_normalize_citation_entry(item))
+            entries = []
+            for label, source, snippet, page in normalized:
+                if any([label, source, snippet, page]):
+                    entries.append((label, source, snippet, page))
 
-        entries = []
-        for label, source, snippet, page in normalized:
-            if any([label, source, snippet, page]):
-                entries.append((label, source, snippet, page))
+            for i, (label, source, snippet, page) in enumerate(entries, 1):
+                title_parts = []
+                if label:
+                    title_parts.append(f"[{label}]")
+                if source:
+                    title_parts.append(source)
+                if page:
+                    title_parts.append(page)
+                title = ' — '.join(title_parts).strip() or f"Citation {i}"
+                with st.expander(title, expanded=False):
+                    body = (snippet or '').strip()
+                    if body:
+                        st.markdown(body)
+                    else:
+                        st.caption('No snippet provided.')
 
-        for i, (label, source, snippet, page) in enumerate(entries, 1):
-            title_parts = []
-            if label:
-                title_parts.append(f"[{label}]")
-            if source:
-                title_parts.append(source)
-            if page:
-                title_parts.append(page)
-            title = ' — '.join(title_parts).strip() or f"Citation {i}"
-            with st.expander(title, expanded=False):
-                body = (snippet or '').strip()
-                if body:
-                    st.markdown(body)
-                else:
-                    st.caption('No snippet provided.')
-
-        # Per-card feedback
-        try:
+    # Per-card feedback
+    try:
+        if feedback_mode == "dialog":
+            _render_feedback_dialog(
+                card_index=int(card_index or 0),
+                question_text=str(question_text or ''),
+                answer_text=ans_text,
+                run_context=run_context,
+            )
+        else:
             render_card_feedback_form(
                 card_index=int(card_index or 0),
                 question=str(question_text or ''),
                 answer_text=ans_text,
                 run_context=run_context,
             )
-        except Exception:
-            pass
+    except Exception:
+        pass
+
+
+def _render_feedback_dialog(
+    *,
+    card_index: int,
+    question_text: str,
+    answer_text: str,
+    run_context: Optional[dict],
+) -> None:
+    run_name = (run_context or {}).get("uploaded_name") or "document"
+    feedback_key = f"{run_name}_card_{card_index}"
+    submitted_map = st.session_state.setdefault("doc_card_feedback_submitted", {})
+    if submitted_map.get(feedback_key):
+        st.caption("Feedback recorded — thank you!")
+        return
+
+    button_key = f"feedback_btn_{feedback_key}"
+    if st.button("Feedback", key=button_key):
+        st.session_state["feedback_dialog_target"] = feedback_key
+        st.session_state["suspend_autorefresh"] = True
+
+    active_target = st.session_state.get("feedback_dialog_target")
+    if active_target == feedback_key:
+        dialog_key = f"feedback_dialog_{feedback_key}"
+        with st.dialog("How was this answer?", key=dialog_key):
+            container = st.container()
+            submitted = render_card_feedback_form(
+                card_index=card_index,
+                question=question_text,
+                answer_text=answer_text,
+                run_context=run_context,
+                container=container,
+                title="How was this answer?",
+            )
+            close_clicked = st.button("Close", key=f"{dialog_key}_close")
+            if submitted or close_clicked:
+                st.session_state["feedback_dialog_target"] = None
+                st.session_state["suspend_autorefresh"] = False
 
 
 
@@ -523,6 +588,454 @@ def _reset_doc_workflow(*, clear_file: bool = False) -> None:
     st.session_state["doc_processing_started_at"] = None
     st.session_state["doc_processing_finished_at"] = None
     _reset_doc_downloads()
+
+
+def _schedule_document_job(config: Dict[str, Any]) -> None:
+    """Prepare question extraction and schedule answer generation futures."""
+
+    input_path = config["input_path"]
+    suffix = config["suffix"]
+    include_citations = config["include_citations"]
+    extra_doc_paths = config.get("extra_doc_paths", [])
+    extra_doc_names = config.get("extra_doc_names", [])
+    framework = config["framework"]
+    llm_model = config["llm_model"]
+
+    llm = CompletionsClient(model=llm_model) if framework == "aladdin" else OpenAIClient(model=llm_model)
+    responder = Responder(
+        llm_client=llm,
+        search_mode=config["search_mode"],
+        fund=config["fund"],
+        k=config["k_max_hits"],
+        length=config["length_opt"],
+        approx_words=config["approx_words"],
+        min_confidence=config["min_confidence"],
+        include_citations=include_citations,
+        extra_docs=list(extra_doc_paths),
+    )
+    extractor = QuestionExtractor(llm)
+
+    job: Dict[str, Any] = {
+        "status": "running",
+        "mode": None,
+        "config": config,
+        "executor": None,
+        "futures": [],
+        "future_info": {},
+        "answers": [],
+        "questions": [],
+        "questions_text": [],
+        "schema": [],
+        "slots_payload": {},
+        "skipped_slots": [],
+        "heuristic_skips": [],
+        "downloads": [],
+        "run_context": None,
+        "extra_doc_names": extra_doc_names,
+        "started_at": datetime.utcnow().isoformat(),
+        "completed": 0,
+        "downloads_registered": False,
+        "completion_notified": False,
+    }
+
+    if suffix in {".xlsx", ".xls"}:
+        questions = extractor.extract(input_path)
+        schema = extractor.last_details.get("schema") or []
+        questions_text = [(entry.get("question") or "").strip() for entry in questions]
+        total = len(questions_text)
+        job.update(
+            {
+                "mode": "excel",
+                "questions": questions,
+                "questions_text": questions_text,
+                "schema": schema,
+                "answers": [None] * total,
+            }
+        )
+        if total > 0:
+            worker_limit = _resolve_concurrency(None) or total
+            worker_limit = max(1, min(worker_limit, total))
+            executor = ThreadPoolExecutor(max_workers=worker_limit)
+            job["executor"] = executor
+            for idx, question_text in enumerate(questions_text):
+                future = executor.submit(_run_excel_task, responder, question_text)
+                job["futures"].append(future)
+                job["future_info"][future] = {"index": idx, "question_text": question_text}
+    elif suffix == ".docx" and not config["docx_as_text"]:
+        questions = extractor.extract(input_path)
+        details = extractor.last_details
+        slots_payload = details.get("slots_payload") or {}
+        slot_list = [entry.get("slot") for entry in questions]
+        slot_list = [slot for slot in slot_list if slot is not None]
+        questions_text = [(slot.get("question_text") or "").strip() for slot in slot_list]
+        total = len(slot_list)
+        job.update(
+            {
+                "mode": "docx_slots",
+                "questions": slot_list,
+                "questions_text": questions_text,
+                "slots_payload": slots_payload,
+                "skipped_slots": details.get("skipped_slots") or [],
+                "heuristic_skips": details.get("heuristic_skips") or [],
+                "answers": [None] * total,
+            }
+        )
+        if total > 0:
+            worker_limit = _resolve_concurrency(None) or total
+            worker_limit = max(1, min(worker_limit, total))
+            executor = ThreadPoolExecutor(max_workers=worker_limit)
+            job["executor"] = executor
+            for idx, slot in enumerate(slot_list):
+                future = executor.submit(_run_docx_task, responder, slot)
+                job["futures"].append(future)
+                job["future_info"][future] = {"index": idx, "slot_id": slot.get("id")}
+    else:
+        treat_docx_as_text = suffix == ".docx" and config["docx_as_text"]
+        questions = extractor.extract(input_path, treat_docx_as_text=treat_docx_as_text)
+        questions_text = [(entry.get("question") or "").strip() for entry in questions]
+        total = len(questions_text)
+        job.update(
+            {
+                "mode": "document_summary",
+                "questions": questions,
+                "questions_text": questions_text,
+                "answers": [None] * total,
+                "treat_docx_as_text": treat_docx_as_text,
+            }
+        )
+        if total > 0:
+            worker_limit = _resolve_concurrency(None) or total
+            worker_limit = max(1, min(worker_limit, total))
+            executor = ThreadPoolExecutor(max_workers=worker_limit)
+            job["executor"] = executor
+            for idx, question_text in enumerate(questions_text):
+                future = executor.submit(_run_summary_task, responder, question_text)
+                job["futures"].append(future)
+                job["future_info"][future] = {"index": idx, "question_text": question_text}
+
+    job["include_citations"] = include_citations
+    job["responder_model"] = llm_model
+    st.session_state["doc_job"] = job
+    st.session_state["doc_processing_state"] = "running"
+    st.session_state["doc_processing_started_at"] = datetime.utcnow().isoformat()
+    st.session_state["doc_processing_result"] = None
+    st.session_state["doc_processing_error"] = None
+    st.session_state["doc_feedback_submitted"] = False
+    st.session_state["doc_card_feedback_submitted"] = {}
+
+
+def _run_excel_task(responder: Responder, question_text: str) -> Dict[str, Any]:
+    result = responder.answer(question_text)
+    return {
+        "question": question_text,
+        "answer_payload": result,
+        "storage_answer": {
+            "text": result["text"],
+            "citations": result["citations"],
+        },
+        "comments": result.get("raw_comments", []),
+    }
+
+
+def _run_docx_task(responder: Responder, slot: Dict[str, Any]) -> Dict[str, Any]:
+    question_text = (slot.get("question_text") or "").strip()
+    result = responder.answer(question_text)
+    if _is_table_slot(slot):
+        sanitized = _sanitize_table_answer(result)
+        display_payload: Any = sanitized
+        storage_answer = {"text": sanitized, "citations": {}}
+        comments: List[Any] = []
+    else:
+        display_payload = result
+        storage_answer = {"text": result["text"], "citations": result["citations"]}
+        comments = result.get("raw_comments", [])
+    return {
+        "question": question_text,
+        "slot_id": slot.get("id"),
+        "answer_payload": display_payload,
+        "storage_answer": storage_answer,
+        "comments": comments,
+    }
+
+
+def _run_summary_task(responder: Responder, question_text: str) -> Dict[str, Any]:
+    result = responder.answer(question_text)
+    return {
+        "question": question_text,
+        "answer_payload": result,
+        "storage_answer": {
+            "text": result["text"],
+            "citations": result["citations"],
+        },
+        "comments": result.get("raw_comments", []),
+    }
+
+
+def _update_document_job(job: Dict[str, Any]) -> None:
+    """Poll futures for completed answers and update job bookkeeping."""
+
+    if job.get("status") != "running":
+        return
+
+    future_info: Dict[Any, Dict[str, Any]] = job.get("future_info", {})
+    answers: List[Optional[Dict[str, Any]]] = job.get("answers", [])
+    changed = False
+
+    for future in list(future_info.keys()):
+        info = future_info[future]
+        if future.done():
+            idx = info["index"]
+            if 0 <= idx < len(answers) and answers[idx] is None:
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    error_text = f"[error] {exc}"
+                    result = {
+                        "question": info.get("question_text") or "",
+                        "answer_payload": error_text,
+                        "storage_answer": {"text": error_text, "citations": {}},
+                        "comments": [],
+                        "error": True,
+                    }
+                answers[idx] = result
+                changed = True
+            del future_info[future]
+
+    if changed:
+        job["completed"] = sum(1 for entry in answers if entry is not None)
+
+    if not future_info:
+        executor = job.get("executor")
+        if executor:
+            executor.shutdown(wait=False)
+            job["executor"] = None
+        if job.get("status") == "running":
+            job["status"] = "ready_for_finalize"
+
+
+def _finalize_document_job(job: Dict[str, Any]) -> None:
+    """Generate output artifacts once all answers are ready."""
+
+    if job.get("status") not in {"ready_for_finalize", "running"}:
+        return
+
+    include_citations = job.get("include_citations", True)
+    config = job["config"]
+    answers: List[Optional[Dict[str, Any]]] = job.get("answers", [])
+    questions_text: List[str] = job.get("questions_text", [])
+    filler = DocumentFiller()
+    mode = job.get("mode")
+
+    if mode == "excel":
+        schema = job.get("schema") or []
+        qa_results = []
+        for idx in range(len(answers)):
+            entry = answers[idx]
+            question_text = questions_text[idx] if idx < len(questions_text) else ""
+            if entry is None:
+                storage = {"text": "No answer generated.", "citations": {}}
+                comments: List[Any] = []
+            else:
+                storage = entry["storage_answer"]
+                comments = entry.get("comments", [])
+            qa_results.append(
+                {
+                    "question": question_text,
+                    "answer": storage.get("text", ""),
+                    "citations": storage.get("citations", {}),
+                    "raw_comments": comments,
+                }
+            )
+        bundle = filler.build_excel_bundle(
+            source_path=config["input_path"],
+            schema=schema,
+            qa_results=qa_results,
+            include_citations=include_citations,
+            mode="fill",
+        )
+        run_context = {
+            "mode": "excel",
+            "uploaded_name": config["file_name"],
+            "fund": config["fund"],
+            "search_mode": config["search_mode"],
+            "include_citations": include_citations,
+            "length": config["length_opt"],
+            "approx_words": config["approx_words"],
+            "extra_documents": job.get("extra_doc_names", []),
+            "qa_pairs": bundle.get("qa_pairs", []),
+            "schema": schema,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    elif mode == "docx_slots":
+        slots_payload = job.get("slots_payload") or {}
+        slots = job.get("questions") or []
+        qa_results = []
+        for idx in range(len(answers)):
+            entry = answers[idx]
+            slot = slots[idx] if idx < len(slots) else {}
+            question_text = questions_text[idx] if idx < len(questions_text) else (slot.get("question_text") or "")
+            slot_id = slot.get("id")
+            if entry is None:
+                storage = {"text": "No answer generated.", "citations": {}}
+                comments = []
+            else:
+                storage = entry["storage_answer"]
+                comments = entry.get("comments", [])
+                if slot_id is None:
+                    slot_id = entry.get("slot_id")
+            qa_results.append(
+                {
+                    "question": question_text,
+                    "answer": storage.get("text", ""),
+                    "citations": storage.get("citations", {}),
+                    "raw_comments": comments,
+                    "slot_id": slot_id,
+                }
+            )
+        bundle = filler.build_docx_slot_bundle(
+            source_path=config["input_path"],
+            slots_payload=slots_payload,
+            qa_results=qa_results,
+            include_citations=include_citations,
+            write_mode=config["docx_write_mode"],
+        )
+        run_context = {
+            "mode": "docx_slots",
+            "uploaded_name": config["file_name"],
+            "fund": config["fund"],
+            "search_mode": config["search_mode"],
+            "include_citations": include_citations,
+            "docx_write_mode": config["docx_write_mode"],
+            "extra_documents": job.get("extra_doc_names", []),
+            "qa_pairs": bundle.get("qa_pairs", []),
+            "slots": slots_payload,
+            "skipped_slots": job.get("skipped_slots", []),
+            "heuristic_skips": job.get("heuristic_skips", []),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    else:
+        qa_results = []
+        total = len(questions_text)
+        for idx in range(total):
+            entry = answers[idx] if idx < len(answers) else None
+            if entry is None:
+                storage = {"text": "No answer generated.", "citations": {}}
+                comments = []
+            else:
+                storage = entry["storage_answer"]
+                comments = entry.get("comments", [])
+            qa_results.append(
+                {
+                    "answer": storage.get("text", ""),
+                    "citations": storage.get("citations", {}),
+                    "raw_comments": comments,
+                }
+            )
+        bundle = filler.build_summary_bundle(
+            questions=questions_text,
+            qa_results=qa_results,
+            include_citations=include_citations,
+        )
+        run_context = {
+            "mode": "document_summary",
+            "uploaded_name": config["file_name"],
+            "fund": config["fund"],
+            "search_mode": config["search_mode"],
+            "include_citations": include_citations,
+            "length": config["length_opt"],
+            "approx_words": config["approx_words"],
+            "extra_documents": job.get("extra_doc_names", []),
+            "qa_pairs": bundle.get("qa_pairs", []),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+    job["downloads"] = bundle.get("downloads", [])
+    job["run_context"] = run_context
+    job["status"] = "finished"
+    job["completed"] = len([entry for entry in answers if entry is not None])
+
+
+def _register_job_downloads(job: Dict[str, Any]) -> None:
+    """Persist job downloads into session download bucket once."""
+
+    if not job or not job.get("downloads"):
+        if job is not None:
+            job["downloads_registered"] = True
+        return
+    if job.get("downloads_registered"):
+        return
+    _reset_doc_downloads()
+    for item in job["downloads"]:
+        _store_doc_download(
+            item.get("key", f"download_{uuid4().hex[:8]}"),
+            label=item.get("label", "Download file"),
+            data=item.get("data", b""),
+            file_name=item.get("file_name", "output"),
+            mime=item.get("mime"),
+            order=item.get("order", 0),
+        )
+    job["downloads_registered"] = True
+
+
+def _render_document_job(job: Dict[str, Any], *, include_citations: bool, show_live: bool) -> None:
+    """Display current progress and answered cards for an in-flight or completed job."""
+
+    if not job:
+        return
+
+    answers: List[Optional[Dict[str, Any]]] = job.get("answers", [])
+    questions_text: List[str] = job.get("questions_text", [])
+    total = len(answers)
+    if total == 0:
+        st.info("No questions detected for this document.")
+        return
+    completed = job.get("completed", sum(1 for entry in answers if entry is not None))
+
+    if total:
+        progress_value = completed / total
+        st.progress(progress_value, text=f"{completed}/{total}")
+
+    if job.get("mode") == "docx_slots":
+        skipped = job.get("skipped_slots") or []
+        heuristic = job.get("heuristic_skips") or []
+        if skipped or heuristic:
+            st.warning(f"Skipped {len(skipped) + len(heuristic)} question(s) that cannot be answered automatically.")
+            with st.expander("View skipped questions", expanded=False):
+                for entry in skipped:
+                    reason = entry.get("reason") or "unspecified"
+                    q = (entry.get("question_text") or "").strip() or "[blank question text]"
+                    st.markdown(f"- **{q}** — {reason}")
+                for entry in heuristic:
+                    reason = entry.get("reason", "unspecified")
+                    q = (entry.get("question_text") or "").strip() or "[blank question text]"
+                    st.markdown(f"- **{q}** — {reason}")
+
+    qa_box = st.container()
+    for idx in range(total):
+        question_text = questions_text[idx] if idx < len(questions_text) else f"Question {idx + 1}"
+        placeholder = _create_live_placeholder(qa_box, idx, question_text)
+        entry = answers[idx]
+        if entry is None:
+            continue
+        payload = entry.get("answer_payload")
+        comments = entry.get("comments", [])
+        run_context = job.get("run_context") or {
+            "uploaded_name": job["config"]["file_name"],
+            "fund": job["config"]["fund"],
+            "search_mode": job["config"]["search_mode"],
+            "include_citations": include_citations,
+        }
+        _render_live_answer(
+            placeholder,
+            payload,
+            comments,
+            include_citations,
+            card_index=idx,
+            question_text=question_text,
+            run_context=run_context,
+            feedback_mode="dialog",
+        )
+
 
 
 def _remember_uploaded_file(uploaded_file, upload_token: str) -> None:
@@ -621,6 +1134,7 @@ def render_saved_qa_pairs(run_context: Optional[dict]) -> None:
             card_index=idx,
             question_text=q_text,
             run_context=run_context,
+            feedback_mode="dialog",
         )
 
 def render_document_feedback_section(run_context: Optional[dict]) -> None:
@@ -1424,668 +1938,112 @@ def main():
             st.session_state.question_history = history
     else:
         run_clicked = st.button("Run")
-        processing_state = st.session_state.get("doc_processing_state", "idle")
-        processing_result = st.session_state.get("doc_processing_result")
-        processing_error = st.session_state.get("doc_processing_error")
-        st.session_state.setdefault("doc_downloads", {})
-        downloads_container = st.container()
         file_info = st.session_state.get("doc_file_info") or {}
         document_ready = bool(st.session_state.get("doc_file_ready") and file_info)
-        cached_path = _get_cached_input_path()
-
-        if processing_state == "started" and not run_clicked:
-            st.info("Document processing is in progress. Please wait while the run completes.")
-        if processing_state == "error" and processing_error and not run_clicked:
-            st.error(f"Document processing failed: {processing_error}")
-            st.session_state.doc_processing_state = "idle"
-            st.session_state.doc_processing_error = None
-            st.session_state.doc_processing_result = None
-        if processing_state == "finished" and processing_result is not None and not run_clicked:
-            st.success("Document processing completed. You can download the results below or start another run.")
-            render_saved_qa_pairs(processing_result)
+        job = st.session_state.get("doc_job")
 
         if run_clicked:
-            if processing_state == "started":
+            if job and job.get("status") == "running":
                 st.warning("A document run is already in progress. Please wait for it to finish.")
-                st.stop()
-            if not document_ready:
+            elif not document_ready:
                 st.warning("Please upload a document before running.")
-                st.stop()
-            if not fund:
+            elif not fund:
                 st.warning("Please select a fund or strategy before running.")
-                st.stop()
-            if cached_path is None:
-                st.warning("The uploaded document is no longer available. Please upload it again.")
-                _reset_doc_workflow(clear_file=True)
-                st.stop()
+            elif not file_info.get("path"):
+                st.warning("The uploaded document could not be cached. Please upload it again.")
+            else:
+                extra_doc_paths: List[str] = []
+                extra_doc_names: List[str] = []
+                if extra_uploads:
+                    for extra in extra_uploads:
+                        saved_path = save_uploaded_file(extra)
+                        extra_doc_paths.append(saved_path)
+                        extra_doc_names.append(extra.name)
+                config = {
+                    "input_path": file_info.get("path"),
+                    "file_name": file_info.get("name"),
+                    "suffix": file_info.get("suffix", "").lower(),
+                    "include_citations": include_citations,
+                    "show_live": show_live,
+                    "search_mode": search_mode,
+                    "fund": fund,
+                    "k_max_hits": int(k_max_hits),
+                    "length_opt": length_opt,
+                    "approx_words": int(approx_words) if approx_words else None,
+                    "min_confidence": float(min_confidence),
+                    "llm_model": llm_model,
+                    "framework": framework,
+                    "docx_as_text": docx_as_text,
+                    "docx_write_mode": docx_write_mode,
+                    "extra_doc_paths": extra_doc_paths,
+                    "extra_doc_names": extra_doc_names,
+                }
+                _schedule_document_job(config)
+                st.experimental_rerun()
 
-            answers_ready = bool(st.session_state.get("doc_questions_answered") and processing_result)
-            if answers_ready:
-                st.session_state.doc_processing_state = "finished"
-                st.info("Using saved answers from the previous run.")
-                render_saved_qa_pairs(processing_result)
-                render_document_feedback_section(processing_result)
+        job = st.session_state.get("doc_job")
+        if job and job.get("status") in {"running", "ready_for_finalize"}:
+            _update_document_job(job)
+            if job.get("status") == "ready_for_finalize":
+                _finalize_document_job(job)
+                job = st.session_state.get("doc_job")
+            _render_document_job(job, include_citations=include_citations, show_live=show_live)
+            if job.get("status") == "finished":
+                _register_job_downloads(job)
+                if not job.get("completion_notified"):
+                    st.success("Document processing completed. You can download the results below or start another run.")
+                    st.session_state["doc_processing_state"] = "finished"
+                    st.session_state["doc_processing_result"] = job.get("run_context")
+                    st.session_state["doc_processing_error"] = None
+                    st.session_state["doc_processing_finished_at"] = datetime.utcnow().isoformat()
+                    st.session_state["latest_doc_run"] = job.get("run_context")
+                    try:
+                        persist_key = st.session_state.get("current_user_id", st.session_state.get("session_id", ""))
+                        if job.get("run_context"):
+                            save_latest_doc_run(persist_key, job["run_context"])
+                    except Exception:
+                        pass
+                    job["completion_notified"] = True
+                    if job.get("run_context"):
+                        render_document_feedback_section(job["run_context"])
+                        render_saved_qa_pairs(job["run_context"])
+            else:
+                if not st.session_state.get("suspend_autorefresh", False):
+                    time.sleep(0.25)
+                    st.experimental_rerun()
+        elif job and job.get("status") == "finished":
+            _register_job_downloads(job)
+            _render_document_job(job, include_citations=include_citations, show_live=show_live)
+            st.session_state["doc_processing_state"] = "finished"
+            st.session_state["doc_processing_result"] = job.get("run_context")
+            if job.get("run_context"):
+                render_document_feedback_section(job["run_context"])
+                render_saved_qa_pairs(job["run_context"])
+        else:
+            latest = st.session_state.get("latest_doc_run")
+            if latest:
+                render_document_feedback_section(latest)
+                render_saved_qa_pairs(latest)
                 with st.container():
                     col1, col2 = st.columns([1, 6])
                     with col1:
-                        if st.button("Clear saved run", key="clear_saved_run_cached", help="Remove the last run from memory and disk."):
+                        if st.button("Clear saved run", key="clear_saved_run", help="Remove the last run from memory and disk."):
                             st.session_state.latest_doc_run = None
                             st.session_state.doc_feedback_submitted = False
+                            st.session_state["doc_job"] = None
                             _reset_doc_workflow(clear_file=False)
                             _reset_doc_downloads()
                             try:
-                                _persist_key = st.session_state.get("current_user_id", st.session_state.get("session_id", ""))
-                                clear_latest_doc_run(_persist_key)
+                                persist_key = st.session_state.get("current_user_id", st.session_state.get("session_id", ""))
+                                clear_latest_doc_run(persist_key)
                             except Exception:
                                 pass
                             st.success("Saved run cleared.")
-                            try:
-                                st.rerun()
-                            except Exception:
-                                pass
-                _render_doc_downloads(downloads_container)
+                            st.experimental_rerun()
             else:
-                st.session_state.doc_processing_state = "started"
-                st.session_state.doc_processing_result = None
-                st.session_state.doc_processing_error = None
-                st.session_state.doc_processing_started_at = datetime.utcnow().isoformat()
-                st.session_state.doc_feedback_submitted = False
-                st.session_state.latest_doc_run = None
-                _reset_doc_downloads()
-                run_context: Optional[Dict[str, Any]] = None
-                phase_placeholder = st.empty()
-                sub_placeholder = st.empty()
-                dev_placeholder = st.empty()
-                dev_logs: List[str] = []
-                state = {"step": 0, "phase": None}
-                suffix = (file_info.get("suffix") or Path(file_info.get("name", "")).suffix or "").lower()
-                base_steps = 1
-                if suffix in (".xlsx", ".xls"):
-                    branch_steps = 4
-                elif suffix == ".docx" and not docx_as_text:
-                    branch_steps = 3
-                else:
-                    branch_steps = 3
-                total_steps = base_steps + branch_steps + 1
-                step_bar = st.progress(0)
+                st.info("Upload a document and click Run to begin.")
 
-                def log_step(dev_msg: str, user_msg: Optional[str] = None) -> None:
-                    if user_msg and user_msg != state["phase"]:
-                        state["phase"] = user_msg
-                        phase_placeholder.markdown(f"**{state['phase']}**")
-                        sub_placeholder.empty()
-                    sub_placeholder.markdown(dev_msg)
-                    if view_mode == "Developer":
-                        dev_logs.append(f"{state['phase']}: {dev_msg}")
-                        dev_placeholder.markdown("\n".join(f"{i + 1}. {m}" for i, m in enumerate(dev_logs)))
-                    state["step"] += 1
-                    step_bar.progress(state["step"] / total_steps, text=state["phase"])
+        _render_doc_downloads()
 
-                try:
-                    log_step("Loading cached document", "Preparing document...")
-                    input_path = cached_path
-                    extra_docs = [save_uploaded_file(f) for f in extra_uploads] if extra_uploads else None
-                    llm = CompletionsClient(model=llm_model) if framework == "aladdin" else OpenAIClient(model=llm_model)
-                    responder = Responder(
-                        llm_client=llm,
-                        search_mode=search_mode,
-                        fund=fund,
-                        k=int(k_max_hits),
-                        length=length_opt,
-                        approx_words=int(approx_words) if approx_words else None,
-                        min_confidence=float(min_confidence),
-                        include_citations=include_citations,
-                        extra_docs=extra_docs or [],
-                    )
-                    extractor = QuestionExtractor(llm)
-                    filler = DocumentFiller()
-                    questions_state = st.session_state.get("doc_extracted_questions")
-                    answers_payload = st.session_state.get("doc_answers_payload")
-
-                    if suffix in (".xlsx", ".xls"):
-                        if not questions_state or questions_state.get("mode") != "excel":
-                            log_step("Analyzing workbook", "Reading workbook...")
-                            questions = extractor.extract(input_path)
-                            schema = extractor.last_details.get("schema") or []
-                            payload = [dict(entry) for entry in questions]
-                            st.session_state["doc_extracted_questions"] = {
-                                "mode": "excel",
-                                "questions": payload,
-                                "schema": schema,
-                            }
-                            st.session_state["doc_answers_payload"] = [None] * len(payload)
-                        else:
-                            log_step("Reusing extracted questions", "Using cached workbook questions.")
-                        questions_state = st.session_state.get("doc_extracted_questions") or {}
-                        questions_list = questions_state.get("questions") or []
-                        schema = questions_state.get("schema") or []
-                        answers_payload = st.session_state.get("doc_answers_payload")
-                        if answers_payload is None or len(answers_payload) != len(questions_list):
-                            answers_payload = [None] * len(questions_list)
-                            st.session_state["doc_answers_payload"] = answers_payload
-                        total_qs = len(questions_list)
-                        qa_results: List[Dict[str, Any]] = []
-                        bundle: Dict[str, Any] = {"downloads": [], "qa_pairs": []}
-                        if total_qs == 0:
-                            st.info("No questions detected in this workbook.")
-                        else:
-                            log_step("Generating answers", "Creating responses...")
-                            progress_container = st.container()
-                            progress_bar = progress_container.progress(0.0)
-                            qa_box = st.container() if show_live else None
-                            placeholders = [None] * total_qs
-                            if show_live and qa_box is not None:
-                                for idx, entry in enumerate(questions_list):
-                                    placeholders[idx] = _create_live_placeholder(
-                                        qa_box,
-                                        idx,
-                                        entry.get("question", ""),
-                                    )
-                            answered_count = sum(
-                                1
-                                for item in answers_payload or []
-                                if item and item.get("status") == "answered"
-                            )
-                            if total_qs:
-                                progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
-
-                            pending_indices: List[int] = []
-                            for idx, entry in enumerate(questions_list):
-                                existing = answers_payload[idx] if answers_payload and idx < len(answers_payload) else None
-                                q_text = entry.get("question", "")
-                                if existing and existing.get("status") == "answered":
-                                    if show_live and placeholders[idx] is not None:
-                                        payload = existing.get("result_payload") or existing
-                                        comments_payload = existing.get("raw_comments") or []
-                                        _render_live_answer(
-                                            placeholders[idx],
-                                            payload,
-                                            comments_payload,
-                                            include_citations,
-                                            card_index=idx,
-                                            question_text=q_text,
-                                        )
-                                    continue
-                                pending_indices.append(idx)
-
-                            if pending_indices:
-                                worker_limit = _resolve_concurrency(None) or len(pending_indices)
-                                worker_limit = max(1, min(worker_limit, len(pending_indices)))
-                                with ThreadPoolExecutor(max_workers=worker_limit) as pool:
-                                    future_map = {
-                                        pool.submit(
-                                            responder.answer,
-                                            questions_list[idx].get("question", ""),
-                                            include_citations=include_citations,
-                                        ): idx
-                                        for idx in pending_indices
-                                    }
-                                    for fut in as_completed(future_map):
-                                        idx = future_map[fut]
-                                        q_text = questions_list[idx].get("question", "")
-                                        result = fut.result()
-                                        qa_entry = dict(questions_list[idx])
-                                        qa_entry["answer"] = result["text"]
-                                        qa_entry["citations"] = result["citations"]
-                                        qa_entry["raw_comments"] = result.get("raw_comments", [])
-                                        qa_entry["status"] = "answered"
-                                        qa_entry["result_payload"] = result
-                                        answers_payload[idx] = qa_entry
-                                        st.session_state["doc_answers_payload"] = answers_payload
-                                        answered_count += 1
-                                        progress_bar.progress(
-                                            answered_count / total_qs, text=f"{answered_count}/{total_qs}"
-                                        )
-                                        if show_live and placeholders[idx] is not None:
-                                            _render_live_answer(
-                                                placeholders[idx],
-                                                result,
-                                                qa_entry.get("raw_comments") or [],
-                                                include_citations,
-                                                card_index=idx,
-                                                question_text=q_text,
-                                            )
-                            qa_results = []
-                            for item in answers_payload or []:
-                                if not item or item.get("status") != "answered":
-                                    continue
-                                cleaned = dict(item)
-                                cleaned.pop("status", None)
-                                cleaned.pop("result_payload", None)
-                                qa_results.append(cleaned)
-                            if qa_results:
-                                bundle = filler.build_excel_bundle(
-                                    source_path=input_path,
-                                    schema=schema,
-                                    qa_results=qa_results,
-                                    include_citations=include_citations,
-                                )
-                                for download in bundle["downloads"]:
-                                    _store_doc_download(
-                                        download["key"],
-                                        label=download["label"],
-                                        data=download["data"],
-                                        file_name=download["file_name"],
-                                        mime=download.get("mime"),
-                                        order=download.get("order", 0),
-                                    )
-                                _render_doc_downloads(downloads_container)
-                        completed = total_qs == 0 or len(qa_results) == total_qs
-                        st.session_state["doc_questions_answered"] = completed
-                        st.session_state["doc_answers_payload"] = answers_payload
-                        run_context = {
-                            "mode": "excel",
-                            "uploaded_name": file_info.get("name"),
-                            "fund": fund,
-                            "search_mode": search_mode,
-                            "include_citations": include_citations,
-                            "length": length_opt,
-                            "approx_words": approx_words,
-                            "extra_documents": [f.name for f in extra_uploads] if extra_uploads else [],
-                            "qa_pairs": bundle.get("qa_pairs", []),
-                            "schema": questions_state.get("schema") or [],
-                            "timestamp": datetime.utcnow().isoformat(),
-                        }
-                    elif suffix == ".docx" and not docx_as_text:
-                        if not questions_state or questions_state.get("mode") != "docx_slots":
-                            log_step("Extracting slots from DOCX", "Analyzing document...")
-                            extractor.extract(input_path)
-                            details = extractor.last_details
-                            slots_payload = details.get("slots_payload") or {}
-                            skipped = details.get("skipped_slots") or []
-                            heuristic = details.get("heuristic_skips") or []
-                            slot_list = slots_payload.get("slots") or []
-                            st.session_state["doc_extracted_questions"] = {
-                                "mode": "docx_slots",
-                                "slots_payload": slots_payload,
-                                "skipped_slots": skipped,
-                                "heuristic_skips": heuristic,
-                                "questions": slot_list,
-                            }
-                            st.session_state["doc_answers_payload"] = [None] * len(slot_list)
-                        else:
-                            log_step("Reusing extracted slots", "Using cached DOCX slot data.")
-                        questions_state = st.session_state.get("doc_extracted_questions") or {}
-                        slots_payload = questions_state.get("slots_payload") or {}
-                        slot_list = slots_payload.get("slots") or []
-                        skipped = questions_state.get("skipped_slots") or []
-                        heuristic = questions_state.get("heuristic_skips") or []
-                        if skipped or heuristic:
-                            st.warning(f"Skipped {len(skipped) + len(heuristic)} question(s) that cannot be answered automatically.")
-                            with st.expander("View skipped questions", expanded=False):
-                                for entry in skipped:
-                                    reason = entry.get("reason") or "unspecified"
-                                    label = entry.get("question_text") or "[blank question text]"
-                                    st.markdown(f"- **{label.strip()}** — {reason}")
-                                for entry in heuristic:
-                                    reason = entry.get("reason", "unspecified")
-                                    label = entry.get("question_text") or "[blank question text]"
-                                    st.markdown(f"- **{label.strip()}** — {reason}")
-                        answers_payload = st.session_state.get("doc_answers_payload")
-                        if answers_payload is None or len(answers_payload) != len(slot_list):
-                            answers_payload = [None] * len(slot_list)
-                            st.session_state["doc_answers_payload"] = answers_payload
-                        total_qs = len(slot_list)
-                        qa_results = []
-                        bundle = {"downloads": [], "qa_pairs": [], "skipped_slots": skipped, "heuristic_skips": heuristic}
-                        if total_qs == 0:
-                            st.info("No questions detected in this document.")
-                        else:
-                            log_step("Generating answers", "Creating responses...")
-                            progress_container = st.container()
-                            progress_bar = progress_container.progress(0.0)
-                            qa_box = st.container() if show_live else None
-                            placeholders = [None] * total_qs
-                            if show_live and qa_box is not None:
-                                for idx, slot in enumerate(slot_list):
-                                    placeholders[idx] = _create_live_placeholder(
-                                        qa_box,
-                                        idx,
-                                        (slot.get("question_text") or "").strip(),
-                                    )
-                            answered_count = sum(
-                                1
-                                for item in answers_payload or []
-                                if item and item.get("status") == "answered"
-                            )
-                            if total_qs:
-                                progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
-
-                            pending_indices: List[int] = []
-                            for idx, slot in enumerate(slot_list):
-                                cached = answers_payload[idx] if answers_payload and idx < len(answers_payload) else None
-                                q_text = (slot.get("question_text") or "").strip()
-                                if cached and cached.get("status") == "answered":
-                                    if show_live and placeholders[idx] is not None:
-                                        display_payload = cached.get("result_payload")
-                                        comments_payload = cached.get("raw_comments") or []
-                                        _render_live_answer(
-                                            placeholders[idx],
-                                            display_payload,
-                                            comments_payload,
-                                            include_citations and not _is_table_slot(slot),
-                                            card_index=idx,
-                                            question_text=q_text,
-                                        )
-                                    continue
-                                pending_indices.append(idx)
-
-                            if pending_indices:
-                                worker_limit = _resolve_concurrency(None) or len(pending_indices)
-                                worker_limit = max(1, min(worker_limit, len(pending_indices)))
-                                with ThreadPoolExecutor(max_workers=worker_limit) as pool:
-                                    future_map = {
-                                        pool.submit(
-                                            responder.answer,
-                                            (slot_list[idx].get("question_text") or "").strip(),
-                                            include_citations=include_citations,
-                                        ): idx
-                                        for idx in pending_indices
-                                    }
-                                    for fut in as_completed(future_map):
-                                        idx = future_map[fut]
-                                        slot = slot_list[idx]
-                                        q_text = (slot.get("question_text") or "").strip()
-                                        slot_id = slot.get("id") or f"slot_{idx + 1}"
-                                        result = fut.result()
-                                        if _is_table_slot(slot):
-                                            sanitized = _sanitize_table_answer(result)
-                                            qa_entry = {
-                                                "question": q_text,
-                                                "slot_id": slot_id,
-                                                "answer": sanitized,
-                                                "citations": {},
-                                                "raw_comments": [],
-                                                "status": "answered",
-                                                "result_payload": sanitized,
-                                            }
-                                            display_payload = sanitized
-                                            comments_payload: List[Any] = []
-                                        else:
-                                            qa_entry = {
-                                                "question": q_text,
-                                                "slot_id": slot_id,
-                                                "answer": result["text"],
-                                                "citations": result["citations"],
-                                                "raw_comments": result.get("raw_comments", []),
-                                                "status": "answered",
-                                                "result_payload": result,
-                                            }
-                                            display_payload = result
-                                            comments_payload = qa_entry["raw_comments"]
-                                        answers_payload[idx] = qa_entry
-                                        st.session_state["doc_answers_payload"] = answers_payload
-                                        answered_count += 1
-                                        progress_bar.progress(
-                                            answered_count / total_qs, text=f"{answered_count}/{total_qs}"
-                                        )
-                                        if show_live and placeholders[idx] is not None:
-                                            _render_live_answer(
-                                                placeholders[idx],
-                                                display_payload,
-                                                comments_payload,
-                                                include_citations and not _is_table_slot(slot),
-                                                card_index=idx,
-                                                question_text=q_text,
-                                            )
-                            qa_results = []
-                            for item in answers_payload or []:
-                                if not item or item.get("status") != "answered":
-                                    continue
-                                cleaned = dict(item)
-                                cleaned.pop("status", None)
-                                cleaned.pop("result_payload", None)
-                                qa_results.append(cleaned)
-                            if qa_results:
-                                bundle = filler.build_docx_slot_bundle(
-                                    source_path=input_path,
-                                    slots_payload=slots_payload,
-                                    qa_results=qa_results,
-                                    include_citations=include_citations,
-                                    write_mode=docx_write_mode,
-                                )
-                                for download in bundle["downloads"]:
-                                    _store_doc_download(
-                                        download["key"],
-                                        label=download["label"],
-                                        data=download["data"],
-                                        file_name=download["file_name"],
-                                        mime=download.get("mime"),
-                                        order=download.get("order", 0),
-                                    )
-                                _render_doc_downloads(downloads_container)
-                        completed = total_qs == 0 or len(qa_results) == total_qs
-                        st.session_state["doc_questions_answered"] = completed
-                        st.session_state["doc_answers_payload"] = answers_payload
-                        run_context = {
-                            "mode": "docx_slots",
-                            "uploaded_name": file_info.get("name"),
-                            "fund": fund,
-                            "search_mode": search_mode,
-                            "include_citations": include_citations,
-                            "docx_write_mode": docx_write_mode,
-                            "extra_documents": [f.name for f in extra_uploads] if extra_uploads else [],
-                            "qa_pairs": bundle.get("qa_pairs", []),
-                            "slots": questions_state.get("slots_payload") or {},
-                            "timestamp": datetime.utcnow().isoformat(),
-                        }
-                    else:
-                        if not questions_state or questions_state.get("mode") != "document_summary":
-                            log_step("Extracting questions", "Reading document...")
-                            treat_as_text = suffix == ".docx"
-                            questions = extractor.extract(input_path, treat_docx_as_text=treat_as_text)
-                            payload = [dict(entry) for entry in questions]
-                            st.session_state["doc_extracted_questions"] = {
-                                "mode": "document_summary",
-                                "questions": payload,
-                                "treat_docx_as_text": treat_as_text,
-                            }
-                            st.session_state["doc_answers_payload"] = [None] * len(payload)
-                        else:
-                            log_step("Reusing extracted questions", "Using cached document questions.")
-                        questions_state = st.session_state.get("doc_extracted_questions") or {}
-                        questions_list = questions_state.get("questions") or []
-                        answers_payload = st.session_state.get("doc_answers_payload")
-                        if answers_payload is None or len(answers_payload) != len(questions_list):
-                            answers_payload = [None] * len(questions_list)
-                            st.session_state["doc_answers_payload"] = answers_payload
-                        total_qs = len(questions_list)
-                        qa_results = []
-                        bundle = {"downloads": [], "qa_pairs": []}
-                        if total_qs == 0:
-                            st.info("No questions could be extracted from the document.")
-                        else:
-                            log_step("Generating answers", "Creating responses...")
-                            progress_container = st.container()
-                            progress_bar = progress_container.progress(0.0)
-                            qa_box = st.container() if show_live else None
-                            placeholders = [None] * total_qs
-                            if show_live and qa_box is not None:
-                                for idx, entry in enumerate(questions_list):
-                                    placeholders[idx] = _create_live_placeholder(
-                                        qa_box,
-                                        idx,
-                                        entry.get("question", ""),
-                                    )
-                            answered_count = sum(
-                                1
-                                for item in answers_payload or []
-                                if item and item.get("status") == "answered"
-                            )
-                            if total_qs:
-                                progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
-
-                            pending_indices: List[int] = []
-                            for idx, entry in enumerate(questions_list):
-                                existing = answers_payload[idx] if answers_payload and idx < len(answers_payload) else None
-                                q_text = entry.get("question", "")
-                                if existing and existing.get("status") == "answered":
-                                    if show_live and placeholders[idx] is not None:
-                                        payload = existing.get("result_payload") or existing
-                                        comments_payload = existing.get("raw_comments") or []
-                                        _render_live_answer(
-                                            placeholders[idx],
-                                            payload,
-                                            comments_payload,
-                                            include_citations,
-                                            card_index=idx,
-                                            question_text=q_text,
-                                        )
-                                    continue
-                                pending_indices.append(idx)
-
-                            if pending_indices:
-                                worker_limit = _resolve_concurrency(None) or len(pending_indices)
-                                worker_limit = max(1, min(worker_limit, len(pending_indices)))
-                                with ThreadPoolExecutor(max_workers=worker_limit) as pool:
-                                    future_map = {
-                                        pool.submit(
-                                            responder.answer,
-                                            questions_list[idx].get("question", ""),
-                                            include_citations=include_citations,
-                                        ): idx
-                                        for idx in pending_indices
-                                    }
-                                    for fut in as_completed(future_map):
-                                        idx = future_map[fut]
-                                        q_text = questions_list[idx].get("question", "")
-                                        result = fut.result()
-                                        qa_entry = dict(questions_list[idx])
-                                        qa_entry["answer"] = result["text"]
-                                        qa_entry["citations"] = result["citations"]
-                                        qa_entry["raw_comments"] = result.get("raw_comments", [])
-                                        qa_entry["status"] = "answered"
-                                        qa_entry["result_payload"] = result
-                                        answers_payload[idx] = qa_entry
-                                        st.session_state["doc_answers_payload"] = answers_payload
-                                        answered_count += 1
-                                        progress_bar.progress(
-                                            answered_count / total_qs, text=f"{answered_count}/{total_qs}"
-                                        )
-                                        if show_live and placeholders[idx] is not None:
-                                            _render_live_answer(
-                                                placeholders[idx],
-                                                result,
-                                                qa_entry.get("raw_comments") or [],
-                                                include_citations,
-                                                card_index=idx,
-                                                question_text=q_text,
-                                            )
-                            qa_results = []
-                            for item in answers_payload or []:
-                                if not item or item.get("status") != "answered":
-                                    continue
-                                cleaned = dict(item)
-                                cleaned.pop("status", None)
-                                cleaned.pop("result_payload", None)
-                                qa_results.append(cleaned)
-                            if qa_results:
-                                bundle = filler.build_summary_bundle(
-                                    questions=[entry.get("question", "") for entry in questions_list],
-                                    qa_results=qa_results,
-                                    include_citations=include_citations,
-                                )
-                                for download in bundle["downloads"]:
-                                    _store_doc_download(
-                                        download["key"],
-                                        label=download["label"],
-                                        data=download["data"],
-                                        file_name=download["file_name"],
-                                        mime=download.get("mime"),
-                                        order=download.get("order", 0),
-                                    )
-                                _render_doc_downloads(downloads_container)
-                        completed = total_qs == 0 or len(qa_results) == total_qs
-                        st.session_state["doc_questions_answered"] = completed
-                        st.session_state["doc_answers_payload"] = answers_payload
-                        run_context = {
-                            "mode": "document_summary",
-                            "uploaded_name": file_info.get("name"),
-                            "fund": fund,
-                            "search_mode": search_mode,
-                            "include_citations": include_citations,
-                            "length": length_opt,
-                            "approx_words": approx_words,
-                            "extra_documents": [f.name for f in extra_uploads] if extra_uploads else [],
-                            "qa_pairs": bundle.get("qa_pairs", []),
-                            "timestamp": datetime.utcnow().isoformat(),
-                        }
-                    step_bar.progress(1.0, text="Done")
-                    st.session_state.doc_processing_state = "finished"
-                    st.session_state.doc_processing_finished_at = datetime.utcnow().isoformat()
-                    if run_context is None:
-                        run_context = {
-                            "mode": (st.session_state.get("doc_extracted_questions") or {}).get("mode") or "document_summary",
-                            "uploaded_name": file_info.get("name"),
-                            "fund": fund,
-                            "search_mode": search_mode,
-                            "include_citations": include_citations,
-                            "length": length_opt,
-                            "approx_words": approx_words,
-                            "extra_documents": [f.name for f in extra_uploads] if extra_uploads else [],
-                            "qa_pairs": [],
-                            "timestamp": datetime.utcnow().isoformat(),
-                        }
-                    st.session_state.doc_processing_result = run_context
-                    if run_context:
-                        st.session_state.latest_doc_run = run_context
-                        try:
-                            _persist_key = st.session_state.get("current_user_id", st.session_state.get("session_id", ""))
-                            save_latest_doc_run(_persist_key, run_context)
-                        except Exception:
-                            pass
-                        render_document_feedback_section(run_context)
-                        with st.container():
-                            col1, col2 = st.columns([1, 6])
-                            with col1:
-                                if st.button("Clear saved run", key="clear_saved_run_post", help="Remove the last run from memory and disk."):
-                                    st.session_state.latest_doc_run = None
-                                    st.session_state.doc_feedback_submitted = False
-                                    _reset_doc_workflow(clear_file=False)
-                                    _reset_doc_downloads()
-                                    try:
-                                        _persist_key = st.session_state.get("current_user_id", st.session_state.get("session_id", ""))
-                                        clear_latest_doc_run(_persist_key)
-                                    except Exception:
-                                        pass
-                                    st.success("Saved run cleared.")
-                                    try:
-                                        st.rerun()
-                                    except Exception:
-                                        pass
-                except Exception as exc:
-                    st.session_state.doc_processing_state = "error"
-                    st.session_state.doc_processing_error = str(exc)
-                    _reset_doc_downloads()
-                    st.error("Something went wrong while processing the document. Please try again.")
-                    st.exception(exc)
-                    st.stop()
-        elif st.session_state.get("latest_doc_run") and not run_clicked:
-            latest = st.session_state.get("latest_doc_run")
-            render_document_feedback_section(latest)
-            render_saved_qa_pairs(latest)
-            with st.container():
-                col1, col2 = st.columns([1, 6])
-                with col1:
-                    if st.button("Clear saved run", key="clear_saved_run", help="Remove the last run from memory and disk."):
-                        st.session_state.latest_doc_run = None
-                        st.session_state.doc_feedback_submitted = False
-                        _reset_doc_workflow(clear_file=False)
-                        _reset_doc_downloads()
-                        try:
-                            _persist_key = st.session_state.get("current_user_id", st.session_state.get("session_id", ""))
-                            clear_latest_doc_run(_persist_key)
-                        except Exception:
-                            pass
-                        st.success("Saved run cleared.")
-                        try:
-                            st.rerun()
-                        except Exception:
-                            pass
-
-        if st.session_state.get("doc_processing_state") == "finished" and not run_clicked:
-            _render_doc_downloads(downloads_container)
-    
-    
 if __name__ == "__main__":
     main()
