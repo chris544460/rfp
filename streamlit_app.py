@@ -96,6 +96,13 @@ import my_module
 from my_module import _classify_intent, _detect_followup, gen_answer
 from feedback_storage import build_feedback_store, FeedbackStorageError
 from persistent_state import load_latest_doc_run, save_latest_doc_run, clear_latest_doc_run
+from components import (
+    DOC_HIGHLIGHT_OPTIONS,
+    DOC_IMPROVEMENT_OPTIONS,
+    FeedbackUI,
+    create_live_placeholder,
+    render_live_answer,
+)
 from services import DocumentFiller, QuestionExtractor, Responder
 LOCAL_FEEDBACK_FILE = Path("feedback_log.ndjson")
 FEEDBACK_FIELDS = [
@@ -111,33 +118,6 @@ FEEDBACK_FIELDS = [
     "question",
     "answer",
     "context_json",
-]
-CHAT_HIGHLIGHT_OPTIONS = [
-    "Accurate and complete",
-    "Actionable guidance",
-    "Clear explanation",
-    "Helpful citations",
-    "Fast response",
-]
-CHAT_IMPROVEMENT_OPTIONS = [
-    "Incorrect information",
-    "Missing details",
-    "Not relevant",
-    "Formatting issues",
-    "Slow response",
-]
-DOC_HIGHLIGHT_OPTIONS = [
-    "Captured required fields",
-    "Accurate answers",
-    "Helpful citations",
-    "Easy to download",
-]
-DOC_IMPROVEMENT_OPTIONS = [
-    "Incorrect answers",
-    "Missing responses",
-    "Formatting issues",
-    "Download problems",
-    "Slow processing",
 ]
 try:
     feedback_store = build_feedback_store(FEEDBACK_FIELDS, LOCAL_FEEDBACK_FILE)
@@ -194,337 +174,14 @@ def format_context(context: dict) -> str:
         return json.dumps(context, ensure_ascii=False)
     except Exception:
         return ""
-def render_chat_feedback_form(
-    message_index: int,
-    question: Optional[str],
-    answer: str,
-    message_payload: dict,
-) -> None:
-    submitted_map = st.session_state.setdefault("chat_feedback_submitted", {})
-    feedback_key = f"chat_{message_index}"
-    if submitted_map.get(feedback_key):
-        st.caption("Feedback recorded — thank you!")
-        return
-    with st.expander("How was this answer?", expanded=False):
-        rating_key = f"chat_rating_{message_index}"
-        rating_choice = st.radio(
-            "Overall",
-            ["Helpful", "Needs improvement"],
-            horizontal=True,
-            key=rating_key,
-        )
-        highlights_key = f"chat_highlights_{message_index}"
-        improvements_key = f"chat_improvements_{message_index}"
-        with st.form(f"chat_feedback_form_{message_index}"):
-            highlights: List[str] = []
-            improvements: List[str] = []
-            if rating_choice == "Helpful":
-                st.session_state.pop(improvements_key, None)
-                highlights = st.multiselect(
-                    "Highlights",
-                    CHAT_HIGHLIGHT_OPTIONS,
-                    key=highlights_key,
-                )
-            else:
-                st.session_state.pop(highlights_key, None)
-                improvements = st.multiselect(
-                    "Opportunities",
-                    CHAT_IMPROVEMENT_OPTIONS,
-                    key=improvements_key,
-                )
-            comment = st.text_area(
-                "Additional comments",
-                placeholder="What should we know?",
-                key=f"chat_comment_{message_index}",
-            )
-            submitted = st.form_submit_button("Submit feedback", use_container_width=True)
-            if submitted:
-                record = {
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "session_id": st.session_state.get("session_id", str(uuid4())),
-                    "user_id": get_current_user(),
-                    "feedback_source": "chat",
-                    "feedback_subject": f"assistant_message_{message_index}",
-                    "rating": "positive" if rating_choice == "Helpful" else "needs_improvement",
-                    "highlights": serialize_list(highlights),
-                    "improvements": serialize_list(improvements),
-                    "comment": comment.strip(),
-                    "question": question or "",
-                    "answer": answer,
-                    "context_json": format_context(
-                        {
-                            "chat_history": st.session_state.get("chat_messages", []),
-                            "message_index": message_index,
-                            "message_payload": message_payload,
-                        }
-                    ),
-                }
-                log_feedback(record)
-                submitted_map[feedback_key] = True
-                st.success("Feedback saved — thank you!")
 
 
-def render_card_feedback_form(
-    *,
-    card_index: int,
-    question: str,
-    answer_text: str,
-    run_context: Optional[dict] = None,
-    container: Optional[Any] = None,
-    title: str = "How was this answer?",
-) -> bool:
-    """Render a compact feedback form below a Q/A card.
-
-    Uses document-level highlight/improvement tags and records a feedback
-    entry with source 'document_card'.
-    """
-    submitted_map = st.session_state.setdefault("doc_card_feedback_submitted", {})
-    run_name = (run_context or {}).get("uploaded_name") or "document"
-    feedback_key = f"{run_name}_card_{int(card_index)}"
-    if submitted_map.get(feedback_key):
-        target = container or st
-        target.caption("Feedback recorded — thank you!")
-        return False
-
-    context_manager = container or st.expander(title, expanded=False)
-    with context_manager:
-        rating_key = f"card_rating_{feedback_key}"
-        rating_choice = st.radio(
-            "Overall",
-            ["Helpful", "Needs improvement"],
-            horizontal=True,
-            key=rating_key,
-        )
-        highlights_key = f"card_highlights_{feedback_key}"
-        improvements_key = f"card_improvements_{feedback_key}"
-        with st.form(f"card_feedback_form_{feedback_key}"):
-            highlights: List[str] = []
-            improvements: List[str] = []
-            if rating_choice == "Helpful":
-                st.session_state.pop(improvements_key, None)
-                highlights = st.multiselect(
-                    "Highlights",
-                    DOC_HIGHLIGHT_OPTIONS,
-                    key=highlights_key,
-                )
-            else:
-                st.session_state.pop(highlights_key, None)
-                improvements = st.multiselect(
-                    "Opportunities",
-                    DOC_IMPROVEMENT_OPTIONS,
-                    key=improvements_key,
-                )
-            comment = st.text_area(
-                "Additional comments",
-                placeholder="Optional details…",
-                key=f"card_comment_{feedback_key}",
-            )
-            submitted = st.form_submit_button("Submit feedback", use_container_width=True)
-            if submitted:
-                record = {
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "session_id": st.session_state.get("session_id", str(uuid4())),
-                    "user_id": get_current_user(),
-                    "feedback_source": "document_card",
-                    "feedback_subject": f"{run_name}_card_{int(card_index) + 1}",
-                    "rating": "positive" if rating_choice == "Helpful" else "needs_improvement",
-                    "highlights": serialize_list(highlights),
-                    "improvements": serialize_list(improvements),
-                    "comment": comment.strip(),
-                    "question": question or "",
-                    "answer": answer_text,
-                    "context_json": format_context({
-                        "run": run_context or {},
-                        "card_index": int(card_index),
-                    }),
-                }
-                log_feedback(record)
-                submitted_map[feedback_key] = True
-                st.success("Feedback saved — thank you!")
-                return True
-    return False
-
-def _shorten_question_label(text: str) -> str:
-    cleaned = (text or '').strip()
-    if not cleaned:
-        return 'Pending question'
-    cleaned = ' '.join(cleaned.split())
-    return cleaned[:87] + '...' if len(cleaned) > 90 else cleaned
-
-
-def _create_live_placeholder(container, idx: int, question_text: str):
-    if container is None:
-        return None
-    # Render a simple card-like container using a single-column layout.
-    # Avoid a top-level dropdown; instead show the question header inline.
-    col = container.columns(1)[0]
-    # Show full question (no truncation) and bold only the question text.
-    cleaned_q = ' '.join((question_text or '').strip().split())
-    with col:
-        st.markdown(
-            f"Q{idx + 1}: <strong>{html.escape(cleaned_q)}</strong>",
-            unsafe_allow_html=True,
-        )
-        placeholder = st.empty()
-        placeholder.info('Waiting for answer...')
-    return placeholder
-
-
-def _normalize_citation_entry(comment):
-    def _clean(value):
-        return str(value).strip() if value not in (None, '') else ''
-
-    if not comment:
-        return []
-
-    if isinstance(comment, dict):
-        if comment and all(str(k).isdigit() for k in comment.keys()):
-            entries = []
-            for key in sorted(comment.keys(), key=lambda k: int(str(k)) if str(k).isdigit() else str(k)):
-                payload = comment[key]
-                if isinstance(payload, dict):
-                    payload = dict(payload)
-                else:
-                    payload = {"text": payload}
-                payload.setdefault("label", key)
-                entries.extend(_normalize_citation_entry(payload))
-            return entries
-
-        label = _clean(comment.get('label') or comment.get('id') or comment.get('index') or comment.get('key') or comment.get('citation'))
-        source = _clean(comment.get('source') or comment.get('source_file') or comment.get('document') or comment.get('name') or comment.get('file'))
-        page = _clean(comment.get('page') or comment.get('section') or comment.get('location') or comment.get('page_label'))
-        snippet = _clean(comment.get('snippet') or comment.get('text') or comment.get('content') or comment.get('passage'))
-        extra = _clean(comment.get('meta') or comment.get('note'))
-        if not snippet and extra:
-            snippet = extra
-        elif snippet and extra:
-            snippet = f"{snippet} ({extra})"
-        return [(label, source, snippet, page)]
-
-    if isinstance(comment, (list, tuple)):
-        label = _clean(comment[0] if len(comment) > 0 else '')
-        source = _clean(comment[1] if len(comment) > 1 else '')
-        snippet = _clean(comment[2] if len(comment) > 2 else '')
-        page = _clean(comment[4] if len(comment) > 4 else '')
-        if not page:
-            page = _clean(comment[3] if len(comment) > 3 else '')
-        return [(label, source, snippet, page)]
-
-    value = _clean(comment)
-    if not value:
-        return []
-    return [('', '', value, '')]
-
-
-def _render_live_answer(
-    placeholder,
-    answer,
-    comments,
-    include_citations: bool,
-    *,
-    card_index: Optional[int] = None,
-    question_text: Optional[str] = None,
-    run_context: Optional[dict] = None,
-    feedback_mode: str = "expander",
-) -> None:
-    if placeholder is None:
-        return
-    if isinstance(answer, dict):
-        ans_text = answer.get('text', '')
-    else:
-        ans_text = str(answer or '')
-    ans_text = ans_text.strip() or '_No answer generated._'
-
-    placeholder.empty()
-    with placeholder.container():
-        st.markdown(f"**Answer:** {ans_text}")
-        if include_citations:
-            raw_items = comments if isinstance(comments, (list, tuple)) else [comments]
-            normalized = []
-            for item in raw_items or []:
-                normalized.extend(_normalize_citation_entry(item))
-
-            entries = []
-            for label, source, snippet, page in normalized:
-                if any([label, source, snippet, page]):
-                    entries.append((label, source, snippet, page))
-
-            for i, (label, source, snippet, page) in enumerate(entries, 1):
-                title_parts = []
-                if label:
-                    title_parts.append(f"[{label}]")
-                if source:
-                    title_parts.append(source)
-                if page:
-                    title_parts.append(page)
-                title = ' — '.join(title_parts).strip() or f"Citation {i}"
-                with st.expander(title, expanded=False):
-                    body = (snippet or '').strip()
-                    if body:
-                        st.markdown(body)
-                    else:
-                        st.caption('No snippet provided.')
-
-    # Per-card feedback
-    try:
-        if feedback_mode == "dialog":
-            _render_feedback_dialog(
-                card_index=int(card_index or 0),
-                question_text=str(question_text or ''),
-                answer_text=ans_text,
-                run_context=run_context,
-            )
-        else:
-            render_card_feedback_form(
-                card_index=int(card_index or 0),
-                question=str(question_text or ''),
-                answer_text=ans_text,
-                run_context=run_context,
-            )
-    except Exception:
-        pass
-
-
-def _render_feedback_dialog(
-    *,
-    card_index: int,
-    question_text: str,
-    answer_text: str,
-    run_context: Optional[dict],
-) -> None:
-    run_name = (run_context or {}).get("uploaded_name") or "document"
-    feedback_key = f"{run_name}_card_{card_index}"
-    submitted_map = st.session_state.setdefault("doc_card_feedback_submitted", {})
-    if submitted_map.get(feedback_key):
-        st.caption("Feedback recorded — thank you!")
-        return
-
-    button_key = f"feedback_btn_{feedback_key}"
-    if st.button("Feedback", key=button_key):
-        st.session_state["feedback_dialog_target"] = feedback_key
-        st.session_state["suspend_autorefresh"] = True
-
-    active_target = st.session_state.get("feedback_dialog_target")
-    if active_target == feedback_key:
-        dialog_key = f"feedback_dialog_{feedback_key}"
-        with st.dialog("How was this answer?", key=dialog_key):
-            container = st.container()
-            submitted = render_card_feedback_form(
-                card_index=card_index,
-                question=question_text,
-                answer_text=answer_text,
-                run_context=run_context,
-                container=container,
-                title="How was this answer?",
-            )
-            close_clicked = st.button("Close", key=f"{dialog_key}_close")
-            if submitted or close_clicked:
-                st.session_state["feedback_dialog_target"] = None
-                st.session_state["suspend_autorefresh"] = False
-
-
-
-
+feedback_ui = FeedbackUI(
+    log_feedback=log_feedback,
+    get_current_user=get_current_user,
+    serialize_list=serialize_list,
+    format_context=format_context,
+)
 def _is_table_slot(slot: dict) -> bool:
     locator = slot.get("answer_locator") or {}
     return isinstance(locator, dict) and locator.get("type") == "table_cell"
@@ -1026,7 +683,7 @@ def _render_document_job(job: Dict[str, Any], *, include_citations: bool, show_l
     qa_box = st.container()
     for idx in range(total):
         question_text = questions_text[idx] if idx < len(questions_text) else f"Question {idx + 1}"
-        placeholder = _create_live_placeholder(qa_box, idx, question_text)
+        placeholder = create_live_placeholder(qa_box, idx, question_text)
         entry = answers[idx]
         if entry is None:
             continue
@@ -1038,15 +695,16 @@ def _render_document_job(job: Dict[str, Any], *, include_citations: bool, show_l
             "search_mode": job["config"]["search_mode"],
             "include_citations": include_citations,
         }
-        _render_live_answer(
+        render_live_answer(
             placeholder,
             payload,
             comments,
             include_citations,
+            feedback=feedback_ui,
             card_index=idx,
             question_text=question_text,
             run_context=run_context,
-            feedback_mode="dialog",
+            use_dialog=True,
         )
 
 
@@ -1133,21 +791,22 @@ def render_saved_qa_pairs(run_context: Optional[dict]) -> None:
     qa_box = st.container()
     for idx, pair in enumerate(pairs):
         q_text = (pair.get("question") or "").strip()
-        placeholder = _create_live_placeholder(qa_box, idx, q_text)
+        placeholder = create_live_placeholder(qa_box, idx, q_text)
         ans_payload = pair.get("answer")
         comments = pair.get("comments") or []
         if not comments and isinstance(ans_payload, dict):
             raw_comments = ans_payload.get('citations') or ans_payload.get('comments') or []
             comments = raw_comments
-        _render_live_answer(
+        render_live_answer(
             placeholder,
             ans_payload,
             comments,
             include_citations and (isinstance(ans_payload, dict) or bool(comments)),
+            feedback=feedback_ui,
             card_index=idx,
             question_text=q_text,
             run_context=run_context,
-            feedback_mode="dialog",
+            use_dialog=True,
         )
 
 def render_document_feedback_section(run_context: Optional[dict]) -> None:
@@ -1670,7 +1329,7 @@ def main():
                         joined = "\n".join(summary_lines)
                         if joined:
                             answer_summary = f"{answer_summary}\n{joined}".strip()
-                    render_chat_feedback_form(
+                    feedback_ui.render_chat_feedback_form(
                         message_index=idx,
                         question=last_user_message,
                         answer=answer_summary,
@@ -1702,7 +1361,7 @@ def main():
                                     st.caption("Snippet not available.")
                     else:
                         sidebar.caption("No source details returned.")
-                    render_chat_feedback_form(
+                    feedback_ui.render_chat_feedback_form(
                         message_index=idx,
                         question=last_user_message,
                         answer=msg.get("content", ""),
@@ -1815,7 +1474,7 @@ def main():
                             answer_summary = f"{answer_summary}\n" + "\n".join(summary_lines)
                         answer_summary = answer_summary.strip()
                         new_index = len(st.session_state.chat_messages)
-                        render_chat_feedback_form(
+                        feedback_ui.render_chat_feedback_form(
                             message_index=new_index,
                             question=prompt,
                             answer=answer_summary,
@@ -1831,7 +1490,7 @@ def main():
                             "empty_message": empty_message,
                         }
                         new_index = len(st.session_state.chat_messages)
-                        render_chat_feedback_form(
+                        feedback_ui.render_chat_feedback_form(
                             message_index=new_index,
                             question=prompt,
                             answer=empty_message,
@@ -1937,7 +1596,7 @@ def main():
                     else:
                         sidebar.caption("No source details returned.")
                     new_index = len(st.session_state.chat_messages)
-                    render_chat_feedback_form(
+                    feedback_ui.render_chat_feedback_form(
                         message_index=new_index,
                         question=prompt,
                         answer=text,
