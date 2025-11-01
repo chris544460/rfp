@@ -39,8 +39,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from answer_composer import CompletionsClient, get_openai_completion
-from qa_core import answer_question
+from backend.answer_composer import CompletionsClient, get_openai_completion
+from backend.qa_core import answer_question
 
 
 def _find_column_indexes(

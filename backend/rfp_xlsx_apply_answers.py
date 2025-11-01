@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 import docx
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from word_comments import add_comment_to_run
+from .word_comments import add_comment_to_run
 
 
 # Pattern for [n] style citation markers in the answer text, allowing
@@ -270,4 +270,3 @@ def write_excel_answers(
 
 
 __all__ = ["write_excel_answers"]
-

@@ -16,7 +16,7 @@ from docx.enum.text import WD_COLOR_INDEX
 from .rfp_docx_slot_finder import _looks_like_question
 
 # NEW: real comment helper
-from word_comments import add_comment_to_run
+from .word_comments import add_comment_to_run
 
 # ---------------------------- Debug helpers ----------------------------
 DEBUG = True

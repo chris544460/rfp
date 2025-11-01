@@ -5,7 +5,7 @@ from docx import Document
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
-from llm_doc_search import _extract_text_from_doc, search_uploaded_docs
+from backend.llm_doc_search import _extract_text_from_doc, search_uploaded_docs
 
 
 class DummyLLM:

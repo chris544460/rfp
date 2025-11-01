@@ -92,7 +92,7 @@ def test_comment_formats_citations(tmp_path):
     assert c.value == "Ans"
 
     import docx
-    from word_comments import ensure_comments_part
+    from backend.word_comments import ensure_comments_part
 
     doc = docx.Document(comments_path)
     part = ensure_comments_part(doc)
