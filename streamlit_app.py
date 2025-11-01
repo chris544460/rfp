@@ -10,19 +10,20 @@ from typing import Tuple
 
 import streamlit as st
 
-from backend.design import APP_NAME, StyleCSS, StyleColors, display_aladdin_logos_and_app_title
-from backend.components import FeedbackUI
-from backend.workflows import DocumentJobController
+from typing import TYPE_CHECKING, Tuple
 
-from frontend.chat_page import render_chat_page
-from frontend.config_panel import collect_app_config, ensure_api_credentials, select_framework
-from frontend.document_page import render_document_page
-from frontend.feedback import build_feedback_manager
 from frontend.session_state import initialize_session_state
 
 
 def configure_page() -> None:
     """Configure Streamlit and apply the shared design system."""
+
+    from backend.design import (
+        APP_NAME,
+        StyleCSS,
+        StyleColors,
+        display_aladdin_logos_and_app_title,
+    )
 
     st.set_page_config(
         page_title=APP_NAME,
@@ -97,6 +98,23 @@ class StreamlitApp:
     """Thin orchestrator wiring together the chat and document modes."""
 
     def __init__(self) -> None:
+        from backend.components import FeedbackUI
+        from backend.workflows import DocumentJobController
+        from frontend.feedback import build_feedback_manager
+        from frontend.chat_page import render_chat_page
+        from frontend.config_panel import (
+            collect_app_config,
+            ensure_api_credentials,
+            select_framework,
+        )
+        from frontend.document_page import render_document_page
+
+        self._render_chat_page = render_chat_page
+        self._collect_app_config = collect_app_config
+        self._ensure_api_credentials = ensure_api_credentials
+        self._select_framework = select_framework
+        self._render_document_page = render_document_page
+
         feedback_manager = build_feedback_manager()
         self.feedback_manager = feedback_manager
         self.feedback_ui = FeedbackUI(
@@ -121,13 +139,13 @@ class StreamlitApp:
         )
 
         framework, llm_model = self._select_framework(view_mode)
-        ensure_api_credentials(framework, view_mode)
-        config = collect_app_config(view_mode, framework, llm_model)
+        self._ensure_api_credentials(framework, view_mode)
+        config = self._collect_app_config(view_mode, framework, llm_model)
 
         if input_mode == "Ask a question":
-            render_chat_page(view_mode, config, self.feedback_ui)
+            self._render_chat_page(view_mode, config, self.feedback_ui)
         else:
-            render_document_page(
+            self._render_document_page(
                 view_mode,
                 config,
                 self.feedback_ui,
@@ -216,8 +234,8 @@ class StreamlitApp:
 
 
 def main() -> None:
-    configure_page()
     ensure_packages()
+    configure_page()
     app = StreamlitApp()
     app.run()
 
