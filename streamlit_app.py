@@ -103,7 +103,8 @@ from components import (
     create_live_placeholder,
     render_live_answer,
 )
-from services import DocumentFiller, QuestionExtractor, Responder
+from services import QuestionExtractor, Responder
+from workflows import DocumentJobController
 LOCAL_FEEDBACK_FILE = Path("feedback_log.ndjson")
 FEEDBACK_FIELDS = [
     "timestamp",
@@ -182,48 +183,7 @@ feedback_ui = FeedbackUI(
     serialize_list=serialize_list,
     format_context=format_context,
 )
-def _is_table_slot(slot: dict) -> bool:
-    locator = slot.get("answer_locator") or {}
-    return isinstance(locator, dict) and locator.get("type") == "table_cell"
-
-
-def _sanitize_table_answer(answer) -> str:
-
-    if isinstance(answer, dict):
-        text = str(answer.get("text", ""))
-    else:
-        text = str(answer or "")
-    text = re.sub(r"\[\d+\]", "", text)
-
-    def _collapse_table_like(line: str) -> str:
-        working = line.replace("	", " | ").strip()
-        if not working:
-            return ""
-        if set(working) <= {"|", ":", "-", " ", "+", "="}:
-            return ""
-        if "|" in working:
-            segments = [seg.strip(" -") for seg in working.strip("|").split("|")]
-            segments = [seg for seg in segments if seg and set(seg) != {'-'}]
-            working = " ".join(segments)
-        working = working.lstrip("-•*→•").strip()
-        return working
-    
-    parts = []
-    for raw_line in text.splitlines():
-        collapsed = _collapse_table_like(raw_line)
-        if collapsed:
-            parts.append(collapsed)
-    
-    prose = " ".join(parts)
-    prose = re.sub(r"\s+", " ", prose).strip()
-    if not prose:
-        prose = "No information found."
-    if not prose.endswith(('.', '!', '?')):
-        prose += '.'
-    return prose
-
-
-
+document_job_controller = DocumentJobController(feedback_ui)
 def _reset_doc_downloads() -> None:
     st.session_state["doc_downloads"] = {}
 
@@ -258,455 +218,6 @@ def _reset_doc_workflow(*, clear_file: bool = False) -> None:
     st.session_state["doc_processing_started_at"] = None
     st.session_state["doc_processing_finished_at"] = None
     _reset_doc_downloads()
-
-
-def _schedule_document_job(config: Dict[str, Any]) -> None:
-    """Prepare question extraction and schedule answer generation futures."""
-
-    input_path = config["input_path"]
-    suffix = config["suffix"]
-    include_citations = config["include_citations"]
-    extra_doc_paths = config.get("extra_doc_paths", [])
-    extra_doc_names = config.get("extra_doc_names", [])
-    framework = config["framework"]
-    llm_model = config["llm_model"]
-
-    llm = CompletionsClient(model=llm_model) if framework == "aladdin" else OpenAIClient(model=llm_model)
-    responder = Responder(
-        llm_client=llm,
-        search_mode=config["search_mode"],
-        fund=config["fund"],
-        k=config["k_max_hits"],
-        length=config["length_opt"],
-        approx_words=config["approx_words"],
-        min_confidence=config["min_confidence"],
-        include_citations=include_citations,
-        extra_docs=list(extra_doc_paths),
-    )
-    extractor = QuestionExtractor(llm)
-
-    job: Dict[str, Any] = {
-        "status": "running",
-        "mode": None,
-        "config": config,
-        "executor": None,
-        "futures": [],
-        "future_info": {},
-        "answers": [],
-        "questions": [],
-        "questions_text": [],
-        "schema": [],
-        "slots_payload": {},
-        "skipped_slots": [],
-        "heuristic_skips": [],
-        "downloads": [],
-        "run_context": None,
-        "extra_doc_names": extra_doc_names,
-        "started_at": datetime.utcnow().isoformat(),
-        "completed": 0,
-        "downloads_registered": False,
-        "completion_notified": False,
-    }
-
-    if suffix in {".xlsx", ".xls"}:
-        questions = extractor.extract(input_path)
-        schema = extractor.last_details.get("schema") or []
-        questions_text = [(entry.get("question") or "").strip() for entry in questions]
-        total = len(questions_text)
-        job.update(
-            {
-                "mode": "excel",
-                "questions": questions,
-                "questions_text": questions_text,
-                "schema": schema,
-                "answers": [None] * total,
-            }
-        )
-        if total > 0:
-            worker_limit = _resolve_concurrency(None) or total
-            worker_limit = max(1, min(worker_limit, total))
-            executor = ThreadPoolExecutor(max_workers=worker_limit)
-            job["executor"] = executor
-            for idx, question_text in enumerate(questions_text):
-                future = executor.submit(_run_excel_task, responder, question_text)
-                job["futures"].append(future)
-                job["future_info"][future] = {"index": idx, "question_text": question_text}
-    elif suffix == ".docx" and not config["docx_as_text"]:
-        questions = extractor.extract(input_path)
-        details = extractor.last_details
-        slots_payload = details.get("slots_payload") or {}
-        slot_list = [entry.get("slot") for entry in questions]
-        slot_list = [slot for slot in slot_list if slot is not None]
-        questions_text = [(slot.get("question_text") or "").strip() for slot in slot_list]
-        total = len(slot_list)
-        job.update(
-            {
-                "mode": "docx_slots",
-                "questions": slot_list,
-                "questions_text": questions_text,
-                "slots_payload": slots_payload,
-                "skipped_slots": details.get("skipped_slots") or [],
-                "heuristic_skips": details.get("heuristic_skips") or [],
-                "answers": [None] * total,
-            }
-        )
-        if total > 0:
-            worker_limit = _resolve_concurrency(None) or total
-            worker_limit = max(1, min(worker_limit, total))
-            executor = ThreadPoolExecutor(max_workers=worker_limit)
-            job["executor"] = executor
-            for idx, slot in enumerate(slot_list):
-                future = executor.submit(_run_docx_task, responder, slot)
-                job["futures"].append(future)
-                job["future_info"][future] = {"index": idx, "slot_id": slot.get("id")}
-    else:
-        treat_docx_as_text = suffix == ".docx" and config["docx_as_text"]
-        questions = extractor.extract(input_path, treat_docx_as_text=treat_docx_as_text)
-        questions_text = [(entry.get("question") or "").strip() for entry in questions]
-        total = len(questions_text)
-        job.update(
-            {
-                "mode": "document_summary",
-                "questions": questions,
-                "questions_text": questions_text,
-                "answers": [None] * total,
-                "treat_docx_as_text": treat_docx_as_text,
-            }
-        )
-        if total > 0:
-            worker_limit = _resolve_concurrency(None) or total
-            worker_limit = max(1, min(worker_limit, total))
-            executor = ThreadPoolExecutor(max_workers=worker_limit)
-            job["executor"] = executor
-            for idx, question_text in enumerate(questions_text):
-                future = executor.submit(_run_summary_task, responder, question_text)
-                job["futures"].append(future)
-                job["future_info"][future] = {"index": idx, "question_text": question_text}
-
-    job["include_citations"] = include_citations
-    job["responder_model"] = llm_model
-    st.session_state["doc_job"] = job
-    st.session_state["doc_processing_state"] = "running"
-    st.session_state["doc_processing_started_at"] = datetime.utcnow().isoformat()
-    st.session_state["doc_processing_result"] = None
-    st.session_state["doc_processing_error"] = None
-    st.session_state["doc_feedback_submitted"] = False
-    st.session_state["doc_card_feedback_submitted"] = {}
-
-
-def _run_excel_task(responder: Responder, question_text: str) -> Dict[str, Any]:
-    result = responder.answer(question_text)
-    return {
-        "question": question_text,
-        "answer_payload": result,
-        "storage_answer": {
-            "text": result["text"],
-            "citations": result["citations"],
-        },
-        "comments": result.get("raw_comments", []),
-    }
-
-
-def _run_docx_task(responder: Responder, slot: Dict[str, Any]) -> Dict[str, Any]:
-    question_text = (slot.get("question_text") or "").strip()
-    result = responder.answer(question_text)
-    if _is_table_slot(slot):
-        sanitized = _sanitize_table_answer(result)
-        display_payload: Any = sanitized
-        storage_answer = {"text": sanitized, "citations": {}}
-        comments: List[Any] = []
-    else:
-        display_payload = result
-        storage_answer = {"text": result["text"], "citations": result["citations"]}
-        comments = result.get("raw_comments", [])
-    return {
-        "question": question_text,
-        "slot_id": slot.get("id"),
-        "answer_payload": display_payload,
-        "storage_answer": storage_answer,
-        "comments": comments,
-    }
-
-
-def _run_summary_task(responder: Responder, question_text: str) -> Dict[str, Any]:
-    result = responder.answer(question_text)
-    return {
-        "question": question_text,
-        "answer_payload": result,
-        "storage_answer": {
-            "text": result["text"],
-            "citations": result["citations"],
-        },
-        "comments": result.get("raw_comments", []),
-    }
-
-
-def _update_document_job(job: Dict[str, Any]) -> None:
-    """Poll futures for completed answers and update job bookkeeping."""
-
-    if job.get("status") != "running":
-        return
-
-    future_info: Dict[Any, Dict[str, Any]] = job.get("future_info", {})
-    answers: List[Optional[Dict[str, Any]]] = job.get("answers", [])
-    changed = False
-
-    for future in list(future_info.keys()):
-        info = future_info[future]
-        if future.done():
-            idx = info["index"]
-            if 0 <= idx < len(answers) and answers[idx] is None:
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    error_text = f"[error] {exc}"
-                    result = {
-                        "question": info.get("question_text") or "",
-                        "answer_payload": error_text,
-                        "storage_answer": {"text": error_text, "citations": {}},
-                        "comments": [],
-                        "error": True,
-                    }
-                answers[idx] = result
-                changed = True
-            del future_info[future]
-
-    if changed:
-        job["completed"] = sum(1 for entry in answers if entry is not None)
-
-    if not future_info:
-        executor = job.get("executor")
-        if executor:
-            executor.shutdown(wait=False)
-            job["executor"] = None
-        if job.get("status") == "running":
-            job["status"] = "ready_for_finalize"
-
-
-def _finalize_document_job(job: Dict[str, Any]) -> None:
-    """Generate output artifacts once all answers are ready."""
-
-    if job.get("status") not in {"ready_for_finalize", "running"}:
-        return
-
-    include_citations = job.get("include_citations", True)
-    config = job["config"]
-    answers: List[Optional[Dict[str, Any]]] = job.get("answers", [])
-    questions_text: List[str] = job.get("questions_text", [])
-    filler = DocumentFiller()
-    mode = job.get("mode")
-
-    if mode == "excel":
-        schema = job.get("schema") or []
-        qa_results = []
-        for idx in range(len(answers)):
-            entry = answers[idx]
-            question_text = questions_text[idx] if idx < len(questions_text) else ""
-            if entry is None:
-                storage = {"text": "No answer generated.", "citations": {}}
-                comments: List[Any] = []
-            else:
-                storage = entry["storage_answer"]
-                comments = entry.get("comments", [])
-            qa_results.append(
-                {
-                    "question": question_text,
-                    "answer": storage.get("text", ""),
-                    "citations": storage.get("citations", {}),
-                    "raw_comments": comments,
-                }
-            )
-        bundle = filler.build_excel_bundle(
-            source_path=config["input_path"],
-            schema=schema,
-            qa_results=qa_results,
-            include_citations=include_citations,
-            mode="fill",
-        )
-        run_context = {
-            "mode": "excel",
-            "uploaded_name": config["file_name"],
-            "fund": config["fund"],
-            "search_mode": config["search_mode"],
-            "include_citations": include_citations,
-            "length": config["length_opt"],
-            "approx_words": config["approx_words"],
-            "extra_documents": job.get("extra_doc_names", []),
-            "qa_pairs": bundle.get("qa_pairs", []),
-            "schema": schema,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-    elif mode == "docx_slots":
-        slots_payload = job.get("slots_payload") or {}
-        slots = job.get("questions") or []
-        qa_results = []
-        for idx in range(len(answers)):
-            entry = answers[idx]
-            slot = slots[idx] if idx < len(slots) else {}
-            question_text = questions_text[idx] if idx < len(questions_text) else (slot.get("question_text") or "")
-            slot_id = slot.get("id")
-            if entry is None:
-                storage = {"text": "No answer generated.", "citations": {}}
-                comments = []
-            else:
-                storage = entry["storage_answer"]
-                comments = entry.get("comments", [])
-                if slot_id is None:
-                    slot_id = entry.get("slot_id")
-            qa_results.append(
-                {
-                    "question": question_text,
-                    "answer": storage.get("text", ""),
-                    "citations": storage.get("citations", {}),
-                    "raw_comments": comments,
-                    "slot_id": slot_id,
-                }
-            )
-        bundle = filler.build_docx_slot_bundle(
-            source_path=config["input_path"],
-            slots_payload=slots_payload,
-            qa_results=qa_results,
-            include_citations=include_citations,
-            write_mode=config["docx_write_mode"],
-        )
-        run_context = {
-            "mode": "docx_slots",
-            "uploaded_name": config["file_name"],
-            "fund": config["fund"],
-            "search_mode": config["search_mode"],
-            "include_citations": include_citations,
-            "docx_write_mode": config["docx_write_mode"],
-            "extra_documents": job.get("extra_doc_names", []),
-            "qa_pairs": bundle.get("qa_pairs", []),
-            "slots": slots_payload,
-            "skipped_slots": job.get("skipped_slots", []),
-            "heuristic_skips": job.get("heuristic_skips", []),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-    else:
-        qa_results = []
-        total = len(questions_text)
-        for idx in range(total):
-            entry = answers[idx] if idx < len(answers) else None
-            if entry is None:
-                storage = {"text": "No answer generated.", "citations": {}}
-                comments = []
-            else:
-                storage = entry["storage_answer"]
-                comments = entry.get("comments", [])
-            qa_results.append(
-                {
-                    "answer": storage.get("text", ""),
-                    "citations": storage.get("citations", {}),
-                    "raw_comments": comments,
-                }
-            )
-        bundle = filler.build_summary_bundle(
-            questions=questions_text,
-            qa_results=qa_results,
-            include_citations=include_citations,
-        )
-        run_context = {
-            "mode": "document_summary",
-            "uploaded_name": config["file_name"],
-            "fund": config["fund"],
-            "search_mode": config["search_mode"],
-            "include_citations": include_citations,
-            "length": config["length_opt"],
-            "approx_words": config["approx_words"],
-            "extra_documents": job.get("extra_doc_names", []),
-            "qa_pairs": bundle.get("qa_pairs", []),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    job["downloads"] = bundle.get("downloads", [])
-    job["run_context"] = run_context
-    job["status"] = "finished"
-    job["completed"] = len([entry for entry in answers if entry is not None])
-
-
-def _register_job_downloads(job: Dict[str, Any]) -> None:
-    """Persist job downloads into session download bucket once."""
-
-    if not job or not job.get("downloads"):
-        if job is not None:
-            job["downloads_registered"] = True
-        return
-    if job.get("downloads_registered"):
-        return
-    _reset_doc_downloads()
-    for item in job["downloads"]:
-        _store_doc_download(
-            item.get("key", f"download_{uuid4().hex[:8]}"),
-            label=item.get("label", "Download file"),
-            data=item.get("data", b""),
-            file_name=item.get("file_name", "output"),
-            mime=item.get("mime"),
-            order=item.get("order", 0),
-        )
-    job["downloads_registered"] = True
-
-
-def _render_document_job(job: Dict[str, Any], *, include_citations: bool, show_live: bool) -> None:
-    """Display current progress and answered cards for an in-flight or completed job."""
-
-    if not job:
-        return
-
-    answers: List[Optional[Dict[str, Any]]] = job.get("answers", [])
-    questions_text: List[str] = job.get("questions_text", [])
-    total = len(answers)
-    if total == 0:
-        st.info("No questions detected for this document.")
-        return
-    completed = job.get("completed", sum(1 for entry in answers if entry is not None))
-
-    if total:
-        progress_value = completed / total
-        st.progress(progress_value, text=f"{completed}/{total}")
-
-    if job.get("mode") == "docx_slots":
-        skipped = job.get("skipped_slots") or []
-        heuristic = job.get("heuristic_skips") or []
-        if skipped or heuristic:
-            st.warning(f"Skipped {len(skipped) + len(heuristic)} question(s) that cannot be answered automatically.")
-            with st.expander("View skipped questions", expanded=False):
-                for entry in skipped:
-                    reason = entry.get("reason") or "unspecified"
-                    q = (entry.get("question_text") or "").strip() or "[blank question text]"
-                    st.markdown(f"- **{q}** — {reason}")
-                for entry in heuristic:
-                    reason = entry.get("reason", "unspecified")
-                    q = (entry.get("question_text") or "").strip() or "[blank question text]"
-                    st.markdown(f"- **{q}** — {reason}")
-
-    qa_box = st.container()
-    for idx in range(total):
-        question_text = questions_text[idx] if idx < len(questions_text) else f"Question {idx + 1}"
-        placeholder = create_live_placeholder(qa_box, idx, question_text)
-        entry = answers[idx]
-        if entry is None:
-            continue
-        payload = entry.get("answer_payload")
-        comments = entry.get("comments", [])
-        run_context = job.get("run_context") or {
-            "uploaded_name": job["config"]["file_name"],
-            "fund": job["config"]["fund"],
-            "search_mode": job["config"]["search_mode"],
-            "include_citations": include_citations,
-        }
-        render_live_answer(
-            placeholder,
-            payload,
-            comments,
-            include_citations,
-            feedback=feedback_ui,
-            card_index=idx,
-            question_text=question_text,
-            run_context=run_context,
-            use_dialog=True,
-        )
-
 
 
 def _remember_uploaded_file(uploaded_file, upload_token: str) -> None:
@@ -1643,25 +1154,48 @@ def main():
                     "length_opt": length_opt,
                     "approx_words": int(approx_words) if approx_words else None,
                     "min_confidence": float(min_confidence),
-                    "llm_model": llm_model,
                     "framework": framework,
                     "docx_as_text": docx_as_text,
                     "docx_write_mode": docx_write_mode,
                     "extra_doc_paths": extra_doc_paths,
                     "extra_doc_names": extra_doc_names,
                 }
-                _schedule_document_job(config)
+                llm = CompletionsClient(model=llm_model) if framework == "aladdin" else OpenAIClient(model=llm_model)
+                responder = Responder(
+                    llm_client=llm,
+                    search_mode=search_mode,
+                    fund=fund,
+                    k=int(k_max_hits),
+                    length=length_opt,
+                    approx_words=int(approx_words) if approx_words else None,
+                    min_confidence=float(min_confidence),
+                    include_citations=include_citations,
+                    extra_docs=extra_doc_paths,
+                )
+                extractor = QuestionExtractor(llm)
+                job = document_job_controller.schedule(
+                    config=config,
+                    responder=responder,
+                    extractor=extractor,
+                )
+                st.session_state["doc_job"] = job
+                st.session_state["doc_processing_state"] = "running"
+                st.session_state["doc_processing_started_at"] = datetime.utcnow().isoformat()
+                st.session_state["doc_processing_result"] = None
+                st.session_state["doc_processing_error"] = None
+                st.session_state["doc_feedback_submitted"] = False
+                st.session_state["doc_card_feedback_submitted"] = {}
                 _trigger_rerun()
 
         job = st.session_state.get("doc_job")
         if job and job.get("status") in {"running", "ready_for_finalize"}:
-            _update_document_job(job)
+            document_job_controller.update(job)
             if job.get("status") == "ready_for_finalize":
-                _finalize_document_job(job)
+                document_job_controller.finalize(job)
                 job = st.session_state.get("doc_job")
-            _render_document_job(job, include_citations=include_citations, show_live=show_live)
+            document_job_controller.render(job, include_citations=include_citations, show_live=show_live)
             if job.get("status") == "finished":
-                _register_job_downloads(job)
+                document_job_controller.register_downloads(job, reset_downloads=_reset_doc_downloads, store_download=_store_doc_download)
                 if not job.get("completion_notified"):
                     st.success("Document processing completed. You can download the results below or start another run.")
                     st.session_state["doc_processing_state"] = "finished"
@@ -1684,8 +1218,8 @@ def main():
                     time.sleep(0.25)
                     _trigger_rerun()
         elif job and job.get("status") == "finished":
-            _register_job_downloads(job)
-            _render_document_job(job, include_citations=include_citations, show_live=show_live)
+            document_job_controller.register_downloads(job, reset_downloads=_reset_doc_downloads, store_download=_store_doc_download)
+            document_job_controller.render(job, include_citations=include_citations, show_live=show_live)
             st.session_state["doc_processing_state"] = "finished"
             st.session_state["doc_processing_result"] = job.get("run_context")
             if job.get("run_context"):
