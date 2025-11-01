@@ -7,13 +7,13 @@ from uuid import uuid4
 
 import streamlit as st
 
-from persistent_state import (
+from backend.persistent_state import (
     clear_latest_doc_run,
     load_latest_doc_run,
     save_latest_doc_run,
 )
 
-from app.utils import save_uploaded_file
+from frontend.utils import save_uploaded_file
 
 
 def initialize_session_state() -> None:

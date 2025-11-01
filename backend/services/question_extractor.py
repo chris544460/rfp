@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from cli_app import extract_questions, load_input_text
 from input_file_reader.interpreter_sheet import collect_non_empty_cells
-from rfp_docx_slot_finder import extract_slots_from_docx
-from rfp_xlsx_slot_finder import ask_sheet_schema
+from ..rfp_docx_slot_finder import extract_slots_from_docx
+from ..rfp_xlsx_slot_finder import ask_sheet_schema
 
 
 class QuestionExtractor:

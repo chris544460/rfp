@@ -8,14 +8,14 @@ from typing import Any, Dict, List
 
 import streamlit as st
 
-from rfp import my_module
-from rfp.components import FeedbackUI
-from rfp.services import Responder
+from backend import my_module
+from backend.components import FeedbackUI
+from backend.services import Responder
 
-from rfp.answer_composer import CompletionsClient
-from app.config_panel import AppConfig, FOLLOWUP_DEFAULT_MODEL, MODEL_SHORT_NAMES
-from app.session_state import trigger_rerun
-from app.utils import OpenAIClient, save_uploaded_file, select_top_preapproved_answers
+from backend.answer_composer import CompletionsClient
+from frontend.config_panel import AppConfig, FOLLOWUP_DEFAULT_MODEL, MODEL_SHORT_NAMES
+from frontend.session_state import trigger_rerun
+from frontend.utils import OpenAIClient, save_uploaded_file, select_top_preapproved_answers
 
 
 def render_chat_page(view_mode: str, config: AppConfig, feedback: FeedbackUI) -> None:

@@ -2,8 +2,8 @@ import sys, pathlib, docx
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
-from rfp_docx_apply_answers import iter_block_items, mark_multiple_choice
-from word_comments import ensure_comments_part
+from backend.rfp_docx_apply_answers import iter_block_items, mark_multiple_choice
+from backend.word_comments import ensure_comments_part
 
 
 def test_mark_multiple_choice_adds_comment(tmp_path):
@@ -28,4 +28,3 @@ def test_mark_multiple_choice_adds_comment(tmp_path):
     assert "Evidence snippet" in xml
     assert "Source Text" in xml
     assert "<w:b/>" in xml
-

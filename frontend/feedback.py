@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
-from rfp.feedback_storage import build_feedback_store, FeedbackStorageError
+from backend.feedback_storage import build_feedback_store, FeedbackStorageError
 
 LOCAL_FEEDBACK_FILE = Path("feedback_log.ndjson")
 FEEDBACK_FIELDS = [

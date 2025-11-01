@@ -13,7 +13,7 @@ from docx.text.paragraph import Paragraph
 from docx.table import Table
 from docx.oxml import OxmlElement
 from docx.enum.text import WD_COLOR_INDEX
-from rfp_docx_slot_finder import _looks_like_question
+from .rfp_docx_slot_finder import _looks_like_question
 
 # NEW: real comment helper
 from word_comments import add_comment_to_run

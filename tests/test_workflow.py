@@ -3,7 +3,7 @@ import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 from dataclasses import asdict
 import docx
-from rfp_docx_slot_finder import (
+from backend.rfp_docx_slot_finder import (
     detect_para_question_with_blank,
     detect_two_col_table_q_blank,
     detect_response_label_then_blank,
@@ -13,7 +13,7 @@ from rfp_docx_slot_finder import (
     QASlot,
     AnswerLocator
 )
-from rfp_docx_apply_answers import apply_answers_to_docx
+from backend.rfp_docx_apply_answers import apply_answers_to_docx
 
 def build_slots(doc_path):
     doc = docx.Document(doc_path)

@@ -32,47 +32,30 @@ from docx.oxml import OxmlElement
 from docx.shared import Pt
 from openpyxl import load_workbook
 
-# Save current sys.path
-_original_sys_path = sys.path.copy()
-# Expand ~ to the home directory
-rfp_dir = os.path.expanduser("~/derivs-tool/rfp-ai-tool")
-sys.path.insert(0, rfp_dir)
+# Ensure repository root is on sys.path
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from input_file_reader.interpreter_sheet import collect_non_empty_cells
 
-from answer_composer import CompletionsClient
-from search.vector_search import search
-
-# Restore sys.path
-sys.path = _original_sys_path
-# _____________________________________________________________________________
-# Prompt templates & presets (unchanged from your current code)
-# _____________________________________________________________________________
-
-BASE_DIR = Path(__file__).parent
+from backend.answer_composer import CompletionsClient
+from backend.search.vector_search import search
+from backend.prompts import read_prompt
 
 # DOCX slot finder + applier
-from rfp_docx_slot_finder import extract_slots_from_docx
-from rfp_docx_apply_answers import apply_answers_to_docx
-from rfp_xlsx_apply_answers import write_excel_answers
-from rfp_xlsx_slot_finder import ask_sheet_schema
-from qa_core import answer_question
+from backend.rfp_docx_slot_finder import extract_slots_from_docx
+from backend.rfp_docx_apply_answers import apply_answers_to_docx
+from backend.rfp_xlsx_apply_answers import write_excel_answers
+from backend.rfp_xlsx_slot_finder import ask_sheet_schema
+from backend.qa_core import answer_question
 
 
-def load_prompts(base: Path) -> Dict[str, str]:
-    return {
-        "extract_questions": (base / "prompts" / "extract_questions.txt").read_text(
-            encoding="utf-8"
-        ),
-        "answer_search_context": (
-            base / "prompts" / "answer_search_context.txt"
-        ).read_text(encoding="utf-8"),
-        "answer_llm": (base / "prompts" / "answer_llm_template.txt").read_text(
-            encoding="utf-8"
-        ),
-    }
-
-
-PROMPTS = load_prompts(BASE_DIR)
+PROMPTS = {
+    "extract_questions": read_prompt("extract_questions"),
+    "answer_search_context": read_prompt("answer_search_context"),
+    "answer_llm": read_prompt("answer_llm_template"),
+}
 
 PRESET_INSTRUCTIONS = {
     "short": "Answer briefly in 1-2 sentences.",

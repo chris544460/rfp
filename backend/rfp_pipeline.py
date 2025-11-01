@@ -15,7 +15,7 @@ import tempfile
 import importlib
 from typing import Callable, Optional
 
-from rfp_handlers import get_handlers
+from .rfp_handlers import get_handlers
 
 
 def main() -> None:

@@ -10,15 +10,15 @@ from typing import Tuple
 
 import streamlit as st
 
-from rfp.design import APP_NAME, StyleCSS, StyleColors, display_aladdin_logos_and_app_title
-from rfp.components import FeedbackUI
-from rfp.workflows import DocumentJobController
+from backend.design import APP_NAME, StyleCSS, StyleColors, display_aladdin_logos_and_app_title
+from backend.components import FeedbackUI
+from backend.workflows import DocumentJobController
 
-from app.chat_page import render_chat_page
-from app.config_panel import collect_app_config, ensure_api_credentials, select_framework
-from app.document_page import render_document_page
-from app.feedback import build_feedback_manager
-from app.session_state import initialize_session_state
+from frontend.chat_page import render_chat_page
+from frontend.config_panel import collect_app_config, ensure_api_credentials, select_framework
+from frontend.document_page import render_document_page
+from frontend.feedback import build_feedback_manager
+from frontend.session_state import initialize_session_state
 
 
 def configure_page() -> None:

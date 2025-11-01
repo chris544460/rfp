@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from cli_app import build_docx
-from rfp_docx_apply_answers import apply_answers_to_docx
-from rfp_xlsx_apply_answers import write_excel_answers
+from ..rfp_docx_apply_answers import apply_answers_to_docx
+from ..rfp_xlsx_apply_answers import write_excel_answers
 
 
 class DocumentFiller:

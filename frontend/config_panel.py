@@ -237,7 +237,7 @@ def filter_extra_uploads(files) -> List[Any]:
 
 def load_fund_tags() -> List[str]:
     base_dir = Path(__file__).resolve().parents[1]
-    path = base_dir / "rfp" / "structured_extraction" / "parsed_json_outputs" / "embedding_data.json"
+    path = base_dir / "backend" / "structured_extraction" / "parsed_json_outputs" / "embedding_data.json"
     try:
         with path.open("r", encoding="utf-8") as fh:
             data = json.load(fh)

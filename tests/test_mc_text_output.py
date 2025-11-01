@@ -4,7 +4,7 @@ import sys, pathlib, types, json
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
 # Stub external dependencies to avoid import-time failures
-fake_ac = types.ModuleType("answer_composer")
+fake_ac = types.ModuleType("backend.answer_composer")
 
 class DummyClient:
     def __init__(self, model: str | None = None):
@@ -15,13 +15,13 @@ class DummyClient:
 
 fake_ac.CompletionsClient = DummyClient
 fake_ac.get_openai_completion = lambda prompt, model, json_output=False: ("", {})
-sys.modules["answer_composer"] = fake_ac
+sys.modules["backend.answer_composer"] = fake_ac
 
-fake_search = types.ModuleType("search.vector_search")
+fake_search = types.ModuleType("backend.search.vector_search")
 fake_search.search = lambda *args, **kwargs: []
-sys.modules["search.vector_search"] = fake_search
+sys.modules["backend.search.vector_search"] = fake_search
 
-from rfp import my_module
+from backend import my_module
 
 def test_gen_answer_returns_text(monkeypatch):
     my_module.QUESTION_HISTORY.clear()

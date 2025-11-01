@@ -3,7 +3,7 @@ import sys, pathlib, docx
 # Ensure project root on path
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
-from rfp_docx_slot_finder import extract_mc_choices, _iter_block_items
+from backend.rfp_docx_slot_finder import extract_mc_choices, _iter_block_items
 
 
 def test_extract_mc_choices_stops_before_next_question():

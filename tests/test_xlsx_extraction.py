@@ -1,6 +1,6 @@
 import openpyxl
-from rfp_xlsx_slot_finder import extract_slots_from_xlsx, extract_schema_from_xlsx
-from rfp_xlsx_apply_answers import write_excel_answers
+from backend.rfp_xlsx_slot_finder import extract_slots_from_xlsx, extract_schema_from_xlsx
+from backend.rfp_xlsx_apply_answers import write_excel_answers
 
 
 def test_extract_slots_from_xlsx(tmp_path):
