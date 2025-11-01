@@ -3,10 +3,53 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from cli_app import extract_questions, load_input_text
+import re
+from docx import Document
+
 from input_file_reader.interpreter_sheet import collect_non_empty_cells
 from ..rfp_docx_slot_finder import extract_slots_from_docx
 from ..rfp_xlsx_slot_finder import ask_sheet_schema
+from ..prompts import read_prompt
+
+_EXTRACT_PROMPT = read_prompt("extract_questions")
+
+
+def _load_input_text(path: str) -> str:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {p}")
+    suffix = p.suffix.lower()
+    if suffix == ".pdf":
+        try:
+            from PyPDF2 import PdfReader
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("PyPDF2 is required to read PDF inputs") from exc
+        out: List[str] = []
+        with p.open("rb") as f:
+            reader = PdfReader(f)
+            for page in reader.pages:
+                out.append(page.extract_text() or "")
+        return "\n".join(out)
+    if suffix in {".doc", ".docx"}:
+        doc = Document(p)
+        return "\n".join(par.text for par in doc.paragraphs)
+    return p.read_text(encoding="utf-8")
+
+
+def _extract_questions(text: str, llm_client) -> List[str]:
+    prompt = _EXTRACT_PROMPT.format(text=text)
+    result = llm_client.get_completion(prompt)
+    if isinstance(result, tuple):
+        response = result[0]
+    else:
+        response = result
+    lines = str(response or "").splitlines()
+    questions: List[str] = []
+    for line in lines:
+        m = re.match(r"^\s*\d+\)\s+(.*)\s*$", line)
+        if m:
+            questions.append(m.group(1).strip())
+    return questions
 
 
 class QuestionExtractor:
@@ -28,12 +71,12 @@ class QuestionExtractor:
             return self._extract_from_excel(path_obj)
         if suffix == ".docx" and not treat_docx_as_text:
             return self._extract_from_docx_slots(path_obj)
-        return self.extract_from_text(load_input_text(str(path_obj)), source=str(path_obj))
+        return self.extract_from_text(_load_input_text(str(path_obj)), source=str(path_obj))
 
     def extract_from_text(self, text: str, *, source: Optional[str] = None) -> List[Dict[str, Any]]:
         if self._llm is None:
             raise ValueError("QuestionExtractor requires an LLM client for text extraction.")
-        questions = extract_questions(text, self._llm)
+        questions = _extract_questions(text, self._llm)
         payload = [
             {
                 "question": q,
