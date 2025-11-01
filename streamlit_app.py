@@ -10,9 +10,9 @@ from typing import Tuple
 
 import streamlit as st
 
-from design import APP_NAME, StyleCSS, StyleColors, display_aladdin_logos_and_app_title
-from components import FeedbackUI
-from workflows import DocumentJobController
+from rfp.design import APP_NAME, StyleCSS, StyleColors, display_aladdin_logos_and_app_title
+from rfp.components import FeedbackUI
+from rfp.workflows import DocumentJobController
 
 from app.chat_page import render_chat_page
 from app.config_panel import collect_app_config, ensure_api_credentials, select_framework

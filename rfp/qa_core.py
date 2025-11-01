@@ -16,12 +16,12 @@ from typing import Dict, List, Optional, Tuple, Callable, Set
 
 # Your vector search — keep the original import path you already use.
 # If your project uses a different path, update this import accordingly.
-from search.vector_search import search
-from llm_doc_search import search_uploaded_docs
+from .search.vector_search import search
+from .llm_doc_search import search_uploaded_docs
 
 # Use the Utilities' client; typically returns (text, usage)
-from answer_composer import CompletionsClient
-from prompts import load_prompts
+from .answer_composer import CompletionsClient
+from .prompts import load_prompts
 
 
 # Default debug flag; defaults to True unless explicitly disabled via env.

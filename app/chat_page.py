@@ -8,11 +8,11 @@ from typing import Any, Dict, List
 
 import streamlit as st
 
-import my_module
-from components import FeedbackUI
-from services import Responder
+from rfp import my_module
+from rfp.components import FeedbackUI
+from rfp.services import Responder
 
-from answer_composer import CompletionsClient
+from rfp.answer_composer import CompletionsClient
 from app.config_panel import AppConfig, FOLLOWUP_DEFAULT_MODEL, MODEL_SHORT_NAMES
 from app.session_state import trigger_rerun
 from app.utils import OpenAIClient, save_uploaded_file, select_top_preapproved_answers

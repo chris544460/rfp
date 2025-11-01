@@ -31,13 +31,13 @@ import docx
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from cli_app import build_docx, extract_questions, load_input_text
-from qa_core import answer_question, collect_relevant_snippets
-from answer_composer import CompletionsClient, get_openai_completion
+from .cli_app import build_docx, extract_questions, load_input_text
+from rfp.qa_core import answer_question, collect_relevant_snippets
+from rfp.answer_composer import CompletionsClient, get_openai_completion
 from input_file_reader.interpreter_sheet import collect_non_empty_cells
-from rfp_xlsx_slot_finder import ask_sheet_schema
-from rfp_xlsx_apply_answers import write_excel_answers
-from rfp_docx_slot_finder import (
+from rfp.rfp_xlsx_slot_finder import ask_sheet_schema
+from rfp.rfp_xlsx_apply_answers import write_excel_answers
+from rfp.rfp_docx_slot_finder import (
     QUESTION_PHRASES,
     USE_SPACY_QUESTION,
     extract_slots_from_docx,
@@ -47,8 +47,8 @@ from rfp_docx_slot_finder import (
     _looks_like_question,
     _spacy_docx_is_question,
 )
-from rfp_docx_apply_answers import apply_answers_to_docx
-from search.vector_search import index_size, search
+from rfp.rfp_docx_apply_answers import apply_answers_to_docx
+from rfp.search.vector_search import index_size, search
 
 
 DEBUG_ENABLED = os.getenv("CLI_STREAMLIT_DEBUG", "0") not in {"", "0", "false", "False"}

@@ -21,7 +21,7 @@ fake_search = types.ModuleType("search.vector_search")
 fake_search.search = lambda *args, **kwargs: []
 sys.modules["search.vector_search"] = fake_search
 
-import my_module
+from rfp import my_module
 
 
 def test_followup_skips_search_and_uses_history(monkeypatch):

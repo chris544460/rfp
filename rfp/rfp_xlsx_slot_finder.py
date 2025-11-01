@@ -382,7 +382,7 @@ def profile_workbook(path: str, debug: bool = False) -> Dict[str, Any]:
 def _call_llm(prompt_file: str, payload: dict, *, model: str) -> Any:
     """Helper to invoke the selected LLM with a prompt template."""
 
-    from answer_composer import CompletionsClient, get_openai_completion
+    from .answer_composer import CompletionsClient, get_openai_completion
 
     prompt_path = os.path.join(os.path.dirname(__file__), "prompts", prompt_file)
     with open(prompt_path, "r", encoding="utf-8") as f:
@@ -750,7 +750,7 @@ def llm_classify_cells(
     sent to an LLM prompt that labels the cells as ``QUESTION_HEADER``,
     ``QUESTION_BODY`` or ``NOT_QUESTION`` and returns a confidence score.
     """
-    from answer_composer import get_openai_completion
+    from .answer_composer import get_openai_completion
 
     prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "xlsx_classify_cells.txt")
     with open(prompt_path, "r", encoding="utf-8") as f:

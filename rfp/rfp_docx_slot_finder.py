@@ -69,8 +69,8 @@ import docx
 from docx.text.paragraph import Paragraph
 from docx.table import Table
 from docx.oxml.ns import qn
-from answer_composer import CompletionsClient, get_openai_completion
-from prompts import read_prompt
+from .answer_composer import CompletionsClient, get_openai_completion
+from .prompts import read_prompt
 
 # Framework and model selection
 FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "aladdin")

@@ -2,15 +2,29 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import streamlit as st
 
-from cli_streamlit_app import _resolve_concurrency
-from components import FeedbackUI, create_live_placeholder, render_live_answer
-from services import DocumentFiller
+from ..components import FeedbackUI, create_live_placeholder, render_live_answer
+from ..services import DocumentFiller
+
+
+def _resolve_concurrency(value: Optional[int]) -> int:
+    env = os.getenv("CLI_STREAMLIT_CONCURRENCY")
+    resolved = value
+    if resolved is None and env:
+        try:
+            resolved = int(env)
+        except ValueError:
+            print(f"[WARN] Invalid CLI_STREAMLIT_CONCURRENCY '{env}'; falling back to default")
+    if resolved is None:
+        cpu_default = max(1, (os.cpu_count() or 4))
+        resolved = min(8, max(2, cpu_default))
+    return max(1, resolved)
 
 
 class DocumentJobController:

@@ -8,17 +8,17 @@ from uuid import uuid4
 
 import streamlit as st
 
-from components import (
+from rfp.components import (
     DOC_HIGHLIGHT_OPTIONS,
     DOC_IMPROVEMENT_OPTIONS,
     FeedbackUI,
     create_live_placeholder,
     render_live_answer,
 )
-from services import QuestionExtractor, Responder
-from workflows import DocumentJobController
+from rfp.services import QuestionExtractor, Responder
+from rfp.workflows import DocumentJobController
 
-from answer_composer import CompletionsClient
+from rfp.answer_composer import CompletionsClient
 from app.config_panel import AppConfig
 from app.feedback import FeedbackManager
 from app.session_state import (

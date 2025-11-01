@@ -14,8 +14,8 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - pdfplumber is optional at runtime
     pdfplumber = None
 
-from answer_composer import CompletionsClient
-from prompts import read_prompt
+from .answer_composer import CompletionsClient
+from .prompts import read_prompt
 
 
 SEARCH_PROMPT = read_prompt(

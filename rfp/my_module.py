@@ -2,9 +2,9 @@
 import os, re, json
 from typing import Optional, List, Dict, Any, Callable
 
-from answer_composer import CompletionsClient
-from qa_core import answer_question  # <<— now comes from Utilities core
-from prompts import read_prompt
+from .answer_composer import CompletionsClient
+from .qa_core import answer_question  # <<— now comes from Utilities core
+from .prompts import read_prompt
 
 # Defaults (overridable via env vars)
 MODEL            = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14_research")

@@ -1,4 +1,4 @@
-import my_module
+from rfp import my_module
 from types import SimpleNamespace
 
 
