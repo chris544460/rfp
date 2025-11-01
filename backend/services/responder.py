@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from qa_core import answer_question, collect_relevant_snippets
+from ..qa_core import answer_question, collect_relevant_snippets
 
 ProgressFn = Optional[Callable[[str], None]]
 BatchProgressFn = Optional[Callable[[int, str], None]]
