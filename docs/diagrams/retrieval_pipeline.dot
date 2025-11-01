@@ -1,0 +1,119 @@
+digraph RetrievalPipeline {
+    graph [label="DOCX Slot → Retrieval → Answer", labelloc="t", fontsize=20, fontname="Helvetica"];
+    rankdir=LR;
+    splines=true;
+    node [shape=rect, style="rounded,filled", fillcolor="#eef3ff", fontname="Helvetica", fontsize=11];
+    edge [fontname="Helvetica"];
+
+    subgraph cluster_docx {
+        label="DOCX slot detection (rfp_docx_slot_finder.py)";
+        color="#a855f7";
+        style="rounded";
+        docx_input [label="DOCX template → paragraphs & tables"];
+        detect_slots [label="Detect questions & answer targets
+• Rules: question paragraph + blank, 2-column tables, response labels
+• Optional LLM assist for tricky anchors
+Example slot: question='Describe your risk management framework.'
+locator=AnswerLocator(paragraph_after, offset=1)"];
+        post_slots [label="Normalize slots
+• filter_slots drops blanks/unsupported
+• attach_context captures headings/outline
+• dedupe_slots merges duplicates
+Outputs: slot list + skipped diagnostics"];
+        docx_input -> detect_slots -> post_slots;
+        question_input [label="Slot question_text + retrieval config
+(e.g., mode=both, fund='Fund - EFVI', k=20, min_conf=0.2, citations on)"];
+        post_slots -> question_input;
+    }
+
+    subgraph cluster_generator {
+        label="build_generator (streamlit_app.py)";
+        color="#94a3b8";
+        style="rounded";
+        build_gen [label="Wrap qa_core.answer_question with shared config
+Example call: generator('Describe your risk management framework.')"];
+    }
+
+    subgraph cluster_qa {
+        label="qa_core.py";
+        color="#60a5fa";
+        style="rounded";
+        collect [label="collect_relevant_snippets
+Log: '[qa_core] retrieved 18 hits before filtering'"];
+        filter_hits [label="Filter & label context
+Example kept snippet:
+[1] RiskPolicy.pdf (cosine 0.82) – 'The firm maintains a three lines of defence model...' "];
+        build_prompt [label="Assemble prompt
+Example:
+Length preset: 'Answer in detail.'
+Context:
+[1] RiskPolicy.pdf: The firm maintains...
+[2] AnnualReport.docx: The investment team...
+Question:
+Describe your risk management framework."];
+        llm_call [label="Call CompletionsClient/OpenAI
+Draft answer with citations"];
+        finalize [label="Finalize payload
+Renumber citations, bundle text + snippets"];
+    }
+
+    subgraph cluster_vector {
+        label="vector_search/search.py";
+        color="#34d399";
+        style="rounded";
+        embed [label="Embed question via Surface/Azure (normalized vector)"];
+        build_query [label="Prepare request headers/auth for embedding service"];
+        choose_index [label="Pick search strategy based on mode"];
+        mode_answer [label="Mode: answer
+• Index: vector_store/answer/faiss.index
+• Embeddings from vetted answer snippets
+• High precision (copy-ready language)"];
+        mode_question [label="Mode: question
+• Index: vector_store/question/faiss.index
+• Embeddings from question prompts
+• Boosts recall when templates mirror past questions"];
+        mode_blend [label="Mode: blend (optional)
+• Index: vector_store/blend/faiss.index
+• Embeds concatenated question + answer
+• Balanced fallback when single perspectives miss"];
+        mode_both [label="Mode: both / dual
+• Runs blend (if available), answer, and question searches
+• Deduplicates by record ID
+• Default in UI for broad coverage"];
+        faiss_search [label="FAISS retrieval per selected index
+Example hit: {id:'ans_2041', cosine:0.84, origin:'vector:answer', tags:['Fund - EFVI']}" ];
+        merge_hits [label="Merge + filter pipeline
+1. Union hits from each executed index
+2. For each record ID keep the highest cosine
+3. Drop entries whose metadata.tags lack chosen fund
+4. Sort by cosine desc, take top-k
+5. Preserve origin + raw_index for diagnostics"];
+        diagnostics [label="Annotate hits for qa_core diagnostics and UI"];
+        embed -> build_query -> choose_index;
+        choose_index -> mode_answer;
+        choose_index -> mode_question;
+        choose_index -> mode_blend;
+        choose_index -> mode_both;
+        mode_answer -> faiss_search;
+        mode_question -> faiss_search;
+        mode_blend -> faiss_search;
+        mode_both -> faiss_search;
+        faiss_search -> merge_hits -> diagnostics;
+    }
+
+    subgraph cluster_outputs {
+        label="Answer inserted into DOCX";
+        color="#fbbf24";
+        style="rounded";
+        answer_payload [label="Answer payload per slot
+Example: {text:'Our risk framework...', citations:{'1':..., '2':...}}"];
+        apply_docx [label="apply_answers_to_docx
+Insert answer at locator, add citation comments"];
+    }
+
+    question_input -> build_gen;
+    build_gen -> collect;
+    collect -> embed [label="vector_search.search"];
+    diagnostics -> filter_hits;
+    filter_hits -> build_prompt -> llm_call -> finalize -> answer_payload -> apply_docx;
+}

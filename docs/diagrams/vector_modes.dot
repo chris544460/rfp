@@ -1,0 +1,39 @@
+digraph VectorModes {
+    graph [label="Searching with mode='both'", labelloc="t", fontsize=20, fontname="Helvetica"];
+    rankdir=TB;
+    splines=true;
+    node [shape=rect, style="rounded,filled", fillcolor="#eef3ff", fontname="Helvetica", fontsize=11];
+
+    question [label="Question\n'This year, describe your risk management framework.'\nConfig: mode=both, fund='Fund - EFVI', k=3"];
+    embed [label="Surface/Azure embedding\n→ normalized 1536-d vector"];
+
+    question -> embed;
+
+    subgraph cluster_indexes {
+        label="Parallel searches (mode='both')";
+        color="#34d399";
+        style="rounded";
+        answer_hits [label="Answer index\nvector_store/answer\nExample hits:\n• ans_2041 (0.84) text='Our framework has three lines...'\n• ans_1012 (0.78) text='Risk governed by committee...'" fillcolor="#dcfce7"];
+        blend_hits [label="Blend index (if available)\nvector_store/blend\nExample hits:\n• blend_33 (0.81) text='Our three-line defence framework...'" fillcolor="#fde68a"];
+        question_hits [label="Question index\nvector_store/question\nExample hits:\n• q_773 (0.79) text='Describe your risk management framework.'" fillcolor="#bfdbfe"];
+    }
+
+    embed -> answer_hits;
+    embed -> blend_hits;
+    embed -> question_hits;
+
+    union [label="Combine lists (tag origin)\n→ [(ans_2041, 0.84, vector:answer), …]"];
+    dedupe [label="Deduplicate by record id\nKeep highest cosine" fillcolor="#dbeafe"];
+    fund_filter [label="Filter by tags\nDrop items without 'Fund - EFVI'" fillcolor="#dbeafe"];
+    topk [label="Sort & slice top-k\nExample result (k=3):\n1) ans_2041 (0.84, vector:answer)\n2) blend_33 (0.81, vector:blend)\n3) q_773 (0.79, vector:question)" fillcolor="#dbeafe"];
+
+    answer_hits -> union;
+    blend_hits -> union;
+    question_hits -> union;
+
+    union -> dedupe -> fund_filter -> topk;
+
+    result [label="Returned to qa_core.collect_relevant_snippets\nEach entry carries source path + score + origin"];
+
+    topk -> result;
+}

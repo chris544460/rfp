@@ -1,0 +1,31 @@
+digraph VectorEmbeddingPipeline {
+    graph [label="How the Retrieval Indexes Are Built", labelloc="t", fontsize=20, fontname="Helvetica"];
+    rankdir=LR;
+    splines=true;
+    node [shape=rect, style="rounded,filled", fillcolor="#eef3ff", fontname="Helvetica", fontsize=11];
+
+    dataset [label="Q/A dataset\nstructured_extraction/…/embedding_data.json\nEach record: answer text, matching question, tags"];
+    orchestrator [label="embed.sh\nRuns encode.py with three weights:\n• w = 0.0 → answer view\n• w = 1.0 → question view\n• w = 0.65 → blended view"];
+    dataset -> orchestrator;
+
+    subgraph cluster_encode {
+        label="One encode.py run";
+        color="#60a5fa";
+        style="rounded";
+        prep [label="Load records · extract answers, questions, ids"];
+        call_api [label="Request embeddings from Surface/Azure\nParallel threads · model text-embedding-ada-002"];
+        mix [label="Combine according to weight w\nNormalize vector after mixing"];
+        faiss [label="Write FAISS index + metadata list"];
+        prep -> call_api -> mix -> faiss;
+    }
+
+    orchestrator -> prep;
+
+    answer_index [label="Answer view (w = 0.0)\nWhat we embed: answer text only\nWhy: capture polished, reference-ready language\nWhere: vector_store/answer/faiss.index" fillcolor="#dcfce7"];
+    question_index [label="Question view (w = 1.0)\nWhat we embed: question prompts only\nWhy: quickly match templates phrased like user query\nWhere: vector_store/question/faiss.index" fillcolor="#bfdbfe"];
+    blend_index [label="Blended view (w = 0.65)\nWhat we embed: weighted mix answer + question\nWhy: balance intent (question) with phrasing (answer)\nWhere: vector_store/blend/faiss.index" fillcolor="#fde68a"];
+
+    faiss -> answer_index [label="run 1"];
+    faiss -> question_index [label="run 2"];
+    faiss -> blend_index [label="run 3"];
+}
