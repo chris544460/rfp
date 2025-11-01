@@ -75,24 +75,33 @@ def ensure_api_credentials(framework: str, view_mode: str) -> None:
     """Prompt for framework credentials when they are not provided via environment."""
 
     if framework == "aladdin":
+        secrets = {
+            "aladdin_studio_api_key": True,
+            "aladdin_passwd": True,
+        }
         for key, label in [
             ("aladdin_studio_api_key", "Aladdin Studio API key"),
             ("defaultWebServer", "Default Web Server"),
             ("aladdin_user", "Aladdin user"),
             ("aladdin_passwd", "Aladdin password"),
         ]:
-            if st.session_state.get(key) or st.session_state.get(key.upper()):
+            existing = os.getenv(key) or os.getenv(key.upper())
+            if existing:
+                st.session_state[key] = existing
                 if view_mode == "Developer":
-                    st.info(f"{key} loaded from session or environment")
+                    st.info(f"{key} loaded from environment")
                 continue
             val = st.text_input(
                 label,
-                type="password" if "passwd" in key or "api_key" in key else "default",
+                type="password" if secrets.get(key) else "default",
             )
             if val:
                 st.session_state[key] = val
+                os.environ[key] = val
     else:
-        if os.getenv("OPENAI_API_KEY"):
+        existing = os.getenv("OPENAI_API_KEY")
+        if existing:
+            st.session_state["OPENAI_API_KEY"] = existing
             if view_mode == "Developer":
                 st.info("OPENAI_API_KEY loaded from environment")
         else:
@@ -103,6 +112,7 @@ def ensure_api_credentials(framework: str, view_mode: str) -> None:
             )
             if api_key:
                 st.session_state["OPENAI_API_KEY"] = api_key
+                os.environ["OPENAI_API_KEY"] = api_key
 
 
 def collect_app_config(
