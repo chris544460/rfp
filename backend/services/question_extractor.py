@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 import re
 from docx import Document
 
-from input_file_reader.interpreter_sheet import collect_non_empty_cells
+from ..structured_extraction.interpreter_sheet import collect_non_empty_cells
 from ..rfp_docx_slot_finder import extract_slots_from_docx
 from ..rfp_xlsx_slot_finder import ask_sheet_schema
 from ..prompts import read_prompt
