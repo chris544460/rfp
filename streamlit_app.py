@@ -83,11 +83,13 @@ import re
 import io
 import html
 import contextlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from uuid import uuid4
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 from answer_composer import CompletionsClient, get_openai_completion
+from cli_streamlit_app import _resolve_concurrency
 import my_module
 from my_module import _classify_intent, _detect_followup, gen_answer
 from feedback_storage import build_feedback_store, FeedbackStorageError
@@ -1586,6 +1588,8 @@ def main():
                             )
                             if total_qs:
                                 progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
+
+                            pending_indices: List[int] = []
                             for idx, entry in enumerate(questions_list):
                                 existing = answers_payload[idx] if answers_payload and idx < len(answers_payload) else None
                                 q_text = entry.get("question", "")
@@ -1602,26 +1606,45 @@ def main():
                                             question_text=q_text,
                                         )
                                     continue
-                                result = responder.answer(q_text)
-                                qa_entry = dict(entry)
-                                qa_entry["answer"] = result["text"]
-                                qa_entry["citations"] = result["citations"]
-                                qa_entry["raw_comments"] = result.get("raw_comments", [])
-                                qa_entry["status"] = "answered"
-                                qa_entry["result_payload"] = result
-                                answers_payload[idx] = qa_entry
-                                st.session_state["doc_answers_payload"] = answers_payload
-                                answered_count += 1
-                                progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
-                                if show_live and placeholders[idx] is not None:
-                                    _render_live_answer(
-                                        placeholders[idx],
-                                        result,
-                                        qa_entry.get("raw_comments") or [],
-                                        include_citations,
-                                        card_index=idx,
-                                        question_text=q_text,
-                                    )
+                                pending_indices.append(idx)
+
+                            if pending_indices:
+                                worker_limit = _resolve_concurrency(None) or len(pending_indices)
+                                worker_limit = max(1, min(worker_limit, len(pending_indices)))
+                                with ThreadPoolExecutor(max_workers=worker_limit) as pool:
+                                    future_map = {
+                                        pool.submit(
+                                            responder.answer,
+                                            questions_list[idx].get("question", ""),
+                                            include_citations=include_citations,
+                                        ): idx
+                                        for idx in pending_indices
+                                    }
+                                    for fut in as_completed(future_map):
+                                        idx = future_map[fut]
+                                        q_text = questions_list[idx].get("question", "")
+                                        result = fut.result()
+                                        qa_entry = dict(questions_list[idx])
+                                        qa_entry["answer"] = result["text"]
+                                        qa_entry["citations"] = result["citations"]
+                                        qa_entry["raw_comments"] = result.get("raw_comments", [])
+                                        qa_entry["status"] = "answered"
+                                        qa_entry["result_payload"] = result
+                                        answers_payload[idx] = qa_entry
+                                        st.session_state["doc_answers_payload"] = answers_payload
+                                        answered_count += 1
+                                        progress_bar.progress(
+                                            answered_count / total_qs, text=f"{answered_count}/{total_qs}"
+                                        )
+                                        if show_live and placeholders[idx] is not None:
+                                            _render_live_answer(
+                                                placeholders[idx],
+                                                result,
+                                                qa_entry.get("raw_comments") or [],
+                                                include_citations,
+                                                card_index=idx,
+                                                question_text=q_text,
+                                            )
                             qa_results = []
                             for item in answers_payload or []:
                                 if not item or item.get("status") != "answered":
@@ -1727,10 +1750,11 @@ def main():
                             )
                             if total_qs:
                                 progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
+
+                            pending_indices: List[int] = []
                             for idx, slot in enumerate(slot_list):
                                 cached = answers_payload[idx] if answers_payload and idx < len(answers_payload) else None
                                 q_text = (slot.get("question_text") or "").strip()
-                                slot_id = slot.get("id") or f"slot_{idx + 1}"
                                 if cached and cached.get("status") == "answered":
                                     if show_live and placeholders[idx] is not None:
                                         display_payload = cached.get("result_payload")
@@ -1744,45 +1768,66 @@ def main():
                                             question_text=q_text,
                                         )
                                     continue
-                                result = responder.answer(q_text)
-                                if _is_table_slot(slot):
-                                    sanitized = _sanitize_table_answer(result)
-                                    qa_entry = {
-                                        "question": q_text,
-                                        "slot_id": slot_id,
-                                        "answer": sanitized,
-                                        "citations": {},
-                                        "raw_comments": [],
-                                        "status": "answered",
-                                        "result_payload": sanitized,
+                                pending_indices.append(idx)
+
+                            if pending_indices:
+                                worker_limit = _resolve_concurrency(None) or len(pending_indices)
+                                worker_limit = max(1, min(worker_limit, len(pending_indices)))
+                                with ThreadPoolExecutor(max_workers=worker_limit) as pool:
+                                    future_map = {
+                                        pool.submit(
+                                            responder.answer,
+                                            (slot_list[idx].get("question_text") or "").strip(),
+                                            include_citations=include_citations,
+                                        ): idx
+                                        for idx in pending_indices
                                     }
-                                    display_payload = sanitized
-                                    comments_payload = []
-                                else:
-                                    qa_entry = {
-                                        "question": q_text,
-                                        "slot_id": slot_id,
-                                        "answer": result["text"],
-                                        "citations": result["citations"],
-                                        "raw_comments": result.get("raw_comments", []),
-                                        "status": "answered",
-                                        "result_payload": result,
-                                    }
-                                    display_payload = result
-                                    comments_payload = qa_entry["raw_comments"]
-                                answers_payload[idx] = qa_entry
-                                st.session_state["doc_answers_payload"] = answers_payload
-                                answered_count += 1
-                                progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
-                                if show_live and placeholders[idx] is not None:
-                                    _render_live_answer(
-                                        placeholders[idx],
-                                        display_payload,
-                                        comments_payload,
-                                        include_citations and not _is_table_slot(slot),
-                                        card_index=idx,
-                                        question_text=q_text,
-                                    )
+                                    for fut in as_completed(future_map):
+                                        idx = future_map[fut]
+                                        slot = slot_list[idx]
+                                        q_text = (slot.get("question_text") or "").strip()
+                                        slot_id = slot.get("id") or f"slot_{idx + 1}"
+                                        result = fut.result()
+                                        if _is_table_slot(slot):
+                                            sanitized = _sanitize_table_answer(result)
+                                            qa_entry = {
+                                                "question": q_text,
+                                                "slot_id": slot_id,
+                                                "answer": sanitized,
+                                                "citations": {},
+                                                "raw_comments": [],
+                                                "status": "answered",
+                                                "result_payload": sanitized,
+                                            }
+                                            display_payload = sanitized
+                                            comments_payload: List[Any] = []
+                                        else:
+                                            qa_entry = {
+                                                "question": q_text,
+                                                "slot_id": slot_id,
+                                                "answer": result["text"],
+                                                "citations": result["citations"],
+                                                "raw_comments": result.get("raw_comments", []),
+                                                "status": "answered",
+                                                "result_payload": result,
+                                            }
+                                            display_payload = result
+                                            comments_payload = qa_entry["raw_comments"]
+                                        answers_payload[idx] = qa_entry
+                                        st.session_state["doc_answers_payload"] = answers_payload
+                                        answered_count += 1
+                                        progress_bar.progress(
+                                            answered_count / total_qs, text=f"{answered_count}/{total_qs}"
+                                        )
+                                        if show_live and placeholders[idx] is not None:
+                                            _render_live_answer(
+                                                placeholders[idx],
+                                                display_payload,
+                                                comments_payload,
+                                                include_citations and not _is_table_slot(slot),
+                                                card_index=idx,
+                                                question_text=q_text,
+                                            )
                             qa_results = []
                             for item in answers_payload or []:
                                 if not item or item.get("status") != "answered":
@@ -1869,6 +1914,8 @@ def main():
                             )
                             if total_qs:
                                 progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
+
+                            pending_indices: List[int] = []
                             for idx, entry in enumerate(questions_list):
                                 existing = answers_payload[idx] if answers_payload and idx < len(answers_payload) else None
                                 q_text = entry.get("question", "")
@@ -1885,26 +1932,45 @@ def main():
                                             question_text=q_text,
                                         )
                                     continue
-                                result = responder.answer(q_text)
-                                qa_entry = dict(entry)
-                                qa_entry["answer"] = result["text"]
-                                qa_entry["citations"] = result["citations"]
-                                qa_entry["raw_comments"] = result.get("raw_comments", [])
-                                qa_entry["status"] = "answered"
-                                qa_entry["result_payload"] = result
-                                answers_payload[idx] = qa_entry
-                                st.session_state["doc_answers_payload"] = answers_payload
-                                answered_count += 1
-                                progress_bar.progress(answered_count / total_qs, text=f"{answered_count}/{total_qs}")
-                                if show_live and placeholders[idx] is not None:
-                                    _render_live_answer(
-                                        placeholders[idx],
-                                        result,
-                                        qa_entry.get("raw_comments") or [],
-                                        include_citations,
-                                        card_index=idx,
-                                        question_text=q_text,
-                                    )
+                                pending_indices.append(idx)
+
+                            if pending_indices:
+                                worker_limit = _resolve_concurrency(None) or len(pending_indices)
+                                worker_limit = max(1, min(worker_limit, len(pending_indices)))
+                                with ThreadPoolExecutor(max_workers=worker_limit) as pool:
+                                    future_map = {
+                                        pool.submit(
+                                            responder.answer,
+                                            questions_list[idx].get("question", ""),
+                                            include_citations=include_citations,
+                                        ): idx
+                                        for idx in pending_indices
+                                    }
+                                    for fut in as_completed(future_map):
+                                        idx = future_map[fut]
+                                        q_text = questions_list[idx].get("question", "")
+                                        result = fut.result()
+                                        qa_entry = dict(questions_list[idx])
+                                        qa_entry["answer"] = result["text"]
+                                        qa_entry["citations"] = result["citations"]
+                                        qa_entry["raw_comments"] = result.get("raw_comments", [])
+                                        qa_entry["status"] = "answered"
+                                        qa_entry["result_payload"] = result
+                                        answers_payload[idx] = qa_entry
+                                        st.session_state["doc_answers_payload"] = answers_payload
+                                        answered_count += 1
+                                        progress_bar.progress(
+                                            answered_count / total_qs, text=f"{answered_count}/{total_qs}"
+                                        )
+                                        if show_live and placeholders[idx] is not None:
+                                            _render_live_answer(
+                                                placeholders[idx],
+                                                result,
+                                                qa_entry.get("raw_comments") or [],
+                                                include_citations,
+                                                card_index=idx,
+                                                question_text=q_text,
+                                            )
                             qa_results = []
                             for item in answers_payload or []:
                                 if not item or item.get("status") != "answered":
