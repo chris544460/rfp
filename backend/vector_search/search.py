@@ -19,7 +19,17 @@ from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
-import faiss
+
+try:  # pragma: no cover - optional heavy dependency
+    import faiss  # type: ignore
+except ModuleNotFoundError:
+    try:
+        import faiss_cpu as faiss  # type: ignore
+    except ModuleNotFoundError as exc:  # pragma: no cover - informative error
+        raise ModuleNotFoundError(
+            "The backend.vector_search module requires the `faiss` library. "
+            "Install `faiss-cpu` (pip install faiss-cpu) or provide FAISS binaries on PYTHONPATH."
+        ) from exc
 import requests
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
