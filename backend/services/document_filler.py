@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from cli_app import build_docx
+from docx import Document
 from ..rfp_docx_apply_answers import apply_answers_to_docx
 from ..rfp_xlsx_apply_answers import write_excel_answers
 
@@ -182,11 +182,11 @@ class DocumentFiller:
     ) -> Dict[str, Any]:
         answers_text = [qa.get("answer", "") for qa in qa_results]
         comments = [qa.get("raw_comments") or [] for qa in qa_results]
-        doc_bytes = build_docx(
-            list(questions),
-            answers_text,
-            comments,
-            include_comments=include_citations,
+        doc_bytes = self._generate_summary_doc(
+            questions=list(questions),
+            answers=answers_text,
+            comments=comments,
+            include_citations=include_citations,
         )
 
         downloads = [
@@ -229,6 +229,50 @@ class DocumentFiller:
         if not include_citations:
             return text
         return {"text": text, "citations": citations}
+
+    def _generate_summary_doc(
+        self,
+        *,
+        questions: List[str],
+        answers: List[str],
+        comments: List[List],
+        include_citations: bool,
+    ) -> bytes:
+        doc = Document()
+        doc.add_heading("Q/A Summary", level=1)
+
+        for idx, (question, answer, comment_list) in enumerate(zip(questions, answers, comments), start=1):
+            doc.add_heading(f"Q{idx}: {question}", level=2)
+            doc.add_paragraph(answer or "_No answer provided._")
+
+            if include_citations and comment_list:
+                doc.add_heading("Citations", level=3)
+                for entry in comment_list:
+                    try:
+                        label, source, snippet, score, date = entry
+                    except ValueError:
+                        label, source, snippet, score, date = ("", "", str(entry), "", "")
+                    bullet = []
+                    if label:
+                        bullet.append(f"[{label}]")
+                    if source:
+                        bullet.append(source)
+                    if date:
+                        bullet.append(str(date))
+                    header = " ".join(bullet).strip() or "Source"
+                    para = doc.add_paragraph(style="List Bullet")
+                    para.add_run(f"{header}: ").bold = True
+                    para.add_run(snippet or "No snippet provided.")
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
+        tmp.close()
+        doc.save(tmp.name)
+        data = Path(tmp.name).read_bytes()
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+        return data
 
     def _build_download(
         self,
