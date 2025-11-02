@@ -34,7 +34,7 @@ from docx.text.paragraph import Paragraph
 from .cli_app import build_docx, extract_questions, load_input_text
 from backend.qa_core import answer_question, collect_relevant_snippets
 from backend.answer_composer import CompletionsClient, get_openai_completion
-from input_file_reader.interpreter_sheet import collect_non_empty_cells
+from backend.structured_extraction.interpreter_sheet import collect_non_empty_cells
 from backend.rfp_xlsx_slot_finder import ask_sheet_schema
 from backend.rfp_xlsx_apply_answers import write_excel_answers
 from backend.rfp_docx_slot_finder import (

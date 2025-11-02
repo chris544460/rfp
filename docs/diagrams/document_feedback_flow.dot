@@ -1,0 +1,104 @@
+digraph DocumentFeedbackFlow {
+    graph [
+        label="Document Q&A Feedback Path",
+        labelloc="t",
+        fontsize=20,
+        fontname="Helvetica"
+    ];
+    rankdir=LR;
+    node [
+        shape=rect,
+        style="rounded,filled",
+        fillcolor="#eef3ff",
+        fontname="Helvetica",
+        fontsize=11
+    ];
+    edge [fontname="Helvetica"];
+
+    step_app [
+        label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLPADDING="2">
+                <TR><TD ALIGN="LEFT"><B>Entry: StreamlitApp.run()</B></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">File: <I>streamlit_app.py</I></FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- sets up view &amp; FeedbackUI</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- switches into Upload document mode</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- passes config + helpers downstream</FONT></TD></TR>
+            </TABLE>
+        >
+    ];
+
+    step_document [
+        label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLPADDING="2">
+                <TR><TD ALIGN="LEFT"><B>Document page orchestration</B></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">File: <I>frontend/document_page.py</I></FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- detects finished run via session state</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- grabs latest <FONT FACE="monospace">run_context</FONT></FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- calls <I>_render_saved_qa_pairs</I> for each Q&amp;A</FONT></TD></TR>
+            </TABLE>
+        >
+    ];
+
+    step_card [
+        label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLPADDING="2">
+                <TR><TD ALIGN="LEFT"><B>Render each Q&amp;A card</B></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">File: <I>backend/components/live_answers.py</I></FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- prints Q{n} heading + answer text</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- builds citation expanders when present</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- draws the card-level Feedback button</FONT></TD></TR>
+            </TABLE>
+        >
+    ];
+
+    step_dialog [
+        label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLPADDING="2">
+                <TR><TD ALIGN="LEFT"><B>Feedback trigger</B></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">File: <I>backend/components/feedback.py</I></FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- <I>render_feedback_dialog</I> wraps button click</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- chooses Streamlit dialog vs inline expander</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- pauses auto-refresh while dialog is open</FONT></TD></TR>
+            </TABLE>
+        >
+    ];
+
+    step_form [
+        label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLPADDING="2">
+                <TR><TD ALIGN="LEFT"><B>Feedback form content</B></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">File: <I>backend/components/feedback.py</I></FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- rating radio (Helpful / Needs improvement)</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- highlight vs opportunity multiselects</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- optional comment textarea</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- submit button logs and thanks user</FONT></TD></TR>
+            </TABLE>
+        >
+    ];
+
+    step_log [
+        label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLPADDING="2">
+                <TR><TD ALIGN="LEFT"><B>Persist feedback</B></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">File: <I>frontend/feedback.py</I></FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- FeedbackManager.log enriches payload</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- writes record to configured sink/backend</FONT></TD></TR>
+            </TABLE>
+        >
+    ];
+
+    step_state [
+        label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLPADDING="2">
+                <TR><TD ALIGN="LEFT"><B>Session state guard</B></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">Key: <FONT FACE="monospace">st.session_state['doc_card_feedback_submitted']</FONT></FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- stores per-card submission flag</FONT></TD></TR>
+                <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="10">- replaces UI with "Feedback recorded — thank you!"</FONT></TD></TR>
+            </TABLE>
+        >
+    ];
+
+    step_app -> step_document -> step_card -> step_dialog -> step_form -> step_log;
+    step_form -> step_state;
+    step_state -> step_dialog [label="prevents duplicate forms", style=dashed];
+}

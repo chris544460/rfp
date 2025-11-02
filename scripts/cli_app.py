@@ -37,7 +37,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from input_file_reader.interpreter_sheet import collect_non_empty_cells
+from backend.structured_extraction.interpreter_sheet import collect_non_empty_cells
 
 from backend.answer_composer import CompletionsClient
 from backend.search.vector_search import search
