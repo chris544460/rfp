@@ -647,7 +647,7 @@ _MC_KWS = (
     "multiple choice",
     "which of the following",
 )
-_CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
+_CHECKBOX_CHARS = "\u2610\u2611\u2612\u25a1\u25a0\u2713\u2714\u2717\u2718"
 
 
 def _llm_mc_env_ready() -> bool:

@@ -69,7 +69,7 @@ def build_indexes(doc: docx.document.Document) -> Tuple[
 
 # ---------------------------- Utilities ----------------------------
 _BLANK_RE = re.compile(r"_+\s*$")
-_CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
+_CHECKBOX_CHARS = "\u2610\u2611\u2612\u25a1\u25a0\u2713\u2714\u2717\u2718"
 # Allow comma-separated citations like "[1,2]" or "[1, 2, 3]"
 _CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
@@ -564,7 +564,7 @@ def _determine_choice_style(style: Optional[str], prefix: str) -> str:
 
 
 def _mark_checkbox_style(paragraph: Paragraph, text: str) -> None:
-    paragraph.text = re.sub(rf"[{_CHECKBOX_CHARS}]", "☑", text, count=1)
+    paragraph.text = re.sub(rf"[{_CHECKBOX_CHARS}]", "\u2611", text, count=1)
 
 
 def _mark_fill_style(paragraph: Paragraph, text: str, prefix: str) -> None:

@@ -43,11 +43,11 @@ def build_outputs(input_folder: Path = INPUT_FOLDER) -> None:
             with open(filepath, "r", encoding="utf-8") as handle:
                 records = json.load(handle)
         except Exception as exc:
-            print(f"⚠️ Skipping (invalid JSON): {exc}")
+            print(f"[WARN] Skipping (invalid JSON): {exc}")
             continue
 
         if not isinstance(records, list):
-            print("⚠️ Skipping (expected a list of records).")
+            print("[WARN] Skipping (expected a list of records).")
             continue
 
         for rec in records:
@@ -110,7 +110,7 @@ def build_outputs(input_folder: Path = INPUT_FOLDER) -> None:
     with open(FINE_TUNE_JSON, "w", encoding="utf-8") as handle:
         json.dump(fine_tuning_data, handle, indent=2, ensure_ascii=False)
 
-    print("✅ Done.")
+    print("Done.")
 
 
 if __name__ == "__main__":
