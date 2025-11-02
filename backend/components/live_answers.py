@@ -113,6 +113,72 @@ def _normalize_citation_entry(comment) -> List[CitationEntry]:
     return _normalize_scalar(comment)
 
 
+def _resolve_answer_text(answer: Any) -> str:
+    if isinstance(answer, dict):
+        raw_text = answer.get("text", "")
+    else:
+        raw_text = str(answer or "")
+    return raw_text.strip() or "_No answer generated._"
+
+
+def _collect_citations(comments: Any) -> List[CitationEntry]:
+    raw_items = comments if isinstance(comments, (list, tuple)) else [comments]
+    normalized: List[CitationEntry] = []
+    for item in raw_items or []:
+        normalized.extend(_normalize_citation_entry(item))
+    return [entry for entry in normalized if any(entry)]
+
+
+def _build_citation_title(label: str, source: str, page: str, fallback_index: int) -> str:
+    parts = []
+    if label:
+        parts.append(f"[{label}]")
+    if source:
+        parts.append(source)
+    if page:
+        parts.append(page)
+    return " — ".join(parts).strip() or f"Citation {fallback_index}"
+
+
+def _render_citations_section(comments: Any) -> None:
+    entries = _collect_citations(comments)
+    for idx, (label, source, snippet, page) in enumerate(entries, 1):
+        title = _build_citation_title(label, source, page, idx)
+        with st.expander(title, expanded=False):
+            body = (snippet or "").strip()
+            if body:
+                st.markdown(body)
+            else:
+                st.caption("No snippet provided.")
+
+
+def _render_feedback_section(
+    feedback: FeedbackUI,
+    *,
+    use_dialog: bool,
+    card_index: Optional[int],
+    question_text: Optional[str],
+    answer_text: str,
+    run_context: Optional[dict],
+) -> None:
+    index = int(card_index or 0)
+    question_value = str(question_text or "")
+    if use_dialog:
+        feedback.render_feedback_dialog(
+            card_index=index,
+            question_text=question_value,
+            answer_text=answer_text,
+            run_context=run_context,
+        )
+    else:
+        feedback.render_card_feedback_form(
+            card_index=index,
+            question=question_value,
+            answer_text=answer_text,
+            run_context=run_context,
+        )
+
+
 def render_live_answer(
     placeholder,
     answer,
@@ -127,56 +193,23 @@ def render_live_answer(
 ) -> None:
     if placeholder is None:
         return
-    if isinstance(answer, dict):
-        ans_text = answer.get("text", "")
-    else:
-        ans_text = str(answer or "")
-    ans_text = ans_text.strip() or "_No answer generated._"
+
+    ans_text = _resolve_answer_text(answer)
 
     placeholder.empty()
     with placeholder.container():
         st.markdown(f"**Answer:** {ans_text}")
         if include_citations:
-            raw_items = comments if isinstance(comments, (list, tuple)) else [comments]
-            normalized: List[CitationEntry] = []
-            for item in raw_items or []:
-                normalized.extend(_normalize_citation_entry(item))
+            _render_citations_section(comments)
 
-            entries: List[CitationEntry] = []
-            for label, source, snippet, page in normalized:
-                if any([label, source, snippet, page]):
-                    entries.append((label, source, snippet, page))
-
-            for i, (label, source, snippet, page) in enumerate(entries, 1):
-                title_parts = []
-                if label:
-                    title_parts.append(f"[{label}]")
-                if source:
-                    title_parts.append(source)
-                if page:
-                    title_parts.append(page)
-                title = " — ".join(title_parts).strip() or f"Citation {i}"
-                with st.expander(title, expanded=False):
-                    body = (snippet or "").strip()
-                    if body:
-                        st.markdown(body)
-                    else:
-                        st.caption("No snippet provided.")
-
-    if use_dialog:
-        feedback.render_feedback_dialog(
-            card_index=int(card_index or 0),
-            question_text=str(question_text or ""),
-            answer_text=ans_text,
-            run_context=run_context,
-        )
-    else:
-        feedback.render_card_feedback_form(
-            card_index=int(card_index or 0),
-            question=str(question_text or ""),
-            answer_text=ans_text,
-            run_context=run_context,
-        )
+    _render_feedback_section(
+        feedback,
+        use_dialog=use_dialog,
+        card_index=card_index,
+        question_text=question_text,
+        answer_text=ans_text,
+        run_context=run_context,
+    )
 
 
 __all__ = [
