@@ -12,7 +12,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Callable, Set
+from typing import Dict, List, Optional, Tuple, Callable, Set, NamedTuple
 
 # Your vector search — keep the original import path you already use.
 # If your project uses a different path, update this import accordingly.
@@ -170,6 +170,86 @@ def _append_diagnostic_entry(
     bucket.append(entry)
 
 
+class HitContext(NamedTuple):
+    hit: Dict[str, object]
+    doc_id: str
+    score: float
+    snippet: str
+    src_origin: str
+    src_path: str
+    src_name: str
+    date_str: str
+
+
+def _build_hit_context(hit: Dict[str, object]) -> HitContext:
+    doc_id = str(hit.get("id", "unknown"))
+    score = float(hit.get("cosine", 0.0))
+    snippet = (hit.get("text") or "").strip()
+    src_origin = str(hit.get("origin") or "unknown")
+    meta = hit.get("meta", {}) or {}
+    src_path = str(meta.get("source", "")) or "unknown"
+    src_name = Path(src_path).name if src_path else "unknown"
+    try:
+        mtime = (
+            Path(src_path).stat().st_mtime
+            if src_path and Path(src_path).exists()
+            else None
+        )
+        date_str = (
+            datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+            if mtime
+            else "unknown"
+        )
+    except Exception:
+        date_str = "unknown"
+    return HitContext(
+        hit=hit,
+        doc_id=doc_id,
+        score=score,
+        snippet=snippet,
+        src_origin=src_origin,
+        src_path=src_path,
+        src_name=src_name,
+        date_str=date_str,
+    )
+
+
+def _classify_hit(
+    ctx: HitContext,
+    min_confidence: float,
+    seen_snippets: Set[str],
+) -> Tuple[str, str]:
+    if ctx.score < min_confidence:
+        return (
+            "low_confidence",
+            f"score {ctx.score:.3f} < min_confidence {min_confidence:.3f}",
+        )
+    if not ctx.snippet:
+        return "empty", "empty snippet"
+    if ctx.snippet in seen_snippets:
+        return "duplicate", "duplicate snippet"
+    return "accepted", ""
+
+
+def _status_for_decision(decision: str) -> str:
+    return {
+        "low_confidence": "filtered_low_confidence",
+        "duplicate": "filtered_duplicate",
+        "empty": "filtered_empty",
+    }.get(decision, "accepted")
+
+
+def _debug_filter_message(decision: str, ctx: HitContext, reason: str) -> None:
+    if not DEBUG:
+        return
+    if decision == "accepted":
+        print(
+            f"[qa_core] accepted snippet {ctx.doc_id} from {ctx.src_name} score={ctx.score:.3f}"
+        )
+        return
+    print(f"[qa_core] filter out id={ctx.doc_id} {reason}")
+
+
 def _filter_hits(
     hits: List[Dict[str, object]],
     *,
@@ -180,107 +260,51 @@ def _filter_hits(
     """Apply confidence/duplication rules and build the context rows."""
     seen_snippets: Set[str] = set()
     rows: List[Tuple[str, str, str, float, str]] = []
-    low_confidence = 0
-    duplicate_or_empty = 0
+    stats = {"accepted": 0, "low_confidence": 0, "duplicates": 0, "empties": 0}
 
-    for idx_raw, hit in enumerate(hits, 1):
-        score = float(hit.get("cosine", 0.0))
-        src_origin = str(hit.get("origin") or "unknown")
-        meta = hit.get("meta", {}) or {}
-        src_path = str(meta.get("source", "")) or "unknown"
-        src_name = Path(src_path).name if src_path else "unknown"
-        try:
-            mtime = (
-                Path(src_path).stat().st_mtime
-                if src_path and Path(src_path).exists()
-                else None
-            )
-            date_str = (
-                datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-                if mtime
-                else "unknown"
-            )
-        except Exception:
-            date_str = "unknown"
+    for raw_rank, hit in enumerate(hits, 1):
+        ctx = _build_hit_context(hit)
+        decision, reason = _classify_hit(ctx, min_confidence, seen_snippets)
 
-        if score < min_confidence:
-            low_confidence += 1
-            if DEBUG:
-                print(
-                    f"[qa_core] filter out id={hit.get('id', 'unknown')} "
-                    f"score={score:.3f} < min_confidence {min_confidence}"
-                )
-            if diagnostics is not None:
-                _append_diagnostic_entry(
-                    diagnostics,
-                    hit=hit,
-                    status="filtered_low_confidence",
-                    reason=f"score {score:.3f} < min_confidence {min_confidence:.3f}",
-                    label=None,
-                    raw_rank=idx_raw,
-                    score=score,
-                    src_origin=src_origin,
-                    src_path=src_path,
-                    src_name=src_name,
-                    date_str=date_str,
-                    include_vectors=include_vectors,
-                )
-            continue
+        if decision == "accepted":
+            label = f"[{len(rows) + 1}]"
+            rows.append((label, ctx.src_name, ctx.snippet, ctx.score, ctx.date_str))
+            seen_snippets.add(ctx.snippet)
+            stats["accepted"] += 1
+        elif decision == "low_confidence":
+            stats["low_confidence"] += 1
+            label = None
+        elif decision == "duplicate":
+            stats["duplicates"] += 1
+            label = None
+        else:
+            stats["empties"] += 1
+            label = None
 
-        snippet = (hit.get("text") or "").strip()
-        if not snippet or snippet in seen_snippets:
-            duplicate_or_empty += 1
-            if DEBUG:
-                reason = "empty" if not snippet else "duplicate"
-                print(
-                    f"[qa_core] filter out id={hit.get('id', 'unknown')} {reason} snippet"
-                )
-            if diagnostics is not None:
-                _append_diagnostic_entry(
-                    diagnostics,
-                    hit=hit,
-                    status="filtered_duplicate" if snippet else "filtered_empty",
-                    reason="duplicate snippet" if snippet else "empty snippet",
-                    label=None,
-                    raw_rank=idx_raw,
-                    score=score,
-                    src_origin=src_origin,
-                    src_path=src_path,
-                    src_name=src_name,
-                    date_str=date_str,
-                    include_vectors=include_vectors,
-                )
-            continue
+        _debug_filter_message(decision, ctx, reason)
 
-        label = f"[{len(rows) + 1}]"
-        rows.append((label, src_name, snippet, score, date_str))
-        seen_snippets.add(snippet)
         if diagnostics is not None:
             _append_diagnostic_entry(
                 diagnostics,
-                hit=hit,
-                status="accepted",
-                reason="",
+                hit=ctx.hit,
+                status=_status_for_decision(decision),
+                reason=reason,
                 label=label,
-                raw_rank=idx_raw,
-                score=score,
-                src_origin=src_origin,
-                src_path=src_path,
-                src_name=src_name,
-                date_str=date_str,
+                raw_rank=raw_rank,
+                score=ctx.score,
+                src_origin=ctx.src_origin,
+                src_path=ctx.src_path,
+                src_name=ctx.src_name,
+                date_str=ctx.date_str,
                 include_vectors=include_vectors,
             )
-        if DEBUG:
-            print(
-                f"[qa_core] accepted snippet {label} from {src_name} score={score:.3f}"
-            )
 
-    stats = {
-        "accepted": len(rows),
-        "low_confidence": low_confidence,
-        "duplicate_or_empty": duplicate_or_empty,
+    stats_summary = {
+        "accepted": stats["accepted"],
+        "low_confidence": stats["low_confidence"],
+        "duplicate_or_empty": stats["duplicates"] + stats["empties"],
     }
-    return rows, stats
+    return rows, stats_summary
 
 
 def _log_filter_summary(
@@ -375,6 +399,138 @@ def collect_relevant_snippets(
     return rows
 
 
+def _build_context_block(rows: List[Tuple[str, str, str, float, str]]) -> str:
+    block = "\n\n".join(f"{label} {src}: {snippet}" for (label, src, snippet, _, _) in rows)
+    if DEBUG:
+        print(f"[qa_core] built context with {len(rows)} snippets")
+        print("[qa_core] context block:")
+        print(block)
+    return block
+
+
+def _length_instruction(length: Optional[str], approx_words: Optional[int]) -> str:
+    if approx_words is not None:
+        return f"Please aim for approximately {approx_words} words."
+    return PRESET_INSTRUCTIONS.get(length or "medium", "")
+
+
+def _invoke_llm(prompt: str, llm: CompletionsClient, question: str, attempt: int) -> str:
+    if DEBUG:
+        print(f"[qa_core] calling language model (attempt {attempt + 1})")
+        print(f"[qa_core] prompt:\n{prompt}")
+        print(f"[qa_core] llm type: {type(llm)}")
+    raw_response = llm.get_completion(prompt)
+    if DEBUG:
+        print(f"[qa_core] raw response: {raw_response!r}")
+    content = raw_response[0] if isinstance(raw_response, tuple) else raw_response
+    answer = (content or "").strip()
+    if "summary" not in question.lower():
+        idx_summary = answer.lower().rfind("in summary")
+        if idx_summary != -1:
+            if DEBUG:
+                print("[qa_core] stripping trailing 'In summary' section")
+            answer = answer[:idx_summary].rstrip()
+    return answer
+
+
+def _extract_citation_order(answer: str) -> List[str]:
+    order: List[str] = []
+    for match in CITATION_RE.finditer(answer):
+        numbers = [num.strip() for num in match.group(1).split(",")]
+        for number in numbers:
+            token = f"[{number}]"
+            if token not in order:
+                order.append(token)
+    return order
+
+
+def _renumber_answer_citations(answer: str, order: List[str]) -> Tuple[str, Dict[str, str]]:
+    mapping = {old: f"[{idx + 1}]" for idx, old in enumerate(order)}
+    if DEBUG:
+        print(f"[qa_core] citation order: {order}")
+        print(f"[qa_core] citation mapping: {mapping}")
+
+    def _replace(match: re.Match[str]) -> str:
+        numbers = [num.strip() for num in match.group(1).split(",")]
+        return "".join(mapping.get(f"[{num}]", f"[{num}]") for num in numbers)
+
+    updated = CITATION_RE.sub(_replace, answer)
+    if DEBUG:
+        print("[qa_core] renumbered citations")
+    return updated, mapping
+
+
+def _resolve_row_index(
+    token: str,
+    rows: List[Tuple[str, str, str, float, str]],
+    used: Set[int],
+) -> Optional[int]:
+    try:
+        idx = int(token.strip("[]")) - 1
+    except Exception:
+        idx = None
+        if DEBUG:
+            print(f"[qa_core] invalid citation token: {token}")
+    if idx is None or not (0 <= idx < len(rows)):
+        if DEBUG:
+            print(
+                f"[qa_core] citation {token} out of range; falling back to next available snippet"
+            )
+        idx = next((i for i in range(len(rows)) if i not in used), None)
+        if idx is None and DEBUG:
+            print("[qa_core] no snippets left for fallback")
+    return idx
+
+
+def _build_comments_from_order(
+    order: List[str],
+    mapping: Dict[str, str],
+    rows: List[Tuple[str, str, str, float, str]],
+) -> List[Tuple[str, str, str, float, str]]:
+    comments: List[Tuple[str, str, str, float, str]] = []
+    used_rows: Set[int] = set()
+    for token in order:
+        idx = _resolve_row_index(token, rows, used_rows)
+        if idx is None:
+            continue
+        used_rows.add(idx)
+        label, src, snippet, score, date_str = rows[idx]
+        new_label = mapping.get(token, label).strip("[]")
+        comments.append((new_label, src, snippet, score, date_str))
+        if DEBUG:
+            short_snippet = snippet.replace("\n", " ")
+            if len(short_snippet) > 60:
+                short_snippet = short_snippet[:57] + "..."
+            print(
+                f"[qa_core] add comment {new_label} from {src} score={score:.3f} snippet='{short_snippet}'"
+            )
+    return comments
+
+
+def _generate_answer_with_retries(
+    question: str,
+    prompt: str,
+    llm: CompletionsClient,
+    rows: List[Tuple[str, str, str, float, str]],
+) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
+    answer = ""
+    comments: List[Tuple[str, str, str, float, str]] = []
+
+    for attempt in range(MAX_COMMENT_RETRIES + 1):
+        answer = _invoke_llm(prompt, llm, question, attempt)
+        order = _extract_citation_order(answer)
+        answer, mapping = _renumber_answer_citations(answer, order)
+        comments = _build_comments_from_order(order, mapping, rows)
+        if DEBUG:
+            print(f"[qa_core] built {len(comments)} comments for this attempt")
+        if comments or not order or attempt == MAX_COMMENT_RETRIES:
+            if not comments and order and attempt != MAX_COMMENT_RETRIES and DEBUG:
+                print("[qa_core] zero comments despite citation markers; retrying")
+            else:
+                break
+    return answer, comments
+
+
 def answer_question(
     q: str,
     mode: str,
@@ -416,123 +572,14 @@ def answer_question(
             print("[qa_core] no relevant context found; returning fallback answer")
         return "No relevant information found.", []
 
-    # Build a compact provenance block: "[1] filename: snippet".
-    # This format keeps prompts short while still allowing deterministic
-    # Word/Excel comments later on.
-    ctx_block = "\n\n".join(
-        f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows
-    )
-    if DEBUG:
-        print(f"[qa_core] built context with {len(rows)} snippets")
-        print("[qa_core] context block:")
-        print(ctx_block)
+    ctx_block = _build_context_block(rows)
     if progress:
         progress("Generating answer with language model...")
 
-    # 2) Compose the prompt with a length instruction
-    if approx_words is not None:
-        length_instr = f"Please aim for approximately {approx_words} words."
-    else:
-        length_instr = PRESET_INSTRUCTIONS.get(length or "medium", "")
-
-    # Inject the length guidance inline so the reusable prompt template stays
-    # oblivious to UI-specific knobs (dropdown length vs. explicit word count).
+    length_instr = _length_instruction(length, approx_words)
     prompt = f"{length_instr}\n\n{PROMPTS['answer_llm'].format(context=ctx_block, question=q)}"
 
-    ans = ""
-    comments: List[Tuple[str, str, str, float, str]] = []
-    # The retry loop mitigates the occasional "citations but no comments" bug
-    # we observed with some models. We bail early once comments look sane.
-    for attempt in range(MAX_COMMENT_RETRIES + 1):
-        if DEBUG:
-            print(f"[qa_core] calling language model (attempt {attempt + 1})")
-            print(f"[qa_core] prompt:\n{prompt}")
-            print(f"[qa_core] llm type: {type(llm)}")
-
-        raw_response = llm.get_completion(prompt)
-        if DEBUG:
-            print(f"[qa_core] raw response: {raw_response!r}")
-        if isinstance(raw_response, tuple):
-            content = raw_response[0]
-        else:
-            content = raw_response
-        ans = (content or "").strip()
-
-        # Strip a trailing "In summary" section unless the question explicitly
-        # requests a summary. Some models tend to append a concluding paragraph
-        # beginning with this phrase, which users found redundant.
-        if "summary" not in q.lower():
-            idx_summary = ans.lower().rfind("in summary")
-            if idx_summary != -1:
-                if DEBUG:
-                    print("[qa_core] stripping trailing 'In summary' section")
-                ans = ans[:idx_summary].rstrip()
-
-        # 4) Re-number bracket markers in the answer to reflect the order they first appear
-        order: List[str] = []
-        for m in CITATION_RE.finditer(ans):
-            nums = [n.strip() for n in m.group(1).split(",")]
-            for n in nums:
-                tok = f"[{n}]"
-                if tok not in order:
-                    order.append(tok)
-
-        # Some models jumble citation numbers; remap them to a monotonic series
-        # so downstream display logic can rely on simple 1..N markers.
-        mapping = {old: f"[{i+1}]" for i, old in enumerate(order)}
-        if DEBUG:
-            print(f"[qa_core] citation order: {order}")
-            print(f"[qa_core] citation mapping: {mapping}")
-
-        def _repl(match: re.Match[str]) -> str:
-            nums = [n.strip() for n in match.group(1).split(",")]
-            return "".join(mapping.get(f"[{n}]", f"[{n}]") for n in nums)
-
-        # Renumbering here keeps answer text and exported comments consistent.
-        ans = CITATION_RE.sub(_repl, ans)
-        if DEBUG:
-            print("[qa_core] renumbered citations")
-
-        # 5) Build comments in that order
-        comments: List[Tuple[str, str, str, float, str]] = []
-        used_rows: Set[int] = set()
-        for old in order:
-            idx: Optional[int]
-            try:
-                idx = int(old.strip("[]")) - 1
-            except Exception:
-                idx = None
-                if DEBUG:
-                    print(f"[qa_core] invalid citation token: {old}")
-            if idx is None or not (0 <= idx < len(rows)):
-                if DEBUG:
-                    print(
-                        f"[qa_core] citation {old} out of range; falling back to next available snippet"
-                    )
-                idx = next((i for i in range(len(rows)) if i not in used_rows), None)
-                if idx is None:
-                    if DEBUG:
-                        print("[qa_core] no snippets left for fallback")
-                    continue
-            used_rows.add(idx)
-            lbl, src, snippet, score, date_str = rows[idx]
-            new_lbl = mapping.get(old, lbl).strip("[]")
-            comments.append((new_lbl, src, snippet, score, date_str))
-            if DEBUG:
-                short_snippet = snippet.replace("\n", " ")
-                if len(short_snippet) > 60:
-                    short_snippet = short_snippet[:57] + "..."
-                print(
-                    f"[qa_core] add comment {new_lbl} from {src} score={score:.3f} snippet='{short_snippet}'"
-                )
-
-        if DEBUG:
-            print(f"[qa_core] built {len(comments)} comments for this attempt")
-
-        if comments or not order or attempt == MAX_COMMENT_RETRIES:
-            break
-        if DEBUG:
-            print("[qa_core] zero comments despite citation markers; retrying")
+    ans, comments = _generate_answer_with_retries(q, prompt, llm, rows)
 
     if DEBUG:
         print(f"[qa_core] returning answer with {len(comments)} comments")

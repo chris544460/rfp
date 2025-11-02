@@ -88,8 +88,45 @@ class StyleCSS:
     def set_css_styling() -> None:
         """Inject global CSS into the Streamlit app."""
 
+        st.markdown(STYLE_CSS_MARKDOWN, unsafe_allow_html=True)
+
+    @staticmethod
+    def insert_line_break(
+        color: str = StyleColors.grey_10,
+        margin_top: int = 5,
+        margin_bottom: int = 15,
+        weight: int = 2,
+    ) -> None:
+        """Render a custom divider."""
+
         st.markdown(
             f"""
+            <div style="border-top: {weight}px solid {color}; margin-top: {margin_top}px; margin-bottom: {margin_bottom}px;"></div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    @staticmethod
+    def set_plotly_template(
+        template_name: str,
+        template_colors: List[str],
+        set_as_default: bool = False,
+        font_family: str = PRIMARY_FONT,
+    ) -> None:
+        """Register a Plotly template for branded charts."""
+
+        if go is None or pio is None:
+            return
+
+        custom_template = go.layout.Template(
+            layout=go.Layout(colorway=template_colors, font=dict(family=font_family))
+        )
+        pio.templates[template_name] = custom_template
+        if set_as_default:
+            pio.templates.default = template_name
+
+
+STYLE_CSS_MARKDOWN = f"""
             <style>
             * {{
                 font-family: {StyleCSS.PRIMARY_FONT};
@@ -370,45 +407,7 @@ class StyleCSS:
                 margin: 5px 0 15px 0;
             }}
             </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    @staticmethod
-    def insert_line_break(
-        color: str = StyleColors.grey_10,
-        margin_top: int = 5,
-        margin_bottom: int = 15,
-        weight: int = 2,
-    ) -> None:
-        """Render a custom divider."""
-
-        st.markdown(
-            f"""
-            <div style="border-top: {weight}px solid {color}; margin-top: {margin_top}px; margin-bottom: {margin_bottom}px;"></div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    @staticmethod
-    def set_plotly_template(
-        template_name: str,
-        template_colors: List[str],
-        set_as_default: bool = False,
-        font_family: str = PRIMARY_FONT,
-    ) -> None:
-        """Register a Plotly template for branded charts."""
-
-        if go is None or pio is None:
-            return
-
-        custom_template = go.layout.Template(
-            layout=go.Layout(colorway=template_colors, font=dict(family=font_family))
-        )
-        pio.templates[template_name] = custom_template
-        if set_as_default:
-            pio.templates.default = template_name
-
+            """
 
 SVG_APP_LOGO = (
     "M 5.21777 8.12721 L 6.93725 3.51564 L 8.67305 8.12721 H 5.21777 Z"
