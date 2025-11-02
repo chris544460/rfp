@@ -17,6 +17,7 @@ _EXTRACT_PROMPT = read_prompt("extract_questions")
 
 
 def _load_input_text(path: str) -> str:
+    """Load various document types into raw text for LLM consumption."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"File not found: {p}")
@@ -32,6 +33,7 @@ def _load_input_text(path: str) -> str:
             reader = PdfReader(f)
             for page in reader.pages:
                 out.append(page.extract_text() or "")
+                # Older PDFs can return None for blank pages—defaulting to "" keeps alignment.
         return "\n".join(out)
     if suffix in {".doc", ".docx"}:
         doc = Document(p)
@@ -40,6 +42,7 @@ def _load_input_text(path: str) -> str:
 
 
 def _extract_questions(text: str, llm_client) -> List[str]:
+    """Call the LLM prompt and parse numbered question lines out of the response."""
     # Use the shared prompt so the LLM extracts numbered lines the UI knows how
     # to parse. We trim the leading numerals here.
     prompt = _EXTRACT_PROMPT.format(text=text)
@@ -54,6 +57,7 @@ def _extract_questions(text: str, llm_client) -> List[str]:
         m = re.match(r"^\s*\d+\)\s+(.*)\s*$", line)
         if m:
             questions.append(m.group(1).strip())
+        # Ignore unnumbered lines so the caller receives a clean question list.
     return questions
 
 
@@ -70,6 +74,7 @@ class QuestionExtractor:
         return self._last_details
 
     def extract(self, path: str, *, treat_docx_as_text: bool = False) -> List[Dict[str, Any]]:
+        """High-level entry point that routes to Excel, DOCX, or text logic."""
         path_obj = Path(path)
         suffix = path_obj.suffix.lower()
         if suffix in {".xlsx", ".xls"}:
@@ -81,6 +86,7 @@ class QuestionExtractor:
         return self.extract_from_text(_load_input_text(str(path_obj)), source=str(path_obj))
 
     def extract_from_text(self, text: str, *, source: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Ask the LLM to pull numbered questions out of arbitrary text strings."""
         if self._llm is None:
             raise ValueError("QuestionExtractor requires an LLM client for text extraction.")
         questions = _extract_questions(text, self._llm)
@@ -100,6 +106,7 @@ class QuestionExtractor:
         return payload
 
     def _extract_from_excel(self, path: Path) -> List[Dict[str, Any]]:
+        """Leverage the Excel schema pipeline to produce question payloads."""
         # Warm the interpreter cache so worksheet-level heuristics run only once.
         collect_non_empty_cells(str(path))
         schema = ask_sheet_schema(str(path))
@@ -113,6 +120,7 @@ class QuestionExtractor:
                     "schema_entry": entry,
                 }
             )
+        # Persist the last run details so the UI can render a structured summary.
         self._last_details = {
             "mode": "excel",
             "schema": schema,
@@ -122,6 +130,7 @@ class QuestionExtractor:
         return questions
 
     def _extract_from_docx_slots(self, path: Path) -> List[Dict[str, Any]]:
+        """Reuse the DOCX slot finder so we get consistent metadata everywhere."""
         payload = extract_slots_from_docx(str(path))
         slots = payload.get("slots") or []
         questions = []
@@ -135,6 +144,7 @@ class QuestionExtractor:
                     "slot": slot,
                 }
             )
+        # Capture skipped slots for debugging so integrators can inspect misfires.
         skipped = payload.get("skipped_slots") or []
         heuristic = payload.get("heuristic_skips") or []
         self._last_details = {

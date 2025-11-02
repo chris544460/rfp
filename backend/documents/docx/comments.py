@@ -88,6 +88,7 @@ def add_comment_to_run(
     bold_prefix=None,
     source_file: Optional[str] = None,
 ):
+    """Create a legacy + modern Word comment anchored to ``run`` with optional metadata."""
     part = ensure_comments_part(document)
 
     # Next id

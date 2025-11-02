@@ -36,6 +36,7 @@ def dbg(msg: str):
 
 # ---------------------------- DOC iteration ----------------------------
 def iter_block_items(doc: docx.document.Document) -> List[Union[Paragraph, Table]]:
+    """Iterate paragraph and table elements in order to mirror DOCX reading order."""
     from docx.oxml.table import CT_Tbl
     from docx.oxml.text.paragraph import CT_P
     blocks: List[Union[Paragraph, Table]] = []
@@ -53,6 +54,7 @@ def build_indexes(doc: docx.document.Document) -> Tuple[
     Dict[int, int],
     Dict[int, int]
 ]:
+    """Pre-compute paragraph/table lookups so we can resolve locators quickly."""
     blocks = iter_block_items(doc)
     paragraphs: List[Paragraph] = []
     block_to_para: Dict[int, int] = {}
@@ -74,6 +76,7 @@ _CHECKBOX_CHARS = "\u2610\u2611\u2612\u25a1\u25a0\u2713\u2714\u2717\u2718"
 _CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 def is_blank_para(p: Paragraph) -> bool:
+    """Heuristic check for placeholder paragraphs that should be overwritten."""
     t = (p.text or "").strip()
     if t == "":
         return True
@@ -89,6 +92,7 @@ def is_blank_para(p: Paragraph) -> bool:
     return False
 
 def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
+    """Insert a new paragraph immediately after ``paragraph`` and seed optional text."""
     new_p_elm = OxmlElement("w:p")
     paragraph._element.addnext(new_p_elm)
     new_p = Paragraph(new_p_elm, paragraph._parent)
@@ -97,9 +101,11 @@ def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
     return new_p
 
 def normalize_question(q: str) -> str:
+    """Lowercase and squash whitespace so question text comparisons behave."""
     return " ".join((q or "").strip().lower().split())
 
 def _normalize_citations(raw: object) -> Dict[str, object]:
+    """Convert loose citation payloads into a {id -> {text, source_file}} map."""
     if not raw:
         return {}
     result: Dict[str, object] = {}
@@ -110,6 +116,7 @@ def _normalize_citations(raw: object) -> Dict[str, object]:
         for i, item in enumerate(raw, 1):
             key = getattr(item, "get", lambda *_: None)("id") or getattr(item, "get", lambda *_: None)("num") or i
             items.append((key, item))
+        # Treat list-style answers as enumerated mappings so later lookups are uniform.
     else:
         return {}
     for key, val in items:
@@ -142,14 +149,17 @@ def _append_with_bold(paragraph: Paragraph, text: str, bold_state: bool) -> bool
             run = paragraph.add_run(segment)
             if bold_state:
                 run.bold = True
+        # Loop continues until both plain text and marker sequences are exhausted.
     return bold_state
 
 
 def _parse_citation_numbers(raw_numbers: str) -> List[str]:
+    """Split a citation marker like ``1, 2`` into individual numbers."""
     return [num.strip() for num in raw_numbers.split(",") if num.strip()]
 
 
 def _resolve_citation_entry(citations: Dict[object, object], num: str):
+    """Return the citation metadata if available, tolerating str/int keys."""
     entry = citations.get(num)
     if entry is None:
         try:
@@ -160,6 +170,7 @@ def _resolve_citation_entry(citations: Dict[object, object], num: str):
 
 
 def _extract_comment_payload(data: object) -> Tuple[Optional[str], Optional[str]]:
+    """Normalize comment payloads into ``(snippet_text, source_file)`` tuples."""
     snippet: Optional[str] = None
     source_file: Optional[str] = None
     if isinstance(data, dict):
@@ -178,6 +189,7 @@ def _append_citation_runs(
     citation_numbers: List[str],
     citations: Dict[object, object],
 ) -> None:
+    """Render each citation marker and attach a Word comment with the snippet."""
     for idx, num in enumerate(citation_numbers):
         run = paragraph.add_run(f"[{num}]")
         data = _resolve_citation_entry(citations, num)
@@ -201,6 +213,7 @@ def _render_text_line(
     bold_state: bool,
     doc,
 ) -> bool:
+    """Render a single line of answer text, expanding bold markers and comments."""
     pos = 0
     for match in _CITATION_RE.finditer(line):
         if match.start() > pos:
@@ -211,6 +224,7 @@ def _render_text_line(
         pos = match.end()
     if pos < len(line):
         bold_state = _append_with_bold(paragraph, line[pos:], bold_state)
+    # Return bold state so the caller can maintain formatting across line breaks.
     return bold_state
 
 
@@ -226,6 +240,7 @@ def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[ob
 
 # ---------------------------- Answers loader ----------------------------
 def _populate_from_mapping(by_id: Dict[str, object], by_q: Dict[str, object], mapping: Dict[str, object]) -> None:
+    """Handle the simple ``{slot_id/question: answer}`` JSON structure."""
     for key, value in mapping.items():
         key_str = str(key)
         if key_str.startswith("slot_"):
@@ -235,6 +250,7 @@ def _populate_from_mapping(by_id: Dict[str, object], by_q: Dict[str, object], ma
 
 
 def _populate_from_grouped_dict(by_id: Dict[str, object], by_q: Dict[str, object], data: Dict[str, object]) -> None:
+    """Support `{ "by_id": {}, "by_question": {} }` answer payloads."""
     for key, value in (data.get("by_id") or {}).items():
         by_id[str(key)] = value
     for key, value in (data.get("by_question") or {}).items():
@@ -242,6 +258,7 @@ def _populate_from_grouped_dict(by_id: Dict[str, object], by_q: Dict[str, object
 
 
 def _populate_from_list(by_id: Dict[str, object], by_q: Dict[str, object], items: List[object]) -> None:
+    """Interpret answer exports that arrive as a list of structured records."""
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -253,6 +270,7 @@ def _populate_from_list(by_id: Dict[str, object], by_q: Dict[str, object], items
 
 
 def load_answers(answers_path: str) -> Tuple[Dict[str, object], Dict[str, object]]:
+    """Read answers JSON and return lookup tables by slot id and normalized question."""
     with open(answers_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -274,6 +292,7 @@ def load_answers(answers_path: str) -> Tuple[Dict[str, object], Dict[str, object
 
 # ---------------------------- Locator resolution ----------------------------
 def _coerce_int(value: object) -> Optional[int]:
+    """Gracefully attempt to coerce untrusted locator values into ints."""
     try:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -281,12 +300,14 @@ def _coerce_int(value: object) -> Optional[int]:
 
 
 def _get_paragraph_from_paragraphs(paragraphs: List[Paragraph], index: Optional[int]) -> Optional[Paragraph]:
+    """Return the paragraph at index or ``None`` if the locator is out of range."""
     if index is None or not (0 <= index < len(paragraphs)):
         return None
     return paragraphs[index]
 
 
 def _get_paragraph_from_blocks(blocks: List[Union[Paragraph, Table]], index: Optional[int]) -> Optional[Paragraph]:
+    """Fetch a paragraph from the mixed block list, ignoring tables."""
     if index is None or not (0 <= index < len(blocks)):
         return None
     candidate = blocks[index]
@@ -294,12 +315,14 @@ def _get_paragraph_from_blocks(blocks: List[Union[Paragraph, Table]], index: Opt
 
 
 def _extract_q_block_index(meta: Optional[Dict[str, object]]) -> Optional[int]:
+    """Read the question block index recorded by the slot finder."""
     if not isinstance(meta, dict):
         return None
     return _coerce_int(meta.get("q_block"))
 
 
 def _first_paragraph(*candidates: Optional[Paragraph]) -> Optional[Paragraph]:
+    """Return the first non-None paragraph candidate."""
     for candidate in candidates:
         if candidate is not None:
             return candidate
@@ -314,6 +337,7 @@ def resolve_anchor_paragraph(
     locator: Dict[str, object],
     meta: Optional[Dict[str, object]]
 ) -> Optional[Paragraph]:
+    """Resolve a slot locator into the paragraph that should receive answer text."""
     locator_type = str(locator.get("type", ""))
     paragraph_index = _coerce_int(locator.get("paragraph_index"))
 
@@ -336,6 +360,7 @@ def _find_anchor_indices(
     paragraphs: List[Paragraph],
     anchor_para: Paragraph,
 ) -> Tuple[Optional[int], int]:
+    """Return both the block index and paragraph list index for ``anchor_para``."""
     for block_index, block in enumerate(blocks):
         if isinstance(block, Paragraph) and block is anchor_para:
             return block_index, block_to_para[block_index]
@@ -346,6 +371,7 @@ def _collect_following_paragraphs_from_blocks(
     blocks: List[Union[Paragraph, Table]],
     start_index: int,
 ) -> List[Paragraph]:
+    """Gather the paragraphs after ``start_index`` stopping when the next question appears."""
     collected: List[Paragraph] = []
     for block in blocks[start_index:]:
         if isinstance(block, Paragraph):
@@ -353,6 +379,7 @@ def _collect_following_paragraphs_from_blocks(
             if _looks_like_question(text):
                 break
             collected.append(block)
+        # Stop once another paragraph is assessed as a new question prompt.
     return collected
 
 
@@ -360,12 +387,14 @@ def _collect_following_paragraphs_from_paragraphs(
     paragraphs: List[Paragraph],
     start_index: int,
 ) -> List[Paragraph]:
+    """Collect trailing paragraphs from the flat paragraph list until a new question."""
     collected: List[Paragraph] = []
     for paragraph in paragraphs[start_index:]:
         text = (paragraph.text or "").strip()
         if _looks_like_question(text):
             break
         collected.append(paragraph)
+    # Mirror the block walker but operate on the paragraph-only list.
     return collected
 
 
@@ -374,6 +403,7 @@ def _ensure_paragraph_offset(
     collected: List[Paragraph],
     offset: int,
 ) -> Paragraph:
+    """Return the target paragraph ``offset`` positions away, creating placeholders if needed."""
     if len(collected) >= offset:
         return collected[offset - 1]
 
@@ -384,6 +414,7 @@ def _ensure_paragraph_offset(
     for _ in range(needed):
         created = insert_paragraph_after(created, "")
         collected.append(created)
+        # Create placeholder paragraphs so we always have a writable slot.
     return collected[offset - 1]
 
 
@@ -394,6 +425,7 @@ def get_target_paragraph_after_anchor(
     anchor_para: Paragraph,
     offset: int
 ) -> Paragraph:
+    """Compute the destination paragraph for `paragraph_after` locators."""
     anchor_block_index, anchor_para_index = _find_anchor_indices(
         blocks,
         block_to_para,
@@ -416,6 +448,7 @@ def get_target_paragraph_after_anchor(
 
 # ---------------------------- Apply operations ----------------------------
 def _extract_answer_components(answer: object) -> Tuple[str, Dict[str, object]]:
+    """Split a mixed answer payload into display text and citation metadata."""
     if isinstance(answer, dict):
         text = str(answer.get("text", ""))
         citations = _normalize_citations(answer.get("citations"))
@@ -432,6 +465,7 @@ def _apply_answer_text(
     *,
     append: bool = False,
 ) -> None:
+    """Write answer text into a paragraph and attach docx comment citations."""
     if append:
         paragraph.add_run("\n")
     else:
@@ -440,6 +474,7 @@ def _apply_answer_text(
 
 
 def _get_next_paragraph(target: Paragraph) -> Optional[Paragraph]:
+    """Return the immediate next paragraph sibling if one exists."""
     next_p_element = target._p.getnext()
     if next_p_element is not None and next_p_element.tag.endswith("p"):
         return Paragraph(next_p_element, target._parent)
@@ -454,6 +489,7 @@ def _replace_if_matching(
     *,
     note: str,
 ) -> bool:
+    """Swap existing text iff the paragraph already contains the exact answer."""
     if (paragraph.text or "").strip() != answer_norm:
         return False
     paragraph.text = ""
@@ -463,6 +499,7 @@ def _replace_if_matching(
 
 
 def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") -> None:
+    """Fill, append, or replace the paragraph's contents with the provided answer."""
     answer_text, citations = _extract_answer_components(answer)
     existing = target.text or ""
 
@@ -503,6 +540,7 @@ def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") ->
     dbg("Target paragraph not blank; appended answer in a new paragraph below.")
 
 def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: str = "fill") -> None:
+    """Write answer text into the given table cell, respecting fill/append modes."""
     try:
         cell = tbl.cell(row, col)
     except Exception:
@@ -527,6 +565,7 @@ def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: st
         cell.text = ""
         p = cell.paragraphs[0]
         _add_text_with_citations(p, answer_text, citations)
+    # Leave table styles intact by reusing the existing paragraph container.
 
 
 
@@ -534,6 +573,7 @@ def _validate_choice_meta(
     choices_meta: List[Dict[str, object]],
     index: Optional[int],
 ) -> Optional[Dict[str, object]]:
+    """Guard against malformed choice metadata before editing paragraphs."""
     if not isinstance(choices_meta, list):
         return None
     if index is None or not (0 <= index < len(choices_meta)):
@@ -545,6 +585,7 @@ def _resolve_choice_paragraph(
     blocks: List[Union[Paragraph, Table]],
     meta: Dict[str, object],
 ) -> Optional[Paragraph]:
+    """Translate stored block indexes back into actual paragraphs."""
     block_index = int(meta.get("block_index", -1))
     if not (0 <= block_index < len(blocks)):
         return None
@@ -553,6 +594,7 @@ def _resolve_choice_paragraph(
 
 
 def _determine_choice_style(style: Optional[str], prefix: str) -> str:
+    """Pick a mutation strategy (checkbox/fill/highlight) for the selected choice."""
     if style not in (None, "", "auto"):
         return style
     if any(ch in prefix for ch in _CHECKBOX_CHARS):
@@ -564,20 +606,24 @@ def _determine_choice_style(style: Optional[str], prefix: str) -> str:
 
 
 def _mark_checkbox_style(paragraph: Paragraph, text: str) -> None:
+    """Swap the first checkbox glyph for the checked variation."""
     paragraph.text = re.sub(rf"[{_CHECKBOX_CHARS}]", "\u2611", text, count=1)
 
 
 def _mark_fill_style(paragraph: Paragraph, text: str, prefix: str) -> None:
+    """Replace brackets/parentheses with an X to mimic filled answers."""
     mark = prefix[0] + "X" + prefix[1]
     paragraph.text = text.replace(prefix, mark, 1)
 
 
 def _mark_highlight_style(paragraph: Paragraph) -> None:
+    """Highlight the entire paragraph to emphasize the chosen option."""
     for run in paragraph.runs:
         run.font.highlight_color = WD_COLOR_INDEX.YELLOW
 
 
 def _mark_with_style(paragraph: Paragraph, style: str, prefix: str, text: str) -> None:
+    """Delegate to the style-specific renderer, falling back to prepending X."""
     if style == "checkbox" and any(ch in prefix for ch in _CHECKBOX_CHARS):
         _mark_checkbox_style(paragraph, text)
     elif style == "fill" and prefix.strip() in ("()", "[]"):
@@ -586,6 +632,7 @@ def _mark_with_style(paragraph: Paragraph, style: str, prefix: str, text: str) -
         _mark_highlight_style(paragraph)
     else:
         paragraph.text = "X " + text
+    # Fallback simply prefixes an X when the metadata does not match known styles.
 
 
 def _add_choice_comment(
@@ -593,6 +640,7 @@ def _add_choice_comment(
     paragraph: Paragraph,
     comment_text: Optional[str],
 ) -> None:
+    """Attach optional citation snippets to multiple-choice paragraphs."""
     if not comment_text:
         return
     run = paragraph.runs[0] if paragraph.runs else paragraph.add_run()
@@ -616,6 +664,7 @@ def mark_multiple_choice(
     style: Optional[str] = None,
     comment_text: Optional[str] = None,
 ) -> None:
+    """Modify the paragraph that represents the selected multiple-choice answer."""
     meta = _validate_choice_meta(choices_meta, index)
     if meta is None:
         return
@@ -634,6 +683,7 @@ def mark_multiple_choice(
 
 
 def _extract_slot_metadata(slot: Dict[str, object]) -> Tuple[str, str, Dict[str, object]]:
+    """Pull the slot id, question text, and metadata into a compact tuple."""
     sid = str(slot.get("id", ""))
     question_text = str(slot.get("question_text") or "").strip()
     meta = slot.get("meta") or {}
@@ -646,6 +696,7 @@ def _resolve_existing_answer(
     by_id: Dict[str, object],
     by_q: Dict[str, object],
 ) -> Optional[object]:
+    """Prefer slot-id matches but fall back to normalized question lookups."""
     if sid in by_id:
         return by_id[sid]
     key = normalize_question(question_text)
@@ -656,6 +707,7 @@ def _prepare_generation_kwargs(
     slot: Dict[str, object],
     meta: Dict[str, object],
 ) -> Dict[str, object]:
+    """Assemble kwargs forwarded into the optional generator callback."""
     kwargs: Dict[str, object] = {}
     if slot.get("answer_type") == "multiple_choice":
         choice_meta = meta.get("choices", [])
@@ -674,6 +726,7 @@ def _queue_generation_job(
     question_text: str,
     meta: Dict[str, object],
 ) -> None:
+    """Add a deferred generation job so we can batch async execution."""
     kwargs = _prepare_generation_kwargs(slot, meta)
     jobs.append((sid, question_text, kwargs))
 
@@ -683,6 +736,7 @@ def _generate_missing_answers(
     generator: Optional[Callable[..., object]],
     gen_name: str,
 ) -> Tuple[Dict[str, object], int]:
+    """Run the generator for outstanding questions and return filled-in answers."""
     if not jobs or generator is None:
         return {}, 0
 
@@ -698,6 +752,7 @@ def _generate_missing_answers(
                 return sid, None
 
         tasks = [asyncio.create_task(worker(*job)) for job in jobs]
+        # Fire off generator calls concurrently so slow slots do not block the run.
         return await asyncio.gather(*tasks)
 
     results = asyncio.run(run_all())
@@ -718,6 +773,7 @@ def _build_answers_map(
     generator: Optional[Callable[..., object]],
     gen_name: str,
 ) -> Tuple[Dict[str, Optional[object]], int]:
+    """Return `{slot_id: answer}` plus generation stats for reporting."""
     answers: Dict[str, Optional[object]] = {}
     jobs: List[Tuple[str, str, Dict[str, object]]] = []
 
@@ -742,6 +798,7 @@ def _build_answers_map(
 
 
 def _format_citation_comment(raw: object) -> Optional[str]:
+    """Flatten nested citation dicts into a human-readable comment body."""
     if not isinstance(raw, dict):
         return None
     parts: List[str] = []
@@ -770,6 +827,7 @@ def _apply_multiple_choice_slot(
     slot: Dict[str, object],
     answer: Dict[str, object],
 ) -> str:
+    """Mark the selected choice directly in the question block."""
     choice_meta = (slot.get("meta") or {}).get("choices", [])
     if not choice_meta:
         dbg("  -> no choice metadata present")
@@ -803,6 +861,7 @@ def _apply_table_cell_slot(
     answer: object,
     mode: str,
 ) -> str:
+    """Route a table locator to `apply_to_table_cell` and track failure reasons."""
     t_index = locator.get("table_index")
     if t_index is None:
         dbg("  -> bad locator: missing table_index")
@@ -837,6 +896,7 @@ def _apply_paragraph_slot(
     mode: str,
     ltype: str,
 ) -> str:
+    """Resolve the anchor paragraph and insert text according to the locator type."""
     anchor = resolve_anchor_paragraph(doc, blocks, paragraphs, block_to_para, locator, meta)
     if anchor is None:
         dbg("  -> could not resolve anchor/target paragraph")
@@ -873,6 +933,7 @@ def _apply_slot_to_doc(
     block_to_para: Dict[int, int],
     mode: str,
 ) -> str:
+    """Dispatch each slot to the correct handler (paragraph/table/multiple choice)."""
     answer_type = slot.get("answer_type")
     meta = slot.get("meta") or {}
     locator = slot.get("answer_locator") or {}
@@ -893,6 +954,7 @@ def _apply_slot_to_doc(
     dbg(f"Applying answer for slot {slot.get('id', '')} (type={ltype})")
 
     if ltype == "table_cell":
+        # Table slots reference absolute indexes captured during slot detection.
         return _apply_table_cell_slot(
             doc=doc,
             locator=locator,
@@ -960,6 +1022,7 @@ def apply_answers_to_docx(
         question_text = (s.get("question_text") or "").strip()
         answer = answers.get(sid)
         if answer is None:
+            # Nothing to write for this slot—count and move on to the next.
             dbg(f"NO ANSWER for slot {sid!r} / question '{question_text}' — skipping")
             skipped_no_answer += 1
             continue
@@ -985,6 +1048,7 @@ def apply_answers_to_docx(
             skipped_bad_locator += 1
 
     doc.save(out_path)
+    # Provide quick feedback for CLI users; callers still receive the structured summary.
     print(f"Wrote {out_path}")
 
     return {
@@ -998,6 +1062,7 @@ def apply_answers_to_docx(
 
 
 def _parse_arguments(argv: List[str]) -> argparse.Namespace:
+    """Build the CLI parser so power users can invoke the module directly."""
     ap = argparse.ArgumentParser(description="Apply answers into a DOCX using slots.json")
     ap.add_argument("docx_path", help="Path to the original .docx")
     ap.add_argument("slots_json", help="Path to slots.json produced by the detector")
@@ -1039,6 +1104,7 @@ def _parse_arguments(argv: List[str]) -> argparse.Namespace:
 
 
 def _validate_input_paths(docx_path: str, slots_json: str, debug: bool) -> None:
+    """Ensure the source document and slot metadata exist before processing."""
     required_paths = [docx_path, slots_json]
     for path in required_paths:
         if not os.path.isfile(path):
@@ -1049,6 +1115,7 @@ def _validate_input_paths(docx_path: str, slots_json: str, debug: bool) -> None:
 
 
 def _maybe_load_generator(spec: Optional[str], debug: bool) -> Tuple[Optional[Callable[..., object]], str]:
+    """Resolve a MODULE:FUNC string into a callable that can synthesize answers."""
     if not spec:
         return None, ""
     if ":" not in spec:
@@ -1069,6 +1136,7 @@ def _maybe_load_generator(spec: Optional[str], debug: bool) -> Tuple[Optional[Ca
 
 
 def _validate_answers_path(path: str, generate_spec: Optional[str]) -> None:
+    """Check that answers JSON is present unless generation has been requested."""
     if not path or path == "-":
         return
     if os.path.isfile(path):
@@ -1083,11 +1151,13 @@ def _validate_answers_path(path: str, generate_spec: Optional[str]) -> None:
 
 
 def _print_debug_header(args: argparse.Namespace) -> None:
+    """Emit a helpful header when running in verbose mode."""
     print("### APPLY DEBUG MODE ON ###")
     print(f"[apply_answers] source={args.docx_path} slots={args.slots_json}")
 
 
 def _print_summary(summary: Dict[str, int]) -> None:
+    """Compact stdout summary so automation workflows can parse success metrics."""
     print("--- APPLY SUMMARY ---")
     for key, value in summary.items():
         print(f"{key}: {value}")
@@ -1095,6 +1165,7 @@ def _print_summary(summary: Dict[str, int]) -> None:
 # ---------------------------- CLI ----------------------------
 
 def main():
+    """CLI entry point used by Streamlit and manual debugging."""
     args = _parse_arguments(sys.argv)
 
     global DEBUG
