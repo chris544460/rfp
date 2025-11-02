@@ -1,11 +1,35 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 # rfp_docx_slot_finder.py
 #
 # Requires environment variables for the chosen framework:
 #   • Framework selection: ANSWER_FRAMEWORK=openai|aladdin
 #   • OpenAI: set OPENAI_API_KEY (and optional OPENAI_MODEL)
 #   • Aladdin: set aladdin_studio_api_key, defaultWebServer, aladdin_user, aladdin_passwd
+
+import argparse
+import asyncio
+import hashlib
+import json
+import os
+import re
+import sys
+import uuid
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+import docx
+import spacy
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+from dotenv import load_dotenv
+from spacy.matcher import Matcher
+
+from .answer_composer import CompletionsClient, get_openai_completion
+from .prompts import read_prompt
 
 DEBUG = True
 SHOW_TEXT = False  # when True, print full prompt/completion payloads
@@ -26,6 +50,7 @@ MODEL_PRICING = {
     "gpt-4o-max": {"in": 0.007, "out": 0.021},      # hypothetical tier
 }
 
+
 def _record_usage(model: str, usage: Dict[str, int]):
     """Accumulate token usage and cost into globals."""
     global TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_COST_USD
@@ -39,21 +64,11 @@ def _record_usage(model: str, usage: Dict[str, int]):
     if DEBUG:
         dbg(f"Cost for call [{model}]: input {prompt_toks} tok, output {compl_toks} tok → ${cost:.6f}")
 
+
 def dbg(msg: str):
     if DEBUG:
         print(f"[DEBUG] {msg}")
-import os, re, json, uuid, argparse
-import sys
-import math
-import asyncio
-import hashlib
-from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import List, Optional, Dict, Any, Tuple, Union, Set
-from concurrent.futures import ThreadPoolExecutor
-from dotenv import load_dotenv
-import spacy
-from spacy.matcher import Matcher
+
 
 # Load environment variables from a .env file if present
 load_dotenv(override=True)
@@ -64,13 +79,6 @@ if VENDORED_SPACY_DIR.exists():
     if vendored not in sys.path:
         sys.path.append(vendored)
     os.environ.setdefault("SPACY_DATA", vendored)
-
-import docx
-from docx.text.paragraph import Paragraph
-from docx.table import Table
-from docx.oxml.ns import qn
-from .answer_composer import CompletionsClient, get_openai_completion
-from .prompts import read_prompt
 
 # Framework and model selection
 FRAMEWORK = os.getenv("ANSWER_FRAMEWORK", "aladdin")
@@ -486,6 +494,47 @@ def _para_indent_info(p: Paragraph) -> Tuple[int, int]:
     except Exception:
         return 0, 0
 
+
+
+def _paragraph_excerpt_lines(gi: int, paragraph: Paragraph) -> List[str]:
+    style = _para_style_name(paragraph)
+    align = _para_alignment(paragraph)
+    num_id, ilvl = _para_num_info(paragraph)
+    left, first = _para_indent_info(paragraph)
+    raw = paragraph.text or ""
+    leading_ws = len(raw) - len(raw.lstrip(" \t"))
+    rich = _paragraph_rich_text(paragraph)
+    header = (
+        f"B[{gi}] PARAGRAPH style='{style}' align={align} numId={num_id} ilvl={ilvl} "
+        f"left={left} first={first} leading_ws={leading_ws}"
+    )
+    text_line = f"B[{gi}] TEXT: {rich if rich else raw}"
+    return [header, text_line]
+
+
+def _table_excerpt_lines(
+    gi: int,
+    table: Table,
+    table_index: int,
+) -> Tuple[List[str], int]:
+    try:
+        rows = len(table.rows)
+        cols = len(table.columns)
+    except Exception:
+        rows, cols = 0, 0
+    lines = [
+        f"B[{gi}] TABLE rows={rows} cols={cols} (table_index={table_index})"
+    ]
+    for r in range(rows):
+        for c in range(cols):
+            try:
+                cell_text = _cell_rich_text(table.cell(r, c))
+            except Exception:
+                cell_text = ""
+            lines.append(f"B[{gi}] [{r},{c}] TEXT: {cell_text}")
+    return lines, table_index + 1
+
+
 def _render_rich_excerpt(blocks: List[Union[Paragraph, Table]], start_index: int = 0) -> Tuple[str, Dict[int, int]]:
     """
     Produce a linearized, format-aware representation with global block indices.
@@ -494,40 +543,59 @@ def _render_rich_excerpt(blocks: List[Union[Paragraph, Table]], start_index: int
     lines: List[str] = []
     table_idx_map: Dict[int, int] = {}
     running_table_index = 0
-    for gi, b in enumerate(blocks, start=start_index):
-        if isinstance(b, Paragraph):
-            style = _para_style_name(b)
-            align = _para_alignment(b)
-            numId, ilvl = _para_num_info(b)
-            left, first = _para_indent_info(b)
-            raw = b.text or ""
-            leading_ws = len(raw) - len(raw.lstrip(" \t"))
-            rich = _paragraph_rich_text(b)
-            lines.append(
-                f"B[{gi}] PARAGRAPH style='{style}' align={align} numId={numId} ilvl={ilvl} "
-                f"left={left} first={first} leading_ws={leading_ws}"
-            )
-            lines.append(f"B[{gi}] TEXT: {rich if rich else raw}")
-        elif isinstance(b, Table):
-            # Table header line
-            try:
-                rows = len(b.rows)
-                cols = len(b.columns)
-            except Exception:
-                rows, cols = 0, 0
+    for gi, block in enumerate(blocks, start=start_index):
+        if isinstance(block, Paragraph):
+            lines.extend(_paragraph_excerpt_lines(gi, block))
+            continue
+        if isinstance(block, Table):
             table_idx_map[gi] = running_table_index
-            lines.append(f"B[{gi}] TABLE rows={rows} cols={cols} (table_index={running_table_index})")
-            for r in range(rows):
-                row_line = []
-                for c in range(cols):
-                    try:
-                        cell_text = _cell_rich_text(b.cell(r, c))
-                    except Exception:
-                        cell_text = ""
-                    lines.append(f"B[{gi}] [{r},{c}] TEXT: {cell_text}")
-            running_table_index += 1
+            table_lines, running_table_index = _table_excerpt_lines(
+                gi,
+                block,
+                running_table_index,
+            )
+            lines.extend(table_lines)
     excerpt = "\n".join(lines)
     return excerpt, table_idx_map
+
+
+def _paragraph_structured_item(gi: int, paragraph: Paragraph) -> Dict[str, Any]:
+    style = _para_style_name(paragraph)
+    num_id, ilvl = _para_num_info(paragraph)
+    left, first = _para_indent_info(paragraph)
+    return {
+        "index": gi,
+        "type": "paragraph",
+        "text": paragraph.text or "",
+        "style": style,
+        "numId": num_id,
+        "ilvl": ilvl,
+        "left": left,
+        "first": first,
+    }
+
+
+def _table_structured_item(gi: int, table: Table) -> Dict[str, Any]:
+    try:
+        rows = len(table.rows)
+        cols = len(table.columns)
+    except Exception:
+        rows, cols = 0, 0
+    cells: List[Dict[str, Any]] = []
+    for r in range(rows):
+        for c in range(cols):
+            try:
+                cell_text = _cell_rich_text(table.cell(r, c))
+            except Exception:
+                cell_text = ""
+            cells.append({"r": r, "c": c, "text": cell_text})
+    return {
+        "index": gi,
+        "type": "table",
+        "rows": rows,
+        "cols": cols,
+        "cells": cells,
+    }
 
 
 def _render_structured_excerpt(blocks: List[Union[Paragraph, Table]], start_index: int = 0) -> str:
@@ -535,44 +603,10 @@ def _render_structured_excerpt(blocks: List[Union[Paragraph, Table]], start_inde
     items: List[Dict[str, Any]] = []
     for gi, b in enumerate(blocks, start=start_index):
         if isinstance(b, Paragraph):
-            style = _para_style_name(b)
-            numId, ilvl = _para_num_info(b)
-            left, first = _para_indent_info(b)
-            items.append(
-                {
-                    "index": gi,
-                    "type": "paragraph",
-                    "text": b.text or "",
-                    "style": style,
-                    "numId": numId,
-                    "ilvl": ilvl,
-                    "left": left,
-                    "first": first,
-                }
-            )
-        elif isinstance(b, Table):
-            try:
-                rows = len(b.rows)
-                cols = len(b.columns)
-            except Exception:
-                rows, cols = 0, 0
-            cells: List[Dict[str, Any]] = []
-            for r in range(rows):
-                for c in range(cols):
-                    try:
-                        cell_text = _cell_rich_text(b.cell(r, c))
-                    except Exception:
-                        cell_text = ""
-                    cells.append({"r": r, "c": c, "text": cell_text})
-            items.append(
-                {
-                    "index": gi,
-                    "type": "table",
-                    "rows": rows,
-                    "cols": cols,
-                    "cells": cells,
-                }
-            )
+            items.append(_paragraph_structured_item(gi, b))
+            continue
+        if isinstance(b, Table):
+            items.append(_table_structured_item(gi, b))
     return json.dumps({"blocks": items}, ensure_ascii=False)
 
 # ─────────────────── answer-type heuristics ───────────────────
@@ -604,30 +638,35 @@ _MC_KWS = (
 _CHECKBOX_CHARS = "☐☑☒□■✓✔✗✘"
 
 
-def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
-    """Use an LLM to guess multiple-choice options when heuristics fail."""
+def _llm_mc_env_ready() -> bool:
     if FRAMEWORK == "openai":
         if not os.getenv("OPENAI_API_KEY"):
             dbg("llm_extract_mc_choices unavailable: missing OPENAI_API_KEY")
-            return []
-    elif FRAMEWORK == "aladdin":
+            return False
+        return True
+    if FRAMEWORK == "aladdin":
         required = [
             "aladdin_studio_api_key",
             "defaultWebServer",
             "aladdin_user",
             "aladdin_passwd",
         ]
-        missing = [v for v in required if not os.getenv(v)]
+        missing = [env for env in required if not os.getenv(env)]
         if missing:
             dbg(
                 "llm_extract_mc_choices unavailable: missing environment variables for aladdin: "
                 + ", ".join(missing)
             )
-            return []
-    else:
-        dbg(f"llm_extract_mc_choices unavailable: unsupported framework {FRAMEWORK}")
-        return []
+            return False
+        return True
+    dbg(f"llm_extract_mc_choices unavailable: unsupported framework {FRAMEWORK}")
+    return False
 
+
+def _collect_mc_question_and_context(
+    blocks: List[Union[Paragraph, Table]],
+    q_block: int,
+) -> Tuple[str, List[str]]:
     question = ""
     if isinstance(blocks[q_block], Paragraph):
         question = blocks[q_block].text or ""
@@ -636,21 +675,28 @@ def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) 
     following: List[str] = []
     for nb in blocks[q_block + 1 : q_block + 10]:
         if isinstance(nb, Paragraph):
-            txt = nb.text or ""
-            if _looks_like_question(txt):
+            text = nb.text or ""
+            if _looks_like_question(text):
                 break
-            following.append(txt)
+            following.append(text)
         else:
             break
-    context = "\n".join(following)
     dbg(f"Context lines after question: {len(following)}")
+    return question, following
 
+
+def _build_mc_prompt(question: str, context_lines: List[str]) -> str:
+    context = "\n".join(context_lines)
     template = read_prompt("mc_llm_scan")
     prompt = template.format(question=question, context=context)
     if SHOW_TEXT:
         print("\n--- PROMPT (llm_extract_mc_choices) ---")
         print(prompt)
         print("--- END PROMPT ---\n")
+    return prompt
+
+
+def _invoke_mc_llm(prompt: str) -> List[str]:
     try:
         resp = _call_llm_cached(prompt, json_output=True)
         if SHOW_TEXT:
@@ -659,19 +705,22 @@ def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) 
             print("--- END COMPLETION ---\n")
         options = json.loads(resp)
         dbg(f"LLM suggested options: {options}")
-    except Exception as e:
-        dbg(f"llm_extract_mc_choices error: {e}")
+    except Exception as exc:
+        dbg(f"llm_extract_mc_choices error: {exc}")
         return []
-
     if not isinstance(options, list):
         dbg("LLM response was not a list of options")
         return []
+    return [opt for opt in options if isinstance(opt, str)]
 
+
+def _match_llm_options_to_blocks(
+    options: List[str],
+    blocks: List[Union[Paragraph, Table]],
+    q_block: int,
+) -> List[Dict[str, object]]:
     choices: List[Dict[str, object]] = []
     for opt in options:
-        if not isinstance(opt, str):
-            continue
-        # try to locate paragraph containing this option text
         opt_low = opt.lower()
         for offset, nb in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
             if not isinstance(nb, Paragraph):
@@ -680,13 +729,66 @@ def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) 
             if _looks_like_question(nb_text):
                 break
             if opt_low in nb_text.lower():
-                choices.append({"text": opt.strip(), "prefix": "", "block_index": q_block + offset})
-                dbg(
-                    f"Matched option '{opt.strip()}' to block {q_block + offset}"
+                choices.append(
+                    {
+                        "text": opt.strip(),
+                        "prefix": "",
+                        "block_index": q_block + offset,
+                    }
                 )
+                dbg(f"Matched option '{opt.strip()}' to block {q_block + offset}")
                 break
+    return choices
+
+
+def llm_extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
+    """Use an LLM to guess multiple-choice options when heuristics fail."""
+    if not _llm_mc_env_ready():
+        return []
+
+    question, following = _collect_mc_question_and_context(blocks, q_block)
+    prompt = _build_mc_prompt(question, following)
+    options = _invoke_mc_llm(prompt)
+    if not options:
+        return []
+
+    choices = _match_llm_options_to_blocks(options, blocks, q_block)
     dbg(f"Final choices from LLM: {choices}")
     return choices
+
+
+_MC_PREFIX_PATTERNS = [
+    re.compile(rf"^[{_CHECKBOX_CHARS}]\s*"),
+    re.compile(r"^\(\s*\)\s*"),
+    re.compile(r"^\[\s*\]\s*"),
+]
+
+
+def _iter_mc_candidate_paragraphs(blocks: List[Union[Paragraph, Table]], q_block: int):
+    for offset, block in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
+        if not isinstance(block, Paragraph):
+            break
+        text = (block.text or "").strip()
+        if not text:
+            continue
+        if _looks_like_question(text):
+            break
+        yield offset, text
+
+
+def _extract_choice_prefix(text: str) -> Optional[Tuple[str, str]]:
+    for pattern in _MC_PREFIX_PATTERNS:
+        match = pattern.match(text)
+        if match:
+            prefix = match.group(0)
+            cleaned = text[match.end():].strip()
+            return prefix, cleaned
+    enum_match = _ENUM_PREFIX_RE.match(text)
+    if enum_match:
+        prefix = enum_match.group(0)
+        cleaned = text[enum_match.end():].strip()
+        return prefix, cleaned
+    return None
 
 
 def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> List[Dict[str, object]]:
@@ -698,42 +800,18 @@ def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> L
       - block_index:index of the paragraph containing the option
     """
     choices: List[Dict[str, object]] = []
-    for offset, nb in enumerate(blocks[q_block + 1 : q_block + 10], start=1):
-        if not isinstance(nb, Paragraph):
+    for offset, text in _iter_mc_candidate_paragraphs(blocks, q_block):
+        result = _extract_choice_prefix(text)
+        if result is None:
             break
-        txt = (nb.text or "").strip()
-        if not txt:
-            continue
-        if _looks_like_question(txt):
-            # Stop before we spill into the next question's territory
-            break
-        prefix = ""
-        cleaned = txt
-        if any(ch in txt for ch in _CHECKBOX_CHARS):
-            m = re.match(rf"^[{_CHECKBOX_CHARS}]\s*", txt)
-            if m:
-                prefix = m.group(0)
-                cleaned = txt[m.end():].strip()
-        elif re.match(r"^\(\s*\)\s*", txt):
-            m = re.match(r"^\(\s*\)\s*", txt)
-            prefix = m.group(0)
-            cleaned = txt[m.end():].strip()
-        elif re.match(r"^\[\s*\]\s*", txt):
-            m = re.match(r"^\[\s*\]\s*", txt)
-            prefix = m.group(0)
-            cleaned = txt[m.end():].strip()
-        elif re.match(_ENUM_PREFIX_RE, txt):
-            m = _ENUM_PREFIX_RE.match(txt)
-            if m:
-                prefix = m.group(0)
-                cleaned = txt[m.end():].strip()
-        else:
-            break
-        choices.append({
-            "text": cleaned,
-            "prefix": prefix,
-            "block_index": q_block + offset,
-        })
+        prefix, cleaned = result
+        choices.append(
+            {
+                "text": cleaned,
+                "prefix": prefix,
+                "block_index": q_block + offset,
+            }
+        )
     if not choices:
         dbg("Heuristic MC extraction found no choices.")
         if USE_LLM and not DISABLE_MC_LLM:
@@ -743,61 +821,84 @@ def extract_mc_choices(blocks: List[Union[Paragraph, Table]], q_block: int) -> L
     return choices
 
 
-def llm_infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]], q_block: int) -> str:
-    """Use an LLM to classify the expected answer type for a question."""
+def _llm_answer_type_env_ready() -> bool:
     if FRAMEWORK == "openai":
         if not os.getenv("OPENAI_API_KEY"):
             dbg("llm_infer_answer_type unavailable: missing OPENAI_API_KEY")
-            return "text"
-    elif FRAMEWORK == "aladdin":
+            return False
+        return True
+    if FRAMEWORK == "aladdin":
         required = [
             "aladdin_studio_api_key",
             "defaultWebServer",
             "aladdin_user",
             "aladdin_passwd",
         ]
-        missing = [v for v in required if not os.getenv(v)]
+        missing = [env for env in required if not os.getenv(env)]
         if missing:
             dbg(
                 "llm_infer_answer_type unavailable: missing environment variables for aladdin: "
                 + ", ".join(missing)
             )
-            return "text"
-    else:
-        dbg(f"llm_infer_answer_type unavailable: unsupported framework {FRAMEWORK}")
-        return "text"
+            return False
+        return True
+    dbg(f"llm_infer_answer_type unavailable: unsupported framework {FRAMEWORK}")
+    return False
 
-    context_lines: List[str] = []
+
+def _collect_answer_type_context(
+    blocks: List[Union[Paragraph, Table]],
+    q_block: int,
+) -> List[str]:
+    lines: List[str] = []
     for nb in blocks[max(0, q_block - 2) : q_block]:
         if isinstance(nb, Paragraph):
-            context_lines.append(nb.text or "")
+            lines.append(nb.text or "")
     for nb in blocks[q_block + 1 : q_block + 10]:
         if isinstance(nb, Paragraph):
-            txt = nb.text or ""
-            if _looks_like_question(txt):
+            text = nb.text or ""
+            if _looks_like_question(text):
                 break
-            context_lines.append(txt)
+            lines.append(text)
         else:
             break
-    context = "\n".join(context_lines)
+    return lines
 
+
+def _build_answer_type_prompt(question_text: str, context_lines: List[str]) -> str:
+    context = "\n".join(context_lines)
     template = read_prompt("answer_type_llm_scan")
     prompt = template.format(question=question_text, context=context)
     if SHOW_TEXT:
         print("\n--- PROMPT (llm_infer_answer_type) ---")
         print(prompt)
         print("--- END PROMPT ---\n")
+    return prompt
+
+
+def _call_answer_type_llm(prompt: str) -> Optional[str]:
     try:
         resp = _call_llm_cached(prompt, model=MODEL)
         if SHOW_TEXT:
             print("\n--- COMPLETION (llm_infer_answer_type) ---")
             print(resp)
             print("--- END COMPLETION ---\n")
-        atype = resp.strip().lower()
-        if atype in {"text", "multiple_choice", "file", "table"}:
-            return atype
-    except Exception as e:
-        dbg(f"llm_infer_answer_type error: {e}")
+        return resp.strip().lower()
+    except Exception as exc:
+        dbg(f"llm_infer_answer_type error: {exc}")
+        return None
+
+
+def llm_infer_answer_type(question_text: str, blocks: List[Union[Paragraph, Table]], q_block: int) -> str:
+    """Use an LLM to classify the expected answer type for a question."""
+    if not _llm_answer_type_env_ready():
+        return "text"
+
+    context_lines = _collect_answer_type_context(blocks, q_block)
+    prompt = _build_answer_type_prompt(question_text, context_lines)
+    answer_type = _call_answer_type_llm(prompt)
+    if answer_type in {"text", "multiple_choice", "file", "table"}:
+        return answer_type
     return "text"
 
 
@@ -977,7 +1078,8 @@ def detect_response_label_then_blank(blocks: List[Union[Paragraph, Table]]) -> L
                 back_p_idx = p_index
                 for k in range(1, 4):
                     j = i - k
-                    if j < 0: break
+                    if j < 0:
+                        break
                     prev = blocks[j]
                     if isinstance(prev, Paragraph):
                         back_p_idx -= 1
@@ -988,7 +1090,8 @@ def detect_response_label_then_blank(blocks: List[Union[Paragraph, Table]]) -> L
                 # look forward to find first blank paragraph
                 if q_text is not None:
                     for j in range(1, 4):
-                        if i + j >= len(blocks): break
+                        if i + j >= len(blocks):
+                            break
                         nb = blocks[i + j]
                         if isinstance(nb, Paragraph):
                             nb_text = (nb.text or "").strip()
@@ -1999,9 +2102,9 @@ def attach_context(slots: List[QASlot], blocks):
         heads = heading_chain(blocks, qb)
 
         parent = None
-        for l in range(level - 1, 0, -1):
-            if l in last_at_level:
-                parent = last_at_level[l]
+        for ancestor_level in range(level - 1, 0, -1):
+            if ancestor_level in last_at_level:
+                parent = last_at_level[ancestor_level]
                 break
 
         ctx = {"level": int(level), "heading_chain": heads}
