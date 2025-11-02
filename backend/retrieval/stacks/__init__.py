@@ -27,6 +27,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     _faiss_pkg = None  # type: ignore
 
+try:  # pragma: no cover - optional dependency
+    importlib.import_module("backend.retrieval.stacks.azure")
+except ModuleNotFoundError:
+    pass
+
 # Allow environment configuration of the active stack (new name takes priority).
 _env_stack = os.getenv("RFP_RETRIEVAL_STACK") or os.getenv("RFP_RETRIEVAL_BACKEND")
 if _env_stack:

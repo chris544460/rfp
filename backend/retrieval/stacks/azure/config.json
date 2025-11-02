@@ -1,0 +1,11 @@
+{
+  "aiSearchEndpoint": "https://example.search.windows.net",
+  "indexName": "rfp-stack-index",
+  "semanticConfiguration": "default-rfp-ai",
+  "vectorField": "embedding",
+  "contentField": "content",
+  "tagsField": "tags",
+  "sourceField": "source",
+  "metadataField": "metadata",
+  "embeddingModel": "text-embedding-ada-002"
+}
