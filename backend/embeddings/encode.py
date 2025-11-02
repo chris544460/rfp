@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-encode.py  ⇒ send (answer.text) + (question.text) to Surface embedding,
-    blend them into a single vector per record, then build a FAISS index.
+encode.py ⇒ utility for generating the vector store backing RFP retrieval.
 
-Usage:
-    python3 encode.py \
+Reads the structured QA export (answer + question text), calls the Surface /
+Azure-OpenAI embedding endpoint, blends answer/question vectors, and writes:
+
+* `faiss.index` + `metadata.json` (consumed by `backend.retrieval.vector_search`)
+* optional Azure AI Search payload for infra teams to ingest elsewhere
+
+Typical usage:
+
+    python backend/embeddings/encode.py \
         --file documents/xlsx/structured_extraction/parsed_json_outputs/embedding_data.json \
         --output vector_store \
         --workers 4 \
@@ -44,6 +50,7 @@ load_dotenv()
 # Surface / Azure-OpenAI configuration
 # ----------------------------------------
 
+# Surface gateway + credential wiring (identical to the Streamlit runtime config).
 WEBSTER       = os.getenv("defaultWebServer", "https://webster.bfm.com")
 EMB_URL       = f"{WEBSTER}/api/ai-platform/toolkit/embedding/v1/embedding:generate"
 HEADERS_BASE  = {
@@ -82,6 +89,7 @@ def _build_session() -> requests.Session:
 
 
 SESSION = _build_session()
+# Shared session keeps TCP connections warm across thread pool requests.
 
 # I/O helpers
 
@@ -202,6 +210,7 @@ def embed_one(text: str, model: str) -> List[float]:
 # ----------------------------------------
 
 def main():
+    """CLI entry point used by data-prep jobs to refresh the FAISS store."""
     ap = argparse.ArgumentParser(
         description="Load JSON records with 'text' and metadata.question, embed both, blend, and build FAISS index."
     )
@@ -243,7 +252,7 @@ def main():
     recs = load_records(args.file)
     N = len(recs)
 
-    # Extract the answer-texts and question-texts, and ids
+    # Extract answer/question text and ids in parallel lists so ordering stays stable.
     ans_texts = [rec["text"] for rec in recs]
     q_texts   = [rec["metadata"]["question"] for rec in recs]
     ids       = [rec["metadata"].get("id", str(i)) for i, rec in enumerate(recs)]
@@ -312,3 +321,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # To sanity-check the embedding endpoint without full CLI arguments, uncomment below.
+    # It embeds a single string using env-configured credentials.
+    #
+    #     sample = "Draft an overview of the Sustainable Growth Fund."
+    #     vec = embed_one(sample, MODEL_DEFAULT)
+    #     print("Sample embedding length:", len(vec))
