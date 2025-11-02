@@ -99,7 +99,7 @@ class StreamlitApp:
 
     def __init__(self) -> None:
         from backend.ui.components import FeedbackUI
-        from backend.document_jobs import DocumentJobController
+        from backend.documents.workflows import DocumentJobController
         from frontend.feedback import build_feedback_manager
         from frontend.chat_page import render_chat_page
         from frontend.config_panel import (

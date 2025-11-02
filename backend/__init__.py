@@ -38,7 +38,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency unavailable
     ask_sheet_schema = extract_schema_from_xlsx = extract_slots_from_xlsx = None  # type: ignore[assignment]
 try:
-    from .document_jobs.controller import DocumentJobController
+    from .documents.workflows import DocumentJobController
 except ModuleNotFoundError:  # pragma: no cover - optional streamlit dependency
     DocumentJobController = None  # type: ignore[assignment]
 

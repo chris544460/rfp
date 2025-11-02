@@ -16,7 +16,7 @@ from backend.ui.components import (
     render_live_answer,
 )
 from backend.answering import QuestionExtractor, Responder
-from backend.document_jobs import DocumentJobController
+from backend.documents.workflows import DocumentJobController
 from backend.llm.completions_client import CompletionsClient
 from frontend.config_panel import AppConfig
 from frontend.feedback import FeedbackManager
