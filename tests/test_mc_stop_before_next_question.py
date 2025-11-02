@@ -1,9 +1,24 @@
-import sys, pathlib, docx
+import pathlib
+import sys
+
+import pytest
+
+pytest.importorskip("docx")
+try:
+    import docx.table  # noqa: F401
+    import docx.text.paragraph  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "python-docx with table/text support is required for docx slot finder tests",
+        allow_module_level=True,
+    )
+
+import docx
 
 # Ensure project root on path
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
-from backend.rfp_docx_slot_finder import extract_mc_choices, _iter_block_items
+from backend.documents.docx.slot_finder import extract_mc_choices, _iter_block_items
 
 
 def test_extract_mc_choices_stops_before_next_question():

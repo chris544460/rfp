@@ -18,7 +18,7 @@ from frontend.session_state import initialize_session_state
 def configure_page() -> None:
     """Configure Streamlit and apply the shared design system."""
 
-    from backend.design import (
+    from backend.ui.design import (
         APP_NAME,
         StyleCSS,
         StyleColors,
@@ -98,8 +98,8 @@ class StreamlitApp:
     """Thin orchestrator wiring together the chat and document modes."""
 
     def __init__(self) -> None:
-        from backend.components import FeedbackUI
-        from backend.workflows import DocumentJobController
+        from backend.ui.components import FeedbackUI
+        from backend.document_jobs import DocumentJobController
         from frontend.feedback import build_feedback_manager
         from frontend.chat_page import render_chat_page
         from frontend.config_panel import (

@@ -1,11 +1,23 @@
-import sys, pathlib
+import pathlib
+import sys
 
 import pytest
+
+docx = pytest.importorskip("docx")
+try:
+    import docx.table  # noqa: F401
+    import docx.text.paragraph  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "python-docx with table/text support is required for document search tests",
+        allow_module_level=True,
+    )
+
 from docx import Document
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
-from backend.llm_doc_search import _extract_text_from_doc, search_uploaded_docs
+from backend.retrieval.document_search import _extract_text_from_doc, search_uploaded_docs
 
 
 class DummyLLM:

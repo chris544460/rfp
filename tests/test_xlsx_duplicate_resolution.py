@@ -1,5 +1,8 @@
 
-import types, sys
+import sys
+import types
+
+import pytest
 
 class _DummyNLP:
     pipe_names = []
@@ -16,9 +19,23 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 sys.modules['spacy'] = types.SimpleNamespace(load=_load, blank=_blank)
 
+pytest.importorskip("openpyxl")
+try:
+    import openpyxl.styles  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "openpyxl with styles support is required for duplicate resolution tests",
+        allow_module_level=True,
+    )
 
 import openpyxl
-import rfp_xlsx_slot_finder as finder
+
+if not hasattr(openpyxl, "Workbook"):
+    pytest.skip(
+        "openpyxl Workbook support is required for duplicate resolution tests",
+        allow_module_level=True,
+    )
+from backend.documents.xlsx import slot_finder as finder
 finder._spacy_is_question_or_imperative = lambda text: True
 
 

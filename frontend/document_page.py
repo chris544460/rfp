@@ -8,17 +8,16 @@ from uuid import uuid4
 
 import streamlit as st
 
-from backend.components import (
+from backend.ui.components import (
     DOC_HIGHLIGHT_OPTIONS,
     DOC_IMPROVEMENT_OPTIONS,
     FeedbackUI,
     create_live_placeholder,
     render_live_answer,
 )
-from backend.services import QuestionExtractor, Responder
-from backend.workflows import DocumentJobController
-
-from backend.answer_composer import CompletionsClient
+from backend.answering import QuestionExtractor, Responder
+from backend.document_jobs import DocumentJobController
+from backend.llm.completions_client import CompletionsClient
 from frontend.config_panel import AppConfig
 from frontend.feedback import FeedbackManager
 from frontend.session_state import (

@@ -1,9 +1,24 @@
-import sys, pathlib, docx
+import pathlib
+import sys
+
+import pytest
+
+pytest.importorskip("docx")
+try:
+    import docx.table  # noqa: F401
+    import docx.text.paragraph  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "python-docx with table/text support is required for multiple-choice tests",
+        allow_module_level=True,
+    )
+
+import docx
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
-from backend.rfp_docx_apply_answers import iter_block_items, mark_multiple_choice
-from backend.word_comments import ensure_comments_part
+from backend.documents.docx.apply_answers import iter_block_items, mark_multiple_choice
+from backend.documents.docx.comments import ensure_comments_part
 
 
 def test_mark_multiple_choice_adds_comment(tmp_path):

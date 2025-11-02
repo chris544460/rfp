@@ -29,13 +29,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from backend.structured_extraction.parser import (
+from backend.documents.xlsx.structured_extraction.parser import (
     MixedDocParser,
     process_excel_file_with_detection,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-STRUCTURED_EXTRACTION_DIR = BASE_DIR.parent / "backend" / "structured_extraction"
+STRUCTURED_EXTRACTION_DIR = (
+    BASE_DIR.parent / "backend" / "documents" / "xlsx" / "structured_extraction"
+)
 DATA_SOURCES_DIR = STRUCTURED_EXTRACTION_DIR / "data_sources"
 PARSED_OUTPUT_DIR = STRUCTURED_EXTRACTION_DIR / "parsed_json_outputs"
 PREPARED_OUTPUT_DIR = PARSED_OUTPUT_DIR

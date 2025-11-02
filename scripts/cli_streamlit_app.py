@@ -32,12 +32,12 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from .cli_app import build_docx, extract_questions, load_input_text
-from backend.qa_core import answer_question, collect_relevant_snippets
-from backend.answer_composer import CompletionsClient, get_openai_completion
-from backend.structured_extraction.interpreter_sheet import collect_non_empty_cells
-from backend.rfp_xlsx_slot_finder import ask_sheet_schema
-from backend.rfp_xlsx_apply_answers import write_excel_answers
-from backend.rfp_docx_slot_finder import (
+from backend.answering.qa_engine import answer_question, collect_relevant_snippets
+from backend.llm.completions_client import CompletionsClient, get_openai_completion
+from backend.documents.xlsx.structured_extraction.interpreter_sheet import collect_non_empty_cells
+from backend.documents.xlsx.slot_finder import ask_sheet_schema
+from backend.documents.xlsx.apply_answers import write_excel_answers
+from backend.documents.docx.slot_finder import (
     QUESTION_PHRASES,
     USE_SPACY_QUESTION,
     extract_slots_from_docx,
@@ -47,8 +47,8 @@ from backend.rfp_docx_slot_finder import (
     _looks_like_question,
     _spacy_docx_is_question,
 )
-from backend.rfp_docx_apply_answers import apply_answers_to_docx
-from backend.search.vector_search import index_size, search
+from backend.documents.docx.apply_answers import apply_answers_to_docx
+from backend.retrieval.vector_search import index_size, search
 
 
 DEBUG_ENABLED = os.getenv("CLI_STREAMLIT_DEBUG", "0") not in {"", "0", "false", "False"}
@@ -208,10 +208,15 @@ def resolve_llm_client(framework: str, model: str):
 
 def load_fund_tags() -> List[str]:
     # Use embedding data from the current repository
-    path = (Path(__file__).resolve().parent /
-            "structured_extraction" /
-            "parsed_json_outputs" /
-            "embedding_data.json")
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "backend"
+        / "documents"
+        / "xlsx"
+        / "structured_extraction"
+        / "parsed_json_outputs"
+        / "embedding_data.json"
+    )
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)

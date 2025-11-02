@@ -1,4 +1,21 @@
+import pytest
+
+pytest.importorskip("openpyxl")
+try:
+    import openpyxl.styles  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "openpyxl with styles support is required for xlsx aladdin tests",
+        allow_module_level=True,
+    )
+
 import openpyxl
+
+if not hasattr(openpyxl, "Workbook"):
+    pytest.skip(
+        "openpyxl Workbook support is required for xlsx aladdin tests",
+        allow_module_level=True,
+    )
 
 
 def test_spacy_question_detection(tmp_path):
@@ -10,7 +27,7 @@ def test_spacy_question_detection(tmp_path):
     path = tmp_path / "in.xlsx"
     wb.save(path)
 
-    import rfp_xlsx_slot_finder as finder
+    from backend.documents.xlsx import slot_finder as finder
 
     schema = finder.extract_schema_from_xlsx(str(path), debug=False)
     # The LLM-based pipeline may decline to choose a slot when no model is

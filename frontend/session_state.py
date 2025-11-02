@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import streamlit as st
 
-from backend.persistent_state import (
+from backend.storage.state import (
     clear_latest_doc_run,
     load_latest_doc_run,
     save_latest_doc_run,

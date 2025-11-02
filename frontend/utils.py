@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from backend.answer_composer import CompletionsClient, get_openai_completion
+from backend.llm.completions_client import CompletionsClient, get_openai_completion
 
 
 class OpenAIClient:

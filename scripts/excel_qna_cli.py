@@ -23,7 +23,7 @@ Usage examples:
   python excel_qna_cli.py input.xlsx --length medium --mode both --k 6
 
 Note: The default LLM client uses the custom CompletionsClient. Ensure
-the necessary environment variables are set (see answer_composer.py).
+the necessary environment variables are set (see backend/llm/completions_client.py).
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from backend.answer_composer import CompletionsClient, get_openai_completion
-from backend.qa_core import answer_question
+from backend.llm.completions_client import CompletionsClient, get_openai_completion
+from backend.answering.qa_engine import answer_question
 
 
 def _find_column_indexes(

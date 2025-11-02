@@ -1,6 +1,6 @@
 # Local Feedback Storage
 
-The Streamlit app writes user feedback through `feedback_storage.FeedbackStore`,
+The Streamlit app writes user feedback through `backend.storage.feedback.FeedbackStore`,
 which now appends each record to a local NDJSON file. This keeps the feedback
 workflow fully functional without requiring any cloud credentials.
 

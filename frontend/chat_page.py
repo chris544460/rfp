@@ -8,11 +8,9 @@ from typing import Any, Dict, List
 
 import streamlit as st
 
-from backend import my_module
-from backend.components import FeedbackUI
-from backend.services import Responder
-
-from backend.answer_composer import CompletionsClient
+from backend.answering import Responder, conversation
+from backend.llm.completions_client import CompletionsClient
+from backend.ui.components import FeedbackUI
 from frontend.config_panel import AppConfig, FOLLOWUP_DEFAULT_MODEL, MODEL_SHORT_NAMES
 from frontend.session_state import trigger_rerun
 from frontend.utils import OpenAIClient, save_uploaded_file, select_top_preapproved_answers
@@ -38,7 +36,7 @@ def render_chat_page(view_mode: str, config: AppConfig, feedback: FeedbackUI) ->
         include_citations=config.include_citations,
         extra_docs=extra_docs,
     )
-    my_module._llm_client = llm
+    conversation._llm_client = llm
 
     response_mode = st.radio(
         "Response style",
@@ -64,7 +62,7 @@ def render_chat_page(view_mode: str, config: AppConfig, feedback: FeedbackUI) ->
             st.session_state.chat_messages = []
             st.session_state.question_history = []
             try:
-                my_module.QUESTION_HISTORY.clear()
+                conversation.QUESTION_HISTORY.clear()
             except Exception:
                 pass
             st.success("Chat history cleared.")
@@ -331,12 +329,12 @@ def render_chat_page(view_mode: str, config: AppConfig, feedback: FeedbackUI) ->
                     _set_answer_status(formatted, final=final)
 
                 _set_answer_status("Stage 1/4 - Analyzing conversation context...")
-                intent = my_module._classify_intent(prompt, history)
-                follow = my_module._detect_followup(prompt, history) if intent == "follow_up" else []
+                intent = conversation._classify_intent(prompt, history)
+                follow = conversation._detect_followup(prompt, history) if intent == "follow_up" else []
                 buf = io.StringIO() if view_mode == "Developer" else None
                 response_model = config.llm_model
                 restore_client = None
-                call_fn = my_module.gen_answer if intent == "follow_up" else responder.answer
+                call_fn = conversation.gen_answer if intent == "follow_up" else responder.answer
                 try:
                     if intent == "follow_up" and view_mode != "Developer":
                         response_model = FOLLOWUP_DEFAULT_MODEL
@@ -348,8 +346,8 @@ def render_chat_page(view_mode: str, config: AppConfig, feedback: FeedbackUI) ->
                             followup_llm = (
                                 llm if response_model == config.llm_model else OpenAIClient(model=response_model)
                             )
-                        restore_client = my_module._llm_client
-                        my_module._llm_client = followup_llm
+                        restore_client = conversation._llm_client
+                        conversation._llm_client = followup_llm
                     if buf:
                         with contextlib.redirect_stdout(buf):
                             result = call_fn(
@@ -371,7 +369,7 @@ def render_chat_page(view_mode: str, config: AppConfig, feedback: FeedbackUI) ->
                         )
                 finally:
                     if restore_client is not None:
-                        my_module._llm_client = restore_client
+                        conversation._llm_client = restore_client
                 _set_answer_status("Stage 4/4 - Answer ready.", final=True)
                 if isinstance(result, tuple):
                     ans, comments = result
@@ -401,8 +399,8 @@ def render_chat_page(view_mode: str, config: AppConfig, feedback: FeedbackUI) ->
                 if view_mode == "Developer":
                     st.expander("Debug info").markdown(f"```\n{debug_text}\n```")
                 if intent != "follow_up":
-                    my_module.QUESTION_HISTORY.append(prompt)
-                    my_module.QA_HISTORY.append({"question": prompt, "answer": text, "citations": []})
+                    conversation.QUESTION_HISTORY.append(prompt)
+                    conversation.QA_HISTORY.append({"question": prompt, "answer": text, "citations": []})
                 feedback.render_chat_feedback_form(
                     message_index=len(st.session_state.chat_messages),
                     question=prompt,

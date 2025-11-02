@@ -1,9 +1,25 @@
-import os, json
-import sys, pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+import json
+import os
+import pathlib
+import sys
 from dataclasses import asdict
+
+import pytest
+
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+pytest.importorskip("docx")
+try:
+    import docx.table  # noqa: F401
+    import docx.text.paragraph  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "python-docx with table/text support is required for workflow tests",
+        allow_module_level=True,
+    )
+
 import docx
-from backend.rfp_docx_slot_finder import (
+from backend.documents.docx.slot_finder import (
     detect_para_question_with_blank,
     detect_two_col_table_q_blank,
     detect_response_label_then_blank,
@@ -13,7 +29,7 @@ from backend.rfp_docx_slot_finder import (
     QASlot,
     AnswerLocator
 )
-from backend.rfp_docx_apply_answers import apply_answers_to_docx
+from backend.documents.docx.apply_answers import apply_answers_to_docx
 
 def build_slots(doc_path):
     doc = docx.Document(doc_path)

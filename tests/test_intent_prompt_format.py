@@ -1,4 +1,4 @@
-from backend import my_module
+from backend.answering import conversation as my_module
 from types import SimpleNamespace
 
 

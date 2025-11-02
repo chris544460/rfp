@@ -1,6 +1,24 @@
+import pytest
+
+pytest.importorskip("openpyxl")
+try:
+    import openpyxl.styles  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "openpyxl with styles support is required for xlsx extraction tests",
+        allow_module_level=True,
+    )
+
 import openpyxl
-from backend.rfp_xlsx_slot_finder import extract_slots_from_xlsx, extract_schema_from_xlsx
-from backend.rfp_xlsx_apply_answers import write_excel_answers
+
+if not hasattr(openpyxl, "Workbook"):
+    pytest.skip(
+        "openpyxl Workbook support is required for xlsx extraction tests",
+        allow_module_level=True,
+    )
+
+from backend.documents.xlsx.slot_finder import extract_slots_from_xlsx, extract_schema_from_xlsx
+from backend.documents.xlsx.apply_answers import write_excel_answers
 
 
 def test_extract_slots_from_xlsx(tmp_path):
@@ -91,8 +109,8 @@ def test_comment_formats_citations(tmp_path):
     assert c.comment is None
     assert c.value == "Ans"
 
-    import docx
-    from backend.word_comments import ensure_comments_part
+    docx = pytest.importorskip("docx")
+    from backend.documents.docx.comments import ensure_comments_part
 
     doc = docx.Document(comments_path)
     part = ensure_comments_part(doc)

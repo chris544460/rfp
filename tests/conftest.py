@@ -48,13 +48,6 @@ if "docx" not in sys.modules:
 sys.modules["docx.enum.text"] = docx_enum_text
 
 
-if "word_comments" not in sys.modules:
-    word_comments_stub = types.ModuleType("word_comments")
-    word_comments_stub.add_comment_to_run = _not_available
-    sys.modules["word_comments"] = word_comments_stub
-
-
-
 
 def pytest_ignore_collect(path, config):  # pragma: no cover - collection guard
     return "rfp/__init__.py" in str(path)

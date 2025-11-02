@@ -1,4 +1,23 @@
-import rfp_xlsx_slot_finder as finder
+import pytest
+
+pytest.importorskip("openpyxl")
+try:
+    import openpyxl.styles  # noqa: F401
+except ModuleNotFoundError:
+    pytest.skip(
+        "openpyxl with styles support is required for slot finder tests",
+        allow_module_level=True,
+    )
+
+import openpyxl
+
+if not hasattr(openpyxl, "Workbook"):
+    pytest.skip(
+        "openpyxl Workbook support is required for slot finder tests",
+        allow_module_level=True,
+    )
+
+from backend.documents.xlsx import slot_finder as finder
 
 
 def test_aladdin_llm_call_without_openai_key(monkeypatch):
@@ -51,4 +70,3 @@ def test_openai_requires_api_key(monkeypatch):
 
     assert not called.get("was_called")
     assert (sheet, cell) == (None, None)
-

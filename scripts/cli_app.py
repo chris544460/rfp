@@ -9,10 +9,10 @@ Modes by input type:
 - PDF/TXT (and DOCX with --doc-as-text): extract questions as text, answer, and build a Q/A Word report
 
 Dependencies in this repo:
-- answer_composer.CompletionsClient
-- search/vector_search.search
-- rfp_docx_slot_finder.extract_slots_from_docx
-- rfp_docx_apply_answers.apply_answers_to_docx
+- llm.completions_client.CompletionsClient
+- retrieval.vector_search.search
+- documents.docx.slot_finder.extract_slots_from_docx
+- documents.docx.apply_answers.apply_answers_to_docx
 """
 
 from __future__ import annotations
@@ -37,18 +37,18 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from backend.structured_extraction.interpreter_sheet import collect_non_empty_cells
+from backend.documents.xlsx.structured_extraction.interpreter_sheet import collect_non_empty_cells
 
-from backend.answer_composer import CompletionsClient
-from backend.search.vector_search import search
+from backend.llm.completions_client import CompletionsClient
+from backend.retrieval.vector_search import search
 from backend.prompts import read_prompt
 
 # DOCX slot finder + applier
-from backend.rfp_docx_slot_finder import extract_slots_from_docx
-from backend.rfp_docx_apply_answers import apply_answers_to_docx
-from backend.rfp_xlsx_apply_answers import write_excel_answers
-from backend.rfp_xlsx_slot_finder import ask_sheet_schema
-from backend.qa_core import answer_question
+from backend.documents.docx.slot_finder import extract_slots_from_docx
+from backend.documents.docx.apply_answers import apply_answers_to_docx
+from backend.documents.xlsx.apply_answers import write_excel_answers
+from backend.documents.xlsx.slot_finder import ask_sheet_schema
+from backend.answering.qa_engine import answer_question
 
 
 PROMPTS = {
