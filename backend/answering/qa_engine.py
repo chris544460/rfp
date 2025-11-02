@@ -16,8 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Callable, Set, NamedTuple
 
-# Retrieve context either from vector indexes or uploaded docs.
-from backend.retrieval.vector_search import search
+# Retrieve context from the active retrieval stack (FAISS by default).
+from backend.retrieval.stacks import RetrievalStack, get_stack
 
 try:
     from backend.retrieval.document_search import search_uploaded_docs
@@ -67,13 +67,15 @@ def _gather_vector_hits(
     fund: Optional[str],
     k: int,
     include_vectors: bool,
+    retrieval_stack: Optional[RetrievalStack],
 ) -> List[Dict[str, object]]:
-    """Run the vector index searches according to the requested mode."""
+    """Run the retrieval stack according to the requested mode."""
+    stack = retrieval_stack or get_stack()
     if mode != "both":
-        return search(
+        return stack.search(
             query,
-            k=k,
             mode=mode,
+            k=k,
             fund_filter=fund,
             include_vectors=include_vectors,
         )
@@ -82,7 +84,7 @@ def _gather_vector_hits(
     hits: List[Dict[str, object]] = []
     try:
         hits.extend(
-            search(
+            stack.search(
                 query,
                 k=per_mode_k,
                 mode="blend",
@@ -96,7 +98,7 @@ def _gather_vector_hits(
 
     for specialized_mode in ("question", "answer"):
         hits.extend(
-            search(
+            stack.search(
                 query,
                 k=per_mode_k,
                 mode=specialized_mode,
@@ -356,6 +358,7 @@ def collect_relevant_snippets(
     *,
     diagnostics: Optional[List[Dict[str, object]]] = None,
     include_vectors: bool = False,
+    retrieval_stack: Optional[RetrievalStack] = None,
 ) -> List[Tuple[str, str, str, float, str]]:
     """Return the filtered context snippets shared by both the Responder and conversation flows."""
 
@@ -386,6 +389,7 @@ def collect_relevant_snippets(
         fund=fund,
         k=k,
         include_vectors=include_vectors,
+        retrieval_stack=retrieval_stack,
     )
     _extend_with_uploaded_docs(
         hits,
@@ -564,6 +568,8 @@ def answer_question(
     llm: CompletionsClient,
     extra_docs: Optional[List[str]] = None,
     progress: Optional[Callable[[str], None]] = None,
+    *,
+    retrieval_stack: Optional[RetrievalStack] = None,
 ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
     """
     Primary entrypoint consumed by `backend.answering.responder` and CLI utilities.
@@ -577,6 +583,7 @@ def answer_question(
     "No relevant information found." and an empty comments list without calling
     the language model.
     extra_docs: optional list of document paths to scan with an LLM in addition to vector search.
+    retrieval_stack: optional override that chooses a specific retrieval stack instance.
     """
     if DEBUG:
         print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
@@ -589,6 +596,7 @@ def answer_question(
         llm=llm,
         extra_docs=extra_docs,
         progress=progress,
+        retrieval_stack=retrieval_stack,
     )
 
     if not rows:

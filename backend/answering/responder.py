@@ -11,7 +11,9 @@ same batching and formatting logic.
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+
+from backend.retrieval.stacks import RetrievalStack, get_stack
 
 from .qa_engine import answer_question, collect_relevant_snippets
 
@@ -36,7 +38,11 @@ class Responder:
         min_confidence: float = 0.0,
         include_citations: bool = True,
         extra_docs: Optional[List[str]] = None,
+        retrieval_stack: Optional[Union[str, RetrievalStack]] = None,
+        retrieval_backend: Optional[Union[str, RetrievalStack]] = None,
     ) -> None:
+        if retrieval_stack is None and retrieval_backend is not None:
+            retrieval_stack = retrieval_backend
         self.llm = llm_client
         self.search_mode = search_mode
         self.fund = fund or ""
@@ -46,11 +52,20 @@ class Responder:
         self.min_confidence = min_confidence
         self.include_citations = include_citations
         self.extra_docs = extra_docs or []
+        self._retrieval_stack_param: Optional[Union[str, RetrievalStack]] = retrieval_stack
+        if isinstance(retrieval_stack, str):
+            self.retrieval_stack: Optional[RetrievalStack] = get_stack(retrieval_stack)
+        else:
+            self.retrieval_stack = retrieval_stack
 
     def with_updates(self, **overrides: Any) -> "Responder":
         """Return a new `Responder` using the current defaults plus any overrides."""
         # Build a fresh Responder so Streamlit can tweak per-request knobs
         # without mutating the shared instance held in session state.
+        legacy_stack = overrides.get("retrieval_stack")
+        if legacy_stack is None and "retrieval_backend" in overrides:
+            legacy_stack = overrides["retrieval_backend"]
+
         params = {
             "llm_client": overrides.get("llm_client", self.llm),
             "search_mode": overrides.get("search_mode", self.search_mode),
@@ -61,6 +76,14 @@ class Responder:
             "min_confidence": overrides.get("min_confidence", self.min_confidence),
             "include_citations": overrides.get("include_citations", self.include_citations),
             "extra_docs": overrides.get("extra_docs", list(self.extra_docs)),
+            "retrieval_stack": overrides.get(
+                "retrieval_stack",
+                legacy_stack
+                if legacy_stack is not None
+                else self._retrieval_stack_param
+                if self._retrieval_stack_param is not None
+                else self.retrieval_stack,
+            ),
         }
         return Responder(**params)
 
@@ -84,6 +107,7 @@ class Responder:
             progress=progress,
             diagnostics=diagnostics,
             include_vectors=include_vectors,
+            retrieval_stack=self.retrieval_stack,
         )
 
     def answer(
@@ -173,6 +197,7 @@ class Responder:
             self.llm,
             extra_docs=list(self.extra_docs),
             progress=progress,
+            retrieval_stack=self.retrieval_stack,
         )
 
     def _package_answer(
