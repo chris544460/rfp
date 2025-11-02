@@ -23,7 +23,7 @@ import sys
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, IO, List, Optional, Set, Tuple, Union
 
 import docx
 from docx.oxml.ns import qn
@@ -2017,12 +2017,38 @@ def _write_slots_cache(cache_path: Optional[Path], payload: Dict[str, Any]) -> N
         dbg(f"Unable to write slot cache {cache_path}: {exc}")
 
 
-def extract_slots_from_docx(path: str) -> Dict[str, Any]:
-    cached_payload, cache_path = _maybe_load_cached_slots(path)
-    if cached_payload is not None:
-        return cached_payload
+DocxSource = Union[str, Path, IO[bytes]]
 
-    doc = docx.Document(path)
+
+def extract_slots_from_docx(path: DocxSource) -> Dict[str, Any]:
+    cached_payload: Optional[Dict[str, Any]] = None
+    cache_path: Optional[Path] = None
+    path_hint: Optional[str] = None
+
+    if isinstance(path, (str, Path)):
+        path_hint = str(path)
+        cached_payload, cache_path = _maybe_load_cached_slots(path_hint)
+        if cached_payload is not None:
+            return cached_payload
+        doc_source = path
+    else:
+        path_hint = getattr(path, "name", None)
+        if path_hint:
+            try:
+                if Path(path_hint).exists():
+                    cached_payload, cache_path = _maybe_load_cached_slots(path_hint)
+                    if cached_payload is not None:
+                        return cached_payload
+            except Exception:
+                cached_payload = None
+                cache_path = None
+        doc_source = path
+        try:
+            doc_source.seek(0)
+        except Exception:
+            pass
+
+    doc = docx.Document(doc_source)
     blocks = _expand_doc_blocks(doc)
 
     dbg(f"extract_slots_from_docx: USE_LLM={USE_LLM}")
@@ -2042,7 +2068,8 @@ def extract_slots_from_docx(path: str) -> Dict[str, Any]:
     heuristic_skips = collect_heuristic_skips(deduped_slots, blocks)
     dbg(f"Slot count: {len(deduped_slots)}")
 
-    payload = _build_payload(path, deduped_slots, skipped_slots, heuristic_skips)
+    payload_name = path_hint or "in-memory.docx"
+    payload = _build_payload(payload_name, deduped_slots, skipped_slots, heuristic_skips)
     _write_slots_cache(cache_path, payload)
     return payload
 

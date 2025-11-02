@@ -3,19 +3,34 @@ from __future__ import annotations
 """Lightweight wrappers used by legacy sheet interpretation workflows."""
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, IO, List, Union
 
 from openpyxl import load_workbook
 
 
-def collect_non_empty_cells(path: str | Path) -> List[Dict[str, object]]:
+ExcelSource = Union[str, Path, IO[bytes]]
+
+
+def collect_non_empty_cells(path: ExcelSource) -> List[Dict[str, object]]:
     """Return a list of non-empty cells for the given workbook.
 
     Each item includes sheet name, row, column, and the cell value. This mirrors the
     behaviour expected by the legacy utilities that only need lightweight metadata.
     """
 
-    workbook = load_workbook(filename=str(path), data_only=True)
+    if hasattr(path, "read"):
+        handle = path  # type: ignore[assignment]
+        try:
+            handle.seek(0)
+        except Exception:
+            pass
+        workbook = load_workbook(filename=handle, data_only=True)
+        try:
+            handle.seek(0)
+        except Exception:
+            pass
+    else:
+        workbook = load_workbook(filename=str(path), data_only=True)
     cells: List[Dict[str, object]] = []
     for sheet in workbook.worksheets:
         for row in sheet.iter_rows():

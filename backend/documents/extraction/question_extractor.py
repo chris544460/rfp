@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """Composite question extraction utilities spanning Excel, DOCX, and raw text inputs."""
 
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+import io
 import re
+from typing import Any, Dict, IO, List, Optional, Tuple
+
 from docx import Document
 
 from backend.documents.xlsx.structured_extraction.interpreter_sheet import collect_non_empty_cells
@@ -16,12 +16,51 @@ from backend.prompts import read_prompt
 _EXTRACT_PROMPT = read_prompt("extract_questions")
 
 
-def _load_input_text(path: str) -> str:
+def _clone_buffer(data: bytes, name: Optional[str]) -> io.BytesIO:
+    """Return a fresh BytesIO view of ``data`` with an optional name attribute."""
+    buffer = io.BytesIO(data)
+    if name:
+        try:
+            buffer.name = name  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    return buffer
+
+
+def _read_stream(stream: IO[bytes]) -> Tuple[bytes, Optional[str]]:
+    """Read an in-memory binary stream without disturbing caller file pointers."""
+    name = getattr(stream, "name", None)
+    try:
+        position = stream.tell()
+    except Exception:
+        position = None
+    try:
+        stream.seek(0)
+    except Exception:
+        pass
+    data = stream.read()
+    if position is not None:
+        try:
+            stream.seek(position)
+        except Exception:
+            pass
+    return data, name
+
+
+def _suffix_from_name(name: Optional[str]) -> str:
+    """Return a lowercase suffix (including leading dot) derived from a stream name."""
+    if not name:
+        return ""
+    # Support names that include directories; only inspect the final component.
+    base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    dot = base.rfind(".")
+    if dot == -1:
+        return ""
+    return base[dot:].lower()
+
+
+def _load_input_text(buffer: io.BytesIO, *, suffix: str) -> str:
     """Load various document types into raw text for LLM consumption."""
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"File not found: {p}")
-    suffix = p.suffix.lower()
     if suffix == ".pdf":
         try:
             from PyPDF2 import PdfReader
@@ -29,16 +68,18 @@ def _load_input_text(path: str) -> str:
             raise RuntimeError("PyPDF2 is required to read PDF inputs") from exc
         # Fall back to a naive text extraction; good enough for seeded PDFs.
         out: List[str] = []
-        with p.open("rb") as f:
-            reader = PdfReader(f)
-            for page in reader.pages:
-                out.append(page.extract_text() or "")
-                # Older PDFs can return None for blank pages—defaulting to "" keeps alignment.
+        buffer.seek(0)
+        reader = PdfReader(buffer)
+        for page in reader.pages:
+            out.append(page.extract_text() or "")
+            # Older PDFs can return None for blank pages—defaulting to "" keeps alignment.
         return "\n".join(out)
     if suffix in {".doc", ".docx"}:
-        doc = Document(p)
+        buffer.seek(0)
+        doc = Document(buffer)
         return "\n".join(par.text for par in doc.paragraphs)
-    return p.read_text(encoding="utf-8")
+    buffer.seek(0)
+    return buffer.read().decode("utf-8")
 
 
 def _extract_questions(text: str, llm_client) -> List[str]:
@@ -73,17 +114,20 @@ class QuestionExtractor:
         """Metadata captured during the most recent extraction call."""
         return self._last_details
 
-    def extract(self, path: str, *, treat_docx_as_text: bool = False) -> List[Dict[str, Any]]:
+    def extract(self, stream: IO[bytes], *, treat_docx_as_text: bool = False) -> List[Dict[str, Any]]:
         """High-level entry point that routes to Excel, DOCX, or text logic."""
-        path_obj = Path(path)
-        suffix = path_obj.suffix.lower()
+        data, raw_name = _read_stream(stream)
+        suffix = _suffix_from_name(raw_name)
+        source_name = raw_name or "in-memory"
+
         if suffix in {".xlsx", ".xls"}:
-            return self._extract_from_excel(path_obj)
+            return self._extract_from_excel(data, source_name=source_name)
         if suffix == ".docx" and not treat_docx_as_text:
-            return self._extract_from_docx_slots(path_obj)
+            return self._extract_from_docx_slots(data, source_name=source_name)
         # Fallback: load the raw text (PDF/Docx/plain) and ask the LLM to tease
         # out numbered questions.
-        return self.extract_from_text(_load_input_text(str(path_obj)), source=str(path_obj))
+        text = _load_input_text(_clone_buffer(data, raw_name), suffix=suffix)
+        return self.extract_from_text(text, source=source_name)
 
     def extract_from_text(self, text: str, *, source: Optional[str] = None) -> List[Dict[str, Any]]:
         """Ask the LLM to pull numbered questions out of arbitrary text strings."""
@@ -105,11 +149,11 @@ class QuestionExtractor:
         }
         return payload
 
-    def _extract_from_excel(self, path: Path) -> List[Dict[str, Any]]:
+    def _extract_from_excel(self, data: bytes, *, source_name: str) -> List[Dict[str, Any]]:
         """Leverage the Excel schema pipeline to produce question payloads."""
         # Warm the interpreter cache so worksheet-level heuristics run only once.
-        collect_non_empty_cells(str(path))
-        schema = ask_sheet_schema(str(path))
+        collect_non_empty_cells(_clone_buffer(data, source_name))
+        schema = ask_sheet_schema(_clone_buffer(data, source_name))
         questions = []
         for entry in schema:
             question_text = (entry.get("question_text") or "").strip()
@@ -125,13 +169,13 @@ class QuestionExtractor:
             "mode": "excel",
             "schema": schema,
             "count": len(questions),
-            "path": str(path),
+            "path": source_name,
         }
         return questions
 
-    def _extract_from_docx_slots(self, path: Path) -> List[Dict[str, Any]]:
+    def _extract_from_docx_slots(self, data: bytes, *, source_name: str) -> List[Dict[str, Any]]:
         """Reuse the DOCX slot finder so we get consistent metadata everywhere."""
-        payload = extract_slots_from_docx(str(path))
+        payload = extract_slots_from_docx(_clone_buffer(data, source_name))
         slots = payload.get("slots") or []
         questions = []
         for slot in slots:
@@ -153,7 +197,7 @@ class QuestionExtractor:
             "skipped_slots": skipped,
             "heuristic_skips": heuristic,
             "count": len(questions),
-            "path": str(path),
+            "path": source_name,
         }
         return questions
 
@@ -161,5 +205,6 @@ class QuestionExtractor:
 # if __name__ == "__main__":
 #     from backend.llm.completions_client import CompletionsClient
 #     extractor = QuestionExtractor(llm_client=CompletionsClient())
-#     sample = extractor.extract("samples/questionnaire.docx")
+#     with open("samples/questionnaire.docx", "rb") as fh:
+#         sample = extractor.extract(fh)
 #     print(f"Extracted {len(sample)} questions")

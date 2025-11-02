@@ -359,7 +359,8 @@ class DocumentJobController:
     # ── Internal helpers --------------------------------------------------
 
     def _schedule_excel(self, config, responder, extractor):
-        questions = extractor.extract(config["input_path"])
+        with open(config["input_path"], "rb") as fh:
+            questions = extractor.extract(fh)
         schema = extractor.last_details.get("schema") or []
         questions_text = [(entry.get("question") or "").strip() for entry in questions]
         total = len(questions_text)
@@ -388,7 +389,8 @@ class DocumentJobController:
         return job
 
     def _schedule_docx_slots(self, config, responder, extractor):
-        questions = extractor.extract(config["input_path"])
+        with open(config["input_path"], "rb") as fh:
+            questions = extractor.extract(fh)
         details = extractor.last_details
         slots_payload = details.get("slots_payload") or {}
         slot_list = [entry.get("slot") for entry in questions]
@@ -423,7 +425,8 @@ class DocumentJobController:
 
     def _schedule_summary(self, config, responder, extractor):
         treat_docx_as_text = config["suffix"] == ".docx" and config["docx_as_text"]
-        questions = extractor.extract(config["input_path"], treat_docx_as_text=treat_docx_as_text)
+        with open(config["input_path"], "rb") as fh:
+            questions = extractor.extract(fh, treat_docx_as_text=treat_docx_as_text)
         questions_text = [(entry.get("question") or "").strip() for entry in questions]
         total = len(questions_text)
         job = {

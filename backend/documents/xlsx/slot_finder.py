@@ -14,7 +14,8 @@ Most functions are composable so data-prep scripts can reuse individual steps.
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, IO, List, Optional, Tuple, Union
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -559,8 +560,11 @@ def _llm_score_and_assign(
     return list(chosen.values())
 
 
+ExcelSource = Union[str, Path, IO[bytes]]
+
+
 def extract_schema_from_xlsx(
-    path: str,
+    path: ExcelSource,
     debug: bool = True,
     *,
     model: str = EXCEL_MODEL,
@@ -576,7 +580,15 @@ def extract_schema_from_xlsx(
     ``None`` and the question sheet is used as a fallback.
     """
 
-    wb = load_workbook(path, data_only=True)
+    if hasattr(path, "read"):
+        handle = path  # type: ignore[assignment]
+        try:
+            handle.seek(0)
+        except Exception:
+            pass
+        wb = load_workbook(handle, data_only=True)
+    else:
+        wb = load_workbook(path, data_only=True)
 
     # Pre-serialize all sheets so we can present them to the model.
     sheet_profiles = {ws.title: _sheet_to_json(ws) for ws in wb.worksheets}
@@ -645,7 +657,7 @@ def extract_schema_from_xlsx(
 
 
 # Back‑compat alias so the CLI can import ask_sheet_schema from rfp
-def ask_sheet_schema(xlsx_path: str, debug: bool = True) -> List[Dict[str, Any]]:
+def ask_sheet_schema(xlsx_path: ExcelSource, debug: bool = True) -> List[Dict[str, Any]]:
     """Compatibility wrapper for :func:`extract_schema_from_xlsx`.
 
     Parameters
