@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Sequence
 
 from docx import Document
 from docx.table import Table
@@ -112,50 +112,69 @@ def _rows_from_pdf_table(table_rows: Sequence[Sequence[str]]) -> List[List[str]]
     return rows
 
 
+def _point_in_region(midpoint: float, baseline_x: float, region: Dict[str, Any]) -> bool:
+    return (
+        region["top"] <= midpoint <= region["bottom"]
+        and region["left"] <= baseline_x <= region["right"]
+    )
+
+
+def _collect_table_regions(page, page_number: int) -> List[Dict[str, Any]]:
+    regions: List[Dict[str, Any]] = []
+    for idx, table in enumerate(page.find_tables(), start=1):
+        data = table.extract()
+        if not data:
+            continue
+        markdown = _rows_to_markdown(_rows_from_pdf_table(data))
+        if not markdown:
+            continue
+        regions.append(
+            {
+                "top": table.bbox[1],
+                "bottom": table.bbox[3],
+                "left": table.bbox[0],
+                "right": table.bbox[2],
+                "text": f"[Table {idx} | Page {page_number}]\n{markdown}",
+            }
+        )
+    return regions
+
+
+def _collect_text_blocks(page, table_regions: List[Dict[str, Any]]) -> List[tuple[float, str]]:
+    blocks: List[tuple[float, str]] = []
+    for line in page.extract_text_lines() or []:
+        text = (line.get("text") or "").strip()
+        if not text:
+            continue
+        midpoint = (line.get("top", 0.0) + line.get("bottom", 0.0)) / 2
+        baseline_x = (line.get("x0", 0.0) + line.get("x1", 0.0)) / 2
+        if any(_point_in_region(midpoint, baseline_x, region) for region in table_regions):
+            continue
+        blocks.append((line.get("top", 0.0), text))
+    return blocks
+
+
+def _render_pdf_page(page, page_number: int) -> str:
+    table_regions = _collect_table_regions(page, page_number)
+    blocks = _collect_text_blocks(page, table_regions)
+    blocks.extend((region["top"], region["text"]) for region in table_regions)
+    blocks.sort(key=lambda item: item[0])
+    if not blocks:
+        return ""
+    page_text = "\n".join(item[1] for item in blocks)
+    return f"[Page {page_number}]\n{page_text}"
+
+
 def _extract_pdf_with_pdfplumber(path: str) -> str:
     if pdfplumber is None:  # pragma: no cover - handled by caller
         return ""
-    pages_output: List[str] = []
     try:
         with pdfplumber.open(path) as pdf:
+            pages_output = []
             for page_number, page in enumerate(pdf.pages, start=1):
-                blocks: List[tuple[float, str]] = []
-                table_regions: List[dict] = []
-                for idx, table in enumerate(page.find_tables(), start=1):
-                    data = table.extract()
-                    if not data:
-                        continue
-                    markdown = _rows_to_markdown(_rows_from_pdf_table(data))
-                    if not markdown:
-                        continue
-                    table_regions.append(
-                        {
-                            "top": table.bbox[1],
-                            "bottom": table.bbox[3],
-                            "left": table.bbox[0],
-                            "right": table.bbox[2],
-                            "text": f"[Table {idx} | Page {page_number}]\n{markdown}",
-                        }
-                    )
-                text_lines = page.extract_text_lines() or []
-                for line in text_lines:
-                    text = (line.get("text") or "").strip()
-                    if not text:
-                        continue
-                    midpoint = (line.get("top", 0.0) + line.get("bottom", 0.0)) / 2
-                    baseline_x = (line.get("x0", 0.0) + line.get("x1", 0.0)) / 2
-                    if any(
-                        region["top"] <= midpoint <= region["bottom"]
-                        and region["left"] <= baseline_x <= region["right"]
-                        for region in table_regions
-                    ):
-                        continue
-                    blocks.append((line.get("top", 0.0), text))
-                blocks.extend((region["top"], region["text"]) for region in table_regions)
-                blocks.sort(key=lambda item: item[0])
-                if blocks:
-                    page_text = "\n".join(item[1] for item in blocks)
-                    pages_output.append(f"[Page {page_number}]\n{page_text}")
+                rendered = _render_pdf_page(page, page_number)
+                if rendered:
+                    pages_output.append(rendered)
     except Exception:
         return ""
     return "\n\n".join(pages_output)
