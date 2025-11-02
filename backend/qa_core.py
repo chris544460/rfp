@@ -52,6 +52,260 @@ PRESET_INSTRUCTIONS: Dict[str, str] = {
 # ───────────────────────── Core answering ─────────────────────────
 
 
+def _gather_vector_hits(
+    query: str,
+    *,
+    mode: str,
+    fund: Optional[str],
+    k: int,
+    include_vectors: bool,
+) -> List[Dict[str, object]]:
+    """Run the vector index searches according to the requested mode."""
+    if mode != "both":
+        return search(
+            query,
+            k=k,
+            mode=mode,
+            fund_filter=fund,
+            include_vectors=include_vectors,
+        )
+
+    per_mode_k = max(1, k)
+    hits: List[Dict[str, object]] = []
+    try:
+        hits.extend(
+            search(
+                query,
+                k=per_mode_k,
+                mode="blend",
+                fund_filter=fund,
+                include_vectors=include_vectors,
+            )
+        )
+    except AssertionError:
+        if DEBUG:
+            print("[qa_core] blend index unavailable; skipping blend search")
+
+    for specialized_mode in ("question", "answer"):
+        hits.extend(
+            search(
+                query,
+                k=per_mode_k,
+                mode=specialized_mode,
+                fund_filter=fund,
+                include_vectors=include_vectors,
+            )
+        )
+    return hits
+
+
+def _extend_with_uploaded_docs(
+    hits: List[Dict[str, object]],
+    *,
+    query: str,
+    extra_docs: Optional[List[str]],
+    llm: CompletionsClient,
+) -> None:
+    """Augment vector hits with snippets from uploaded documents."""
+    if not extra_docs:
+        return
+    if DEBUG:
+        print(f"[qa_core] LLM searching {len(extra_docs)} uploaded docs")
+    hits.extend(search_uploaded_docs(query, extra_docs, llm))
+
+
+def _log_candidate_hits(hits: List[Dict[str, object]], *, k: int) -> None:
+    """Emit verbose diagnostics for the strongest matches."""
+    if not DEBUG or not hits:
+        return
+    print(f"[qa_core] retrieved {len(hits)} hits before filtering")
+    top_n = min(len(hits), k)
+    print(f"[qa_core] top {top_n} hits:")
+    for i, hit in enumerate(hits[:top_n], 1):
+        meta = hit.get("meta", {}) or {}
+        src = meta.get("source", "unknown")
+        doc_id = hit.get("id", "unknown")
+        score = float(hit.get("cosine", 0.0))
+        snippet = (hit.get("text") or "").strip().replace("\n", " ")
+        if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+        print(f"    {i}. id={doc_id} score={score:.3f} source={src} text='{snippet}'")
+
+
+def _append_diagnostic_entry(
+    bucket: List[Dict[str, object]],
+    *,
+    hit: Dict[str, object],
+    status: str,
+    reason: str,
+    label: Optional[str],
+    raw_rank: int,
+    score: float,
+    src_origin: str,
+    src_path: str,
+    src_name: str,
+    date_str: str,
+    include_vectors: bool,
+) -> None:
+    entry: Dict[str, object] = {
+        "raw_rank": raw_rank,
+        "id": hit.get("id", "unknown"),
+        "score": score,
+        "origin": src_origin,
+        "status": status,
+        "reason": reason,
+        "snippet": (hit.get("text") or "").strip(),
+        "source_path": src_path,
+        "source_name": src_name,
+        "date": date_str,
+    }
+    if label is not None:
+        entry["label"] = label
+    if include_vectors and "embedding" in hit:
+        entry["embedding"] = hit.get("embedding")
+    if include_vectors and "embedding_error" in hit:
+        entry["embedding_error"] = hit.get("embedding_error")
+    if "raw_index" in hit:
+        entry["raw_index"] = hit.get("raw_index")
+    bucket.append(entry)
+
+
+def _filter_hits(
+    hits: List[Dict[str, object]],
+    *,
+    min_confidence: float,
+    diagnostics: Optional[List[Dict[str, object]]],
+    include_vectors: bool,
+) -> Tuple[List[Tuple[str, str, str, float, str]], Dict[str, int]]:
+    """Apply confidence/duplication rules and build the context rows."""
+    seen_snippets: Set[str] = set()
+    rows: List[Tuple[str, str, str, float, str]] = []
+    low_confidence = 0
+    duplicate_or_empty = 0
+
+    for idx_raw, hit in enumerate(hits, 1):
+        score = float(hit.get("cosine", 0.0))
+        src_origin = str(hit.get("origin") or "unknown")
+        meta = hit.get("meta", {}) or {}
+        src_path = str(meta.get("source", "")) or "unknown"
+        src_name = Path(src_path).name if src_path else "unknown"
+        try:
+            mtime = (
+                Path(src_path).stat().st_mtime
+                if src_path and Path(src_path).exists()
+                else None
+            )
+            date_str = (
+                datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+                if mtime
+                else "unknown"
+            )
+        except Exception:
+            date_str = "unknown"
+
+        if score < min_confidence:
+            low_confidence += 1
+            if DEBUG:
+                print(
+                    f"[qa_core] filter out id={hit.get('id', 'unknown')} "
+                    f"score={score:.3f} < min_confidence {min_confidence}"
+                )
+            if diagnostics is not None:
+                _append_diagnostic_entry(
+                    diagnostics,
+                    hit=hit,
+                    status="filtered_low_confidence",
+                    reason=f"score {score:.3f} < min_confidence {min_confidence:.3f}",
+                    label=None,
+                    raw_rank=idx_raw,
+                    score=score,
+                    src_origin=src_origin,
+                    src_path=src_path,
+                    src_name=src_name,
+                    date_str=date_str,
+                    include_vectors=include_vectors,
+                )
+            continue
+
+        snippet = (hit.get("text") or "").strip()
+        if not snippet or snippet in seen_snippets:
+            duplicate_or_empty += 1
+            if DEBUG:
+                reason = "empty" if not snippet else "duplicate"
+                print(
+                    f"[qa_core] filter out id={hit.get('id', 'unknown')} {reason} snippet"
+                )
+            if diagnostics is not None:
+                _append_diagnostic_entry(
+                    diagnostics,
+                    hit=hit,
+                    status="filtered_duplicate" if snippet else "filtered_empty",
+                    reason="duplicate snippet" if snippet else "empty snippet",
+                    label=None,
+                    raw_rank=idx_raw,
+                    score=score,
+                    src_origin=src_origin,
+                    src_path=src_path,
+                    src_name=src_name,
+                    date_str=date_str,
+                    include_vectors=include_vectors,
+                )
+            continue
+
+        label = f"[{len(rows) + 1}]"
+        rows.append((label, src_name, snippet, score, date_str))
+        seen_snippets.add(snippet)
+        if diagnostics is not None:
+            _append_diagnostic_entry(
+                diagnostics,
+                hit=hit,
+                status="accepted",
+                reason="",
+                label=label,
+                raw_rank=idx_raw,
+                score=score,
+                src_origin=src_origin,
+                src_path=src_path,
+                src_name=src_name,
+                date_str=date_str,
+                include_vectors=include_vectors,
+            )
+        if DEBUG:
+            print(
+                f"[qa_core] accepted snippet {label} from {src_name} score={score:.3f}"
+            )
+
+    stats = {
+        "accepted": len(rows),
+        "low_confidence": low_confidence,
+        "duplicate_or_empty": duplicate_or_empty,
+    }
+    return rows, stats
+
+
+def _log_filter_summary(
+    rows: List[Tuple[str, str, str, float, str]],
+    *,
+    stats: Dict[str, int],
+) -> None:
+    if not DEBUG:
+        return
+    print(
+        "[qa_core] filtering summary: "
+        f"{stats['accepted']} accepted, "
+        f"{stats['low_confidence']} low-confidence, "
+        f"{stats['duplicate_or_empty']} duplicate/empty"
+    )
+    if not rows:
+        return
+    print("[qa_core] accepted snippets after filtering:")
+    for label, src, snippet, score, _ in rows:
+        short = snippet.replace("\n", " ")
+        if len(short) > 80:
+            short = short[:77] + "..."
+        print(f"    {label} from {src} score={score:.3f} text='{short}'")
+
+
 def collect_relevant_snippets(
     q: str,
     mode: str,
@@ -88,204 +342,32 @@ def collect_relevant_snippets(
     if DEBUG:
         print("[qa_core] searching for context snippets")
 
-    # The "both" option runs each specialized index to keep recall high while
-    # downstream filtering removes overlapping snippets.
-    if mode == "both":
-        per_mode_k = max(1, k)
-        hits = []
-        try:
-            hits.extend(
-                search(
-                    q,
-                    k=per_mode_k,
-                    mode="blend",
-                    fund_filter=fund,
-                    include_vectors=include_vectors,
-                )
-            )
-        except AssertionError:
-            if DEBUG:
-                print("[qa_core] blend index unavailable; skipping blend search")
-        # Blend approximates semantic search across all corpora, but we still
-        # call the question/answer specific indices to capture niche matches.
-        hits.extend(
-            search(
-                q,
-                k=per_mode_k,
-                mode="question",
-                fund_filter=fund,
-                include_vectors=include_vectors,
-            )
-        )
-        hits.extend(
-            search(
-                q,
-                k=per_mode_k,
-                mode="answer",
-                fund_filter=fund,
-                include_vectors=include_vectors,
-            )
-        )
-    else:
-        hits = search(
-            q,
-            k=k,
-            mode=mode,
-            fund_filter=fund,
-            include_vectors=include_vectors,
-        )
-
-    if extra_docs:
-        if DEBUG:
-            print(f"[qa_core] LLM searching {len(extra_docs)} uploaded docs")
-        # Uploaded documents are searched via the LLM helper. It is slower than
-        # the vector index, so we only invoke it when users attach files.
-        hits.extend(search_uploaded_docs(q, extra_docs, llm))
+    hits = _gather_vector_hits(
+        q,
+        mode=mode,
+        fund=fund,
+        k=k,
+        include_vectors=include_vectors,
+    )
+    _extend_with_uploaded_docs(
+        hits,
+        query=q,
+        extra_docs=extra_docs,
+        llm=llm,
+    )
 
     if progress:
         progress(f"Found {len(hits)} candidate snippets. Filtering...")
 
-    if DEBUG:
-        print(f"[qa_core] retrieved {len(hits)} hits before filtering")
-        top_n = min(len(hits), k)
-        print(f"[qa_core] top {top_n} hits:")
-        for i, h in enumerate(hits[:top_n], 1):
-            meta = h.get("meta", {}) or {}
-            src = meta.get("source", "unknown")
-            doc_id = h.get("id", "unknown")
-            score = float(h.get("cosine", 0.0))
-            snippet = (h.get("text") or "").strip().replace("\n", " ")
-            if len(snippet) > 80:
-                snippet = snippet[:77] + "..."
-            print(
-                f"    {i}. id={doc_id} score={score:.3f} source={src} text='{snippet}'"
-            )
+    _log_candidate_hits(hits, k=k)
 
-    # Track seen snippet bodies so we do not surface redundant context rows.
-    seen_snippets = set()
-    rows: List[Tuple[str, str, str, float, str]] = []
-    low_confidence = 0
-    duplicate_or_empty = 0
-
-    for idx_raw, h in enumerate(hits, 1):
-        score = float(h.get("cosine", 0.0))
-        doc_id = h.get("id", "unknown")
-        src_origin = str(h.get("origin") or mode)
-        meta = h.get("meta", {}) or {}
-        src_path = str(meta.get("source", "")) or "unknown"
-        src_name = Path(src_path).name if src_path else "unknown"
-        try:
-            mtime = (
-                Path(src_path).stat().st_mtime
-                if src_path and Path(src_path).exists()
-                else None
-            )
-            date_str = (
-                datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-                if mtime
-                else "unknown"
-            )
-        except Exception:
-            date_str = "unknown"
-
-        if score < min_confidence:
-            # A per-run confidence threshold lets enterprise users dial down
-            # noisy matches without retraining or editing the index.
-            low_confidence += 1
-            if DEBUG:
-                print(
-                    f"[qa_core] filter out id={doc_id} score={score:.3f} < min_confidence {min_confidence}"
-                )
-            if diagnostics is not None:
-                entry = {
-                        "raw_rank": idx_raw,
-                        "id": doc_id,
-                        "score": score,
-                        "origin": src_origin,
-                        "status": "filtered_low_confidence",
-                        "reason": f"score {score:.3f} < min_confidence {min_confidence:.3f}",
-                        "snippet": (h.get("text") or "").strip(),
-                        "source_path": src_path,
-                        "source_name": src_name,
-                        "date": date_str,
-                    }
-                if include_vectors and "embedding" in h:
-                    entry["embedding"] = h.get("embedding")
-                if include_vectors and "embedding_error" in h:
-                    entry["embedding_error"] = h.get("embedding_error")
-                if "raw_index" in h:
-                    entry["raw_index"] = h.get("raw_index")
-                diagnostics.append(entry)
-            continue
-        txt = (h.get("text") or "").strip()
-        if not txt or txt in seen_snippets:
-            duplicate_or_empty += 1
-            if DEBUG:
-                reason = "empty" if not txt else "duplicate"
-                print(f"[qa_core] filter out id={doc_id} {reason} snippet")
-            if diagnostics is not None:
-                entry = {
-                        "raw_rank": idx_raw,
-                        "id": doc_id,
-                        "score": score,
-                        "origin": src_origin,
-                        "status": "filtered_duplicate" if txt else "filtered_empty",
-                        "reason": "duplicate snippet" if txt else "empty snippet",
-                        "snippet": txt,
-                        "source_path": src_path,
-                        "source_name": src_name,
-                        "date": date_str,
-                    }
-                if include_vectors and "embedding" in h:
-                    entry["embedding"] = h.get("embedding")
-                if include_vectors and "embedding_error" in h:
-                    entry["embedding_error"] = h.get("embedding_error")
-                if "raw_index" in h:
-                    entry["raw_index"] = h.get("raw_index")
-                diagnostics.append(entry)
-            continue
-
-        # Labels are assigned in discovery order so downstream renumbering can
-        # preserve user-facing ordering even when we drop low-confidence hits.
-        lbl = f"[{len(rows)+1}]"
-        rows.append((lbl, src_name, txt, score, date_str))
-        seen_snippets.add(txt)
-        if diagnostics is not None:
-            entry: Dict[str, object] = {
-                "raw_rank": idx_raw,
-                "id": doc_id,
-                "score": score,
-                "origin": src_origin,
-                "status": "accepted",
-                "label": lbl,
-                "snippet": txt,
-                "source_path": src_path,
-                "source_name": src_name,
-                "date": date_str,
-            }
-            if include_vectors and "embedding" in h:
-                entry["embedding"] = h.get("embedding")
-            if include_vectors and "embedding_error" in h:
-                entry["embedding_error"] = h.get("embedding_error")
-            if "raw_index" in h:
-                entry["raw_index"] = h.get("raw_index")
-            diagnostics.append(entry)
-        if DEBUG:
-            print(f"[qa_core] accepted snippet {lbl} from {src_name} score={score:.3f}")
-
-    if DEBUG:
-        print(
-            f"[qa_core] filtering summary: {len(rows)} accepted, {low_confidence} low-confidence, {duplicate_or_empty} duplicate/empty"
-        )
-        if rows:
-            print("[qa_core] accepted snippets after filtering:")
-            for lbl, src, snippet, score, _ in rows:
-                short = snippet.replace("\n", " ")
-                if len(short) > 80:
-                    short = short[:77] + "..."
-                print(
-                    f"    {lbl} from {src} score={score:.3f} text='{short}'"
-                )
+    rows, stats = _filter_hits(
+        hits,
+        min_confidence=min_confidence,
+        diagnostics=diagnostics,
+        include_vectors=include_vectors,
+    )
+    _log_filter_summary(rows, stats=stats)
 
     if not rows and progress:
         progress("No relevant information found; skipping language model.")

@@ -396,6 +396,241 @@ def mark_multiple_choice(
         except Exception as e:
             dbg(f"  -> error adding comment: {e}")
 
+
+def _build_answers_map(
+    slots: List[Dict[str, object]],
+    *,
+    by_id: Dict[str, object],
+    by_q: Dict[str, object],
+    generator: Optional[Callable[..., object]],
+    gen_name: str,
+) -> Tuple[Dict[str, Optional[object]], int]:
+    answers: Dict[str, Optional[object]] = {}
+    to_generate: List[Tuple[str, str, dict]] = []
+    for slot in slots:
+        sid = slot.get("id", "")
+        question_text = (slot.get("question_text") or "").strip()
+        meta = slot.get("meta") or {}
+        answer: Optional[object]
+        if sid in by_id:
+            answer = by_id[sid]
+        else:
+            key = normalize_question(question_text)
+            answer = by_q.get(key)
+        if answer is None and generator is not None:
+            if not question_text:
+                dbg(f"Skipping generation for slot {sid}: blank question text")
+            else:
+                kwargs: Dict[str, object] = {}
+                if slot.get("answer_type") == "multiple_choice":
+                    choice_meta = meta.get("choices", [])
+                    kwargs["choices"] = [
+                        c.get("text") if isinstance(c, dict) else str(c)
+                        for c in choice_meta
+                    ]
+                    kwargs["choice_meta"] = choice_meta
+                to_generate.append((sid, question_text, kwargs))
+        answers[sid] = answer
+
+    generated = 0
+    if to_generate and generator is not None:
+
+        async def run_all() -> List[Tuple[str, Optional[object]]]:
+            async def worker(sid: str, question: str, kwargs: Dict[str, object]):
+                try:
+                    ans = await asyncio.to_thread(generator, question, **kwargs)
+                    dbg(f"Generated answer via {gen_name} for slot {sid}: {ans}")
+                    return sid, ans
+                except Exception as exc:
+                    dbg(f"Generator error for question '{question}': {exc}")
+                    dbg(f"Generator error details: {traceback.format_exc()}")
+                    return sid, None
+
+            tasks = [asyncio.create_task(worker(*item)) for item in to_generate]
+            return await asyncio.gather(*tasks)
+
+        for sid, ans in asyncio.run(run_all()):
+            if ans is not None:
+                answers[sid] = ans
+                generated += 1
+
+    return answers, generated
+
+
+def _format_citation_comment(raw: object) -> Optional[str]:
+    if not isinstance(raw, dict):
+        return None
+    parts: List[str] = []
+    for value in raw.values():
+        if isinstance(value, dict):
+            snippet = (
+                value.get("text")
+                or value.get("snippet")
+                or value.get("content")
+                or ""
+            )
+            source_file = value.get("source_file")
+            piece = str(snippet)
+            if source_file:
+                piece += f"\nSource File:\n {source_file}"
+            parts.append(piece)
+        else:
+            parts.append(str(value))
+    return "\n\n".join(parts) if parts else None
+
+
+def _apply_multiple_choice_slot(
+    *,
+    doc: docx.document.Document,
+    blocks: List[Union[Paragraph, Table]],
+    slot: Dict[str, object],
+    answer: Dict[str, object],
+) -> str:
+    choice_meta = (slot.get("meta") or {}).get("choices", [])
+    if not choice_meta:
+        dbg("  -> no choice metadata present")
+        return "bad_locator"
+    idx = answer.get("choice_index")
+    if idx is None:
+        dbg("  -> could not resolve selected choice index")
+        return "bad_locator"
+    style = answer.get("style")
+    comment_text = _format_citation_comment(answer.get("citations"))
+    try:
+        mark_multiple_choice(
+            doc,
+            blocks,
+            choice_meta,
+            int(idx),
+            style,
+            comment_text,
+        )
+        dbg("  -> marked choice in-place")
+        return "applied"
+    except Exception as exc:
+        dbg(f"  -> error marking multiple choice: {exc}")
+        return "bad_locator"
+
+
+def _apply_table_cell_slot(
+    *,
+    doc: docx.document.Document,
+    locator: Dict[str, object],
+    answer: object,
+    mode: str,
+) -> str:
+    t_index = locator.get("table_index")
+    if t_index is None:
+        dbg("  -> bad locator: missing table_index")
+        return "bad_locator"
+    try:
+        table_idx = int(t_index)
+        row = int(locator.get("row", 0))
+        col = int(locator.get("col", 0))
+    except Exception:
+        dbg("  -> invalid table coordinates")
+        return "bad_locator"
+    if not (0 <= table_idx < len(doc.tables)):
+        dbg(
+            f"  -> table_index {table_idx} out of bounds; have {len(doc.tables)} tables"
+        )
+        return "table_oob"
+    tbl = doc.tables[table_idx]
+    apply_to_table_cell(tbl, row, col, answer, mode=mode)
+    dbg(f"  -> wrote into table[{table_idx}] cell({row},{col})")
+    return "applied"
+
+
+def _apply_paragraph_slot(
+    *,
+    doc: docx.document.Document,
+    blocks: List[Union[Paragraph, Table]],
+    paragraphs: List[Paragraph],
+    block_to_para: Dict[int, int],
+    locator: Dict[str, object],
+    meta: Dict[str, object],
+    answer: object,
+    mode: str,
+    ltype: str,
+) -> str:
+    anchor = resolve_anchor_paragraph(doc, blocks, paragraphs, block_to_para, locator, meta)
+    if anchor is None:
+        dbg("  -> could not resolve anchor/target paragraph")
+        return "bad_locator"
+
+    force_after_question = bool(meta.get("force_insert_after_question"))
+    if ltype == "paragraph_after":
+        offset = int(locator.get("offset", 1) or 1)
+        if force_after_question:
+            target = insert_paragraph_after(anchor, "")
+        else:
+            target = get_target_paragraph_after_anchor(
+                blocks,
+                block_to_para,
+                paragraphs,
+                anchor,
+                offset,
+            )
+    else:
+        target = anchor
+
+    apply_to_paragraph(target, answer, mode=mode)
+    dbg("  -> wrote into paragraph")
+    return "applied"
+
+
+def _apply_slot_to_doc(
+    slot: Dict[str, object],
+    answer: object,
+    *,
+    doc: docx.document.Document,
+    blocks: List[Union[Paragraph, Table]],
+    paragraphs: List[Paragraph],
+    block_to_para: Dict[int, int],
+    mode: str,
+) -> str:
+    answer_type = slot.get("answer_type")
+    meta = slot.get("meta") or {}
+    locator = slot.get("answer_locator") or {}
+    ltype = str(locator.get("type", ""))
+
+    if (
+        answer_type == "multiple_choice"
+        and isinstance(answer, dict)
+        and "choice_index" in answer
+    ):
+        return _apply_multiple_choice_slot(
+            doc=doc,
+            blocks=blocks,
+            slot=slot,
+            answer=answer,
+        )
+
+    dbg(f"Applying answer for slot {slot.get('id', '')} (type={ltype})")
+
+    if ltype == "table_cell":
+        return _apply_table_cell_slot(
+            doc=doc,
+            locator=locator,
+            answer=answer,
+            mode=mode,
+        )
+    if ltype in ("paragraph_after", "paragraph"):
+        return _apply_paragraph_slot(
+            doc=doc,
+            blocks=blocks,
+            paragraphs=paragraphs,
+            block_to_para=block_to_para,
+            locator=locator,
+            meta=meta,
+            answer=answer,
+            mode=mode,
+            ltype=ltype,
+        )
+    dbg(f"  -> unsupported locator type: {ltype}")
+    return "bad_locator"
+
+
 # ---------------------------- Main application flow ----------------------------
 def apply_answers_to_docx(
     docx_path: str,
@@ -427,156 +662,41 @@ def apply_answers_to_docx(
 
     slots = (slots_payload or {}).get("slots", [])
 
-    answers: Dict[str, Optional[object]] = {}
-    to_generate: List[Tuple[str, str, dict]] = []
-    for s in slots:
-        sid = s.get("id", "")
-        question_text = (s.get("question_text") or "").strip()
-        meta = s.get("meta") or {}
-        answer = None
-        if sid in by_id:
-            answer = by_id[sid]
-        else:
-            key = normalize_question(question_text)
-            if key in by_q:
-                answer = by_q[key]
-        if answer is None and generator is not None:
-            if not question_text:
-                dbg(f"Skipping generation for slot {sid}: blank question text")
-            else:
-                kwargs = {}
-                if s.get("answer_type") == "multiple_choice":
-                    choice_meta = meta.get("choices", [])
-                    kwargs["choices"] = [c.get("text") if isinstance(c, dict) else str(c) for c in choice_meta]
-                    kwargs["choice_meta"] = choice_meta
-                to_generate.append((sid, question_text, kwargs))
-        answers[sid] = answer
-
-    if to_generate:
-        async def run_all() -> List[Tuple[str, Optional[object]]]:
-            async def worker(sid: str, q: str, kwargs: dict):
-                try:
-                    ans = await asyncio.to_thread(generator, q, **kwargs)
-                    dbg(f"Generated answer via {gen_name} for slot {sid}: {ans}")
-                    return sid, ans
-                except Exception as e:
-                    dbg(f"Generator error for question '{q}': {e}")
-                    # give all detail on the error
-                    dbg(f"Generator error details: {traceback.format_exc()}")
-                    return sid, None
-            tasks = [asyncio.create_task(worker(sid, q, kw)) for sid, q, kw in to_generate]
-            return await asyncio.gather(*tasks)
-
-        for sid, ans in asyncio.run(run_all()):
-            if ans is not None:
-                answers[sid] = ans
-                generated += 1
+    answers, generated = _build_answers_map(
+        slots,
+        by_id=by_id,
+        by_q=by_q,
+        generator=generator,
+        gen_name=gen_name,
+    )
 
     for s in slots:
         sid = s.get("id", "")
         question_text = (s.get("question_text") or "").strip()
-        locator = s.get("answer_locator") or {}
-        ltype = str(locator.get("type", ""))
-        meta = s.get("meta") or {}
         answer = answers.get(sid)
         if answer is None:
             dbg(f"NO ANSWER for slot {sid!r} / question '{question_text}' — skipping")
             skipped_no_answer += 1
             continue
-
-        choice_meta = meta.get("choices", [])
-        if (
-            s.get("answer_type") == "multiple_choice"
-            and choice_meta
-            and isinstance(answer, dict)
-            and "choice_index" in answer
-        ):
-            idx = answer.get("choice_index")
-            style = answer.get("style")
-            citations = answer.get("citations") if isinstance(answer, dict) else None
-            comment_text = None
-            if isinstance(citations, dict):
-                parts: List[str] = []
-                for v in citations.values():
-                    if isinstance(v, dict):
-                        snippet = v.get("text") or v.get("snippet") or v.get("content") or ""
-                        src = v.get("source_file")
-                        piece = str(snippet)
-                        if src:
-                            piece += f"\nSource File:\n {src}"
-                        parts.append(piece)
-                    else:
-                        parts.append(str(v))
-                comment_text = "\n\n".join(parts)
-            if idx is not None:
-                try:
-                    mark_multiple_choice(doc, blocks, choice_meta, int(idx), style, comment_text)
-                    applied += 1
-                    dbg("  -> marked choice in-place")
-                except Exception as e:
-                    dbg(f"  -> error marking multiple choice: {e}")
-                    skipped_bad_locator += 1
-            else:
-                dbg("  -> could not resolve selected choice index")
-                skipped_bad_locator += 1
-            continue
-
-        dbg(f"Applying answer for slot {sid} (type={ltype})")
-
         try:
-            if ltype == "table_cell":
-                t_index = locator.get("table_index")
-                row = locator.get("row", 0)
-                col = locator.get("col", 0)
-                if t_index is None:
-                    dbg("  -> bad locator: missing table_index")
-                    skipped_bad_locator += 1
-                    continue
-                t_index = int(t_index)
-                row = int(row)
-                col = int(col)
-                if 0 <= t_index < len(doc.tables):
-                    tbl = doc.tables[t_index]
-                    apply_to_table_cell(tbl, row, col, answer, mode=mode)
-                    applied += 1
-                    dbg(f"  -> wrote into table[{t_index}] cell({row},{col})")
-                else:
-                    dbg(f"  -> table_index {t_index} out of bounds; have {len(doc.tables)} tables")
-                    skipped_table_oob += 1
+            status = _apply_slot_to_doc(
+                s,
+                answer,
+                doc=doc,
+                blocks=blocks,
+                paragraphs=paragraphs,
+                block_to_para=block_to_para,
+                mode=mode,
+            )
+        except Exception as exc:
+            dbg(f"  -> error while applying slot {sid}: {exc}")
+            status = "bad_locator"
 
-            elif ltype in ("paragraph_after", "paragraph"):
-                anchor = resolve_anchor_paragraph(doc, blocks, paragraphs, block_to_para, locator, meta)
-                if anchor is None:
-                    dbg("  -> could not resolve anchor/target paragraph")
-                    skipped_bad_locator += 1
-                    continue
-
-                force_after_question = bool(meta.get("force_insert_after_question"))
-                if ltype == "paragraph_after":
-                    offset = int(locator.get("offset", 1) or 1)
-                    if force_after_question:
-                        target = insert_paragraph_after(anchor, "")
-                    else:
-                        target = get_target_paragraph_after_anchor(
-                            blocks,
-                            block_to_para,
-                            paragraphs,
-                            anchor,
-                            offset,
-                        )
-                else:
-                    target = anchor
-
-                apply_to_paragraph(target, answer, mode=mode)
-                applied += 1
-                dbg("  -> wrote into paragraph")
-
-            else:
-                dbg(f"  -> unsupported locator type: {ltype}")
-                skipped_bad_locator += 1
-
-        except Exception as e:
-            dbg(f"  -> error while applying slot {sid}: {e}")
+        if status == "applied":
+            applied += 1
+        elif status == "table_oob":
+            skipped_table_oob += 1
+        else:
             skipped_bad_locator += 1
 
     doc.save(out_path)
