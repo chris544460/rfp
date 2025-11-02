@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""
+High-level orchestration for the RFP answering pipeline.
+
+Responder glues together vector retrieval (`backend.retrieval`) and the QA
+engine so Streamlit views, API callers, and background jobs can share the
+same batching and formatting logic.
+"""
+
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -7,12 +15,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .qa_engine import answer_question, collect_relevant_snippets
 
+# Progress callbacks let Streamlit surface incremental status updates.
 ProgressFn = Optional[Callable[[str], None]]
+# Batch progress callbacks take the index of the question plus the message.
 BatchProgressFn = Optional[Callable[[int, str], None]]
 
 
 class Responder:
-    """High-level wrapper around the RFP answer generation pipeline."""
+    """Prepare questions, invoke the QA engine, and format answers for downstream consumers."""
 
     def __init__(
         self,
@@ -38,6 +48,7 @@ class Responder:
         self.extra_docs = extra_docs or []
 
     def with_updates(self, **overrides: Any) -> "Responder":
+        """Return a new `Responder` using the current defaults plus any overrides."""
         # Build a fresh Responder so Streamlit can tweak per-request knobs
         # without mutating the shared instance held in session state.
         params = {
@@ -61,6 +72,7 @@ class Responder:
         diagnostics: Optional[List[Dict[str, Any]]] = None,
         include_vectors: bool = False,
     ) -> List[Tuple[str, str, str, float, str]]:
+        """Return retrieval snippets so callers can preview or debug context selection."""
         return collect_relevant_snippets(
             question,
             self.search_mode,
@@ -81,6 +93,7 @@ class Responder:
         include_citations: Optional[bool] = None,
         progress: ProgressFn = None,
     ) -> Dict[str, Any]:
+        """Answer a single question and wrap the result with citation metadata."""
         ans, comments = self._answer_raw(question, progress=progress)
         include = self.include_citations if include_citations is None else include_citations
         formatted = dict(self._format_answer(ans, comments, include_citations))
@@ -95,6 +108,7 @@ class Responder:
         max_workers: int = 1,
         progress: BatchProgressFn = None,
     ) -> List[Dict[str, Any]]:
+        """Answer many questions, optionally parallelising work with a thread pool."""
         normalized: List[Tuple[int, str, Dict[str, Any]]] = []
         for idx, item in enumerate(questions):
             # The Streamlit UI can pass bare strings or rich dict metadata; we
@@ -123,6 +137,7 @@ class Responder:
 
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                # The underlying QA engine can issue blocking LLM calls, so threads help hide latency.
                 # Fan out questions to the worker pool but retain the original
                 # ordering so downstream consumers can match answers by index.
                 future_map = {
@@ -146,6 +161,7 @@ class Responder:
         *,
         progress: ProgressFn = None,
     ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
+        """Call `qa_engine.answer_question` and return both answer text and raw snippets."""
         return answer_question(
             question,
             self.search_mode,
@@ -167,6 +183,7 @@ class Responder:
         comments: List[Tuple[str, str, str, float, str]],
         include_citations: Optional[bool],
     ) -> Dict[str, Any]:
+        """Merge the raw answer with original metadata for compatibility with exports."""
         formatted = self._format_answer(ans, comments, include_citations)
         payload = dict(meta)
         payload["question"] = payload.get("question") or question_text
@@ -184,6 +201,7 @@ class Responder:
         comments: List[Tuple[str, str, str, float, str]],
         include_citations: Optional[bool],
     ) -> Dict[str, Any]:
+        """Convert raw answer output into repo-wide shape expected by UI/export layers."""
         include = self.include_citations if include_citations is None else include_citations
         text = ans or ""
         citations: Dict[str, Dict[str, Any]] = {}
@@ -198,8 +216,27 @@ class Responder:
                 citations[key] = {
                     "source_file": Path(src).name if src else "Unknown",  # type: ignore[name-defined]
                     "source_path": src,
+                    # These keys are consumed by the document filler and Excel exporters.
                     "text": snippet,
                     "score": score,
                     "date": date_str,
                 }
         return {"text": text, "citations": citations}
+
+
+# The block below can be uncommented when you want to run this module directly.
+# It mirrors how the Streamlit UI constructs a responder but avoids importing
+# the full frontend stack. Keep the code commented-out so importing this module
+# remains side-effect free.
+#
+# if __name__ == "__main__":
+#     import os
+#     from backend.llm.completions_client import CompletionsClient
+#
+#     # Configure the client using the same environment variables as the web app.
+#     client = CompletionsClient(model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+#     responder = Responder(llm_client=client, search_mode="both", k=6)
+#     sample_question = "Summarize the investment strategy for Fund X."
+#     payload = responder.answer(sample_question, include_citations=True)
+#     print("Answer:", payload["text"])
+#     print("Citations:", payload["citations"])

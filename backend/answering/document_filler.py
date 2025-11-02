@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+"""
+Utilities for turning QA responses into downloadable Office artifacts.
+
+`DocumentFiller` sits between the answering pipeline and the Streamlit UI,
+bridging internal answer formats with the Word/Excel writers in
+`backend.documents`. The helpers here consolidate temp-file handling and the
+payload shape expected by the front end.
+"""
+
 import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+# Directly use python-docx for the summary builder path.
 from docx import Document
 
 from backend.documents.docx.apply_answers import apply_answers_to_docx
@@ -13,13 +23,14 @@ from backend.documents.xlsx.apply_answers import write_excel_answers
 
 
 class DocumentFiller:
-    """Helper that turns answer batches into downloadable artifacts."""
+    """Convert QA batches into the download payloads consumed by the Streamlit frontend."""
 
     def __init__(self) -> None:
         self._last_details: Dict[str, Any] = {}
 
     @property
     def last_details(self) -> Dict[str, Any]:
+        """Expose the most recent bundle metadata for debugging/telemetry."""
         return self._last_details
 
     def build_excel_bundle(
@@ -31,6 +42,8 @@ class DocumentFiller:
         include_citations: bool,
         mode: str = "fill",
     ) -> Dict[str, Any]:
+        """Return download metadata for writing an answered Excel workbook plus optional comments doc."""
+        # Sanitise the QA payload so downstream writers receive only stable keys.
         answers_payload = [self._prepare_answer_for_storage(entry) for entry in qa_results]
 
         # Write to a temp path so Streamlit can offer a real file download.
@@ -81,6 +94,7 @@ class DocumentFiller:
                 }
             )
 
+        # Cache details so the frontend can surface the last generated bundle.
         self._last_details = {
             "mode": "excel",
             "qa_pairs": qa_pairs,
@@ -98,6 +112,8 @@ class DocumentFiller:
         include_citations: bool,
         write_mode: str = "fill",
     ) -> Dict[str, Any]:
+        """Produce a DOCX file based on slot metadata plus answer payloads returned by the responder."""
+        # slot_map feeds the on-disk structure consumed by the docx writer.
         slot_map: Dict[str, Dict[str, Any]] = {}
         slot_answers: Dict[str, Dict[str, Any]] = {}
         for qa in qa_results:
@@ -164,6 +180,7 @@ class DocumentFiller:
                 }
             )
 
+        # Mirror the Excel bundle structure so downstream consumers can reuse UI components.
         self._last_details = {
             "mode": "docx_slots",
             "qa_pairs": qa_pairs,
@@ -185,6 +202,7 @@ class DocumentFiller:
         qa_results: Sequence[Dict[str, Any]],
         include_citations: bool,
     ) -> Dict[str, Any]:
+        """Build a lightweight Word report summarizing free-form Q/A responses."""
         answers_text = [qa.get("answer", "") for qa in qa_results]
         comments = [qa.get("raw_comments") or [] for qa in qa_results]
         # Summaries mimic the docx layout used in slot-filling so the UX stays
@@ -217,6 +235,7 @@ class DocumentFiller:
                 }
             )
 
+        # Reuse the bundled payload contract so Streamlit download widgets stay uniform.
         self._last_details = {
             "mode": "summary",
             "qa_pairs": qa_pairs,
@@ -225,6 +244,7 @@ class DocumentFiller:
         return {"downloads": downloads, "qa_pairs": qa_pairs}
 
     def _prepare_answer_for_storage(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Trim the full QA payload to the minimal fields persisted to disk."""
         # Only persist the bare minimum for downstream writers; the UI keeps the
         # richer payload in-memory.
         return {
@@ -233,6 +253,7 @@ class DocumentFiller:
         }
 
     def _prepare_answer_for_display(self, entry: Dict[str, Any], include_citations: bool) -> Any:
+        """Return either raw answer text or the richer structure expected by export views."""
         text = entry.get("answer", "")
         citations = entry.get("citations") or {}
         if not include_citations:
@@ -248,6 +269,7 @@ class DocumentFiller:
         comments: List[List],
         include_citations: bool,
     ) -> bytes:
+        """Render an in-memory DOCX report that mirrors the slot-filling layout."""
         doc = Document()
         doc.add_heading("Q/A Summary", level=1)
 
@@ -294,9 +316,11 @@ class DocumentFiller:
         mime: Optional[str],
         order: int,
     ) -> Dict[str, Any]:
+        """Read the generated file into memory and return the format used by Streamlit downloads."""
         # Read the file into memory so we can hand Streamlit a bytes payload.
         data = Path(path).read_bytes()
         try:
+            # Remove the temp artifact now that the bytes are buffered.
             os.unlink(path)
         except Exception:
             pass
@@ -308,3 +332,34 @@ class DocumentFiller:
             "mime": mime,
             "order": order,
         }
+
+
+# To smoke-test this module without the Streamlit app, uncomment the block below.
+# It wires up synthetic QA results and writes outputs to /tmp just like the UI would.
+#
+# if __name__ == "__main__":
+#     import json
+#
+#     filler = DocumentFiller()
+#     fake_schema = [
+#         {"question_text": "Describe the fund objective.", "slot_id": 1},
+#         {"question_text": "List key risks.", "slot_id": 2},
+#     ]
+#     fake_answers = [
+#         {"answer": "The fund targets long-term capital appreciation.", "citations": {"1": {"text": "Prospectus", "source_file": "fund.pdf"}}},
+#         {"answer": "Primary risks include market volatility and liquidity constraints.", "citations": {}},
+#     ]
+#     excel_bundle = filler.build_excel_bundle(
+#         # Point to an existing workbook template in your environment.
+#         source_path="samples/empty_template.xlsx",
+#         schema=fake_schema,
+#         qa_results=fake_answers,
+#         include_citations=True,
+#     )
+#     print("Excel downloads:", [d["file_name"] for d in excel_bundle["downloads"]])
+#     summary_bundle = filler.build_summary_bundle(
+#         questions=[row["question_text"] for row in fake_schema],
+#         qa_results=fake_answers,
+#         include_citations=True,
+#     )
+#     print("Summary bytes:", len(summary_bundle["downloads"][0]["data"]))

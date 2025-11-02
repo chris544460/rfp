@@ -4,7 +4,9 @@ qa_core.py
 Home of `answer_question(...)` and its prompt plumbing.
 
 This module centralizes the RAG→LLM answer generation so both the CLI and
-other pipelines can reuse it without circular imports.
+other pipelines can reuse it without circular imports.  Higher-level wrappers
+such as `backend.answering.responder.Responder` and the Streamlit UI call into
+these helpers to keep retrieval, filtering, and citation handling consistent.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from backend.retrieval.vector_search import search
 try:
     from backend.retrieval.document_search import search_uploaded_docs
 except ModuleNotFoundError:  # pragma: no cover - optional docx dependency
+    # Streamlit deployments without python-docx skip the LLM-powered doc search path.
     def search_uploaded_docs(*args, **kwargs):  # type: ignore[no-redef]
         return []
 
@@ -41,6 +44,7 @@ CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 # ───────────────────────── Prompt loading ─────────────────────────
 
+# Prompt templates are cached here so every call shares the same in-memory copy.
 PROMPTS = load_prompts(
     {name: "" for name in ("extract_questions", "answer_search_context", "answer_llm")}
 )
@@ -151,6 +155,7 @@ def _append_diagnostic_entry(
     date_str: str,
     include_vectors: bool,
 ) -> None:
+    """Collect rich debugging info for inspection in Streamlit's diagnostics sidebar."""
     entry: Dict[str, object] = {
         "raw_rank": raw_rank,
         "id": hit.get("id", "unknown"),
@@ -186,6 +191,7 @@ class HitContext(NamedTuple):
 
 
 def _build_hit_context(hit: Dict[str, object]) -> HitContext:
+    """Normalize search hit fields so downstream filters can treat sources uniformly."""
     doc_id = str(hit.get("id", "unknown"))
     score = float(hit.get("cosine", 0.0))
     snippet = (hit.get("text") or "").strip()
@@ -223,6 +229,7 @@ def _classify_hit(
     min_confidence: float,
     seen_snippets: Set[str],
 ) -> Tuple[str, str]:
+    """Return (decision, reason) for a hit based on score thresholds and duplication."""
     if ctx.score < min_confidence:
         return (
             "low_confidence",
@@ -236,6 +243,7 @@ def _classify_hit(
 
 
 def _status_for_decision(decision: str) -> str:
+    """Map internal decision codes to the terms surfaced in diagnostics."""
     return {
         "low_confidence": "filtered_low_confidence",
         "duplicate": "filtered_duplicate",
@@ -244,6 +252,7 @@ def _status_for_decision(decision: str) -> str:
 
 
 def _debug_filter_message(decision: str, ctx: HitContext, reason: str) -> None:
+    """Emit debug noise explaining why a snippet was kept or filtered."""
     if not DEBUG:
         return
     if decision == "accepted":
@@ -316,6 +325,7 @@ def _log_filter_summary(
     *,
     stats: Dict[str, int],
 ) -> None:
+    """Summarise how many snippets survived filtering when DEBUG is enabled."""
     if not DEBUG:
         return
     print(
@@ -347,7 +357,7 @@ def collect_relevant_snippets(
     diagnostics: Optional[List[Dict[str, object]]] = None,
     include_vectors: bool = False,
 ) -> List[Tuple[str, str, str, float, str]]:
-    """Return the filtered context snippets used for answering a question."""
+    """Return the filtered context snippets shared by both the Responder and conversation flows."""
 
     q = (q or "").strip()
 
@@ -404,6 +414,7 @@ def collect_relevant_snippets(
 
 
 def _build_context_block(rows: List[Tuple[str, str, str, float, str]]) -> str:
+    """Flatten accepted snippets into the prompt format consumed by `answer_llm`."""
     block = "\n\n".join(f"{label} {src}: {snippet}" for (label, src, snippet, _, _) in rows)
     if DEBUG:
         print(f"[qa_core] built context with {len(rows)} snippets")
@@ -413,12 +424,14 @@ def _build_context_block(rows: List[Tuple[str, str, str, float, str]]) -> str:
 
 
 def _length_instruction(length: Optional[str], approx_words: Optional[int]) -> str:
+    """Return instruction text honoring explicit word counts over preset labels."""
     if approx_words is not None:
         return f"Please aim for approximately {approx_words} words."
     return PRESET_INSTRUCTIONS.get(length or "medium", "")
 
 
 def _invoke_llm(prompt: str, llm: CompletionsClient, question: str, attempt: int) -> str:
+    """Send the prompt to the configured completions client and normalise the response text."""
     if DEBUG:
         print(f"[qa_core] calling language model (attempt {attempt + 1})")
         print(f"[qa_core] prompt:\n{prompt}")
@@ -438,6 +451,7 @@ def _invoke_llm(prompt: str, llm: CompletionsClient, question: str, attempt: int
 
 
 def _extract_citation_order(answer: str) -> List[str]:
+    """Return citation tokens in the order they appear (e.g., ['[1]', '[2]', '[3]'])."""
     order: List[str] = []
     for match in CITATION_RE.finditer(answer):
         numbers = [num.strip() for num in match.group(1).split(",")]
@@ -449,6 +463,7 @@ def _extract_citation_order(answer: str) -> List[str]:
 
 
 def _renumber_answer_citations(answer: str, order: List[str]) -> Tuple[str, Dict[str, str]]:
+    """Ensure citations are sequential even when the model emits gaps or reorders markers."""
     mapping = {old: f"[{idx + 1}]" for idx, old in enumerate(order)}
     if DEBUG:
         print(f"[qa_core] citation order: {order}")
@@ -469,6 +484,7 @@ def _resolve_row_index(
     rows: List[Tuple[str, str, str, float, str]],
     used: Set[int],
 ) -> Optional[int]:
+    """Map a citation token back to a snippet index, falling back to the next unused row."""
     try:
         idx = int(token.strip("[]")) - 1
     except Exception:
@@ -491,6 +507,7 @@ def _build_comments_from_order(
     mapping: Dict[str, str],
     rows: List[Tuple[str, str, str, float, str]],
 ) -> List[Tuple[str, str, str, float, str]]:
+    """Translate the ordered citation tokens into the structured comments array."""
     comments: List[Tuple[str, str, str, float, str]] = []
     used_rows: Set[int] = set()
     for token in order:
@@ -517,6 +534,7 @@ def _generate_answer_with_retries(
     llm: CompletionsClient,
     rows: List[Tuple[str, str, str, float, str]],
 ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
+    """Call the LLM until citations align with snippets or we exhaust retry attempts."""
     answer = ""
     comments: List[Tuple[str, str, str, float, str]] = []
 
@@ -548,6 +566,8 @@ def answer_question(
     progress: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
     """
+    Primary entrypoint consumed by `backend.answering.responder` and CLI utilities.
+
     Return (answer_text, comments) where comments is a list of:
     (new_label_without_brackets, source_name, snippet, score, date_str)
 
@@ -590,3 +610,30 @@ def answer_question(
     if progress:
         progress("Answer generation complete.")
     return ans, comments
+
+
+# Uncomment the block below to exercise the QA engine without the Streamlit UI.
+# It assumes your environment variables point at a running vector search backend
+# and that `backend.retrieval` is configured. Adjust the question or fund tag to
+# match data available in your dev stack before running:
+# `python backend/answering/qa_engine.py`
+#
+# if __name__ == "__main__":
+#     import os
+#     from backend.llm.completions_client import CompletionsClient
+#
+#     client = CompletionsClient(model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+#     sample_question = "What differentiates the Sustainable Growth Fund from peers?"
+#     answer, citations = answer_question(
+#         q=sample_question,
+#         mode=os.getenv("RFP_SEARCH_MODE", "both"),
+#         fund=os.getenv("RFP_FUND_TAG"),
+#         k=int(os.getenv("RFP_K", "6")),
+#         length=os.getenv("RFP_LENGTH"),
+#         approx_words=None,
+#         min_confidence=float(os.getenv("RFP_MIN_CONFIDENCE", "0.0")),
+#         llm=client,
+#         extra_docs=None,
+#     )
+#     print("Answer:", answer)
+#     print("Citations:", citations)
