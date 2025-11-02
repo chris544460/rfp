@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import html
-import re
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
 import streamlit as st
 
@@ -26,64 +25,92 @@ def create_live_placeholder(container, idx: int, question_text: str):
     return placeholder
 
 
-def _normalize_citation_entry(comment):
+def _clean_text(value: Any) -> str:
+    return str(value).strip() if value not in (None, "") else ""
+
+
+_LABEL_KEYS = ("label", "id", "index", "key", "citation")
+_SOURCE_KEYS = ("source", "source_file", "document", "name", "file")
+_PAGE_KEYS = ("page", "section", "location", "page_label")
+_SNIPPET_KEYS = ("snippet", "text", "content", "passage")
+_EXTRA_KEYS = ("meta", "note")
+
+CitationEntry = tuple[str, str, str, str]
+
+
+def _sort_citation_key(raw_key: Any):
+    key_as_str = str(raw_key)
+    return (0, int(key_as_str)) if key_as_str.isdigit() else (1, key_as_str)
+
+
+def _normalize_indexed_dict(comment: dict) -> List[CitationEntry]:
+    entries: List[CitationEntry] = []
+    for key in sorted(comment.keys(), key=_sort_citation_key):
+        payload = comment[key]
+        if isinstance(payload, dict):
+            payload = dict(payload)
+        else:
+            payload = {"text": payload}
+        payload.setdefault("label", key)
+        entries.extend(_normalize_citation_entry(payload))
+    return entries
+
+
+def _first_clean_value(comment: dict, keys) -> str:
+    for key in keys:
+        cleaned = _clean_text(comment.get(key))
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def _normalize_plain_dict(comment: dict) -> List[CitationEntry]:
+    label = _first_clean_value(comment, _LABEL_KEYS)
+    source = _first_clean_value(comment, _SOURCE_KEYS)
+    page = _first_clean_value(comment, _PAGE_KEYS)
+
+    snippet = _first_clean_value(comment, _SNIPPET_KEYS)
+    extra = _first_clean_value(comment, _EXTRA_KEYS)
+    if not snippet and extra:
+        snippet = extra
+    elif snippet and extra:
+        snippet = f"{snippet} ({extra})"
+
+    return [(label, source, snippet, page)]
+
+
+def _normalize_sequence(comment: Sequence[Any]) -> List[CitationEntry]:
+    label = _clean_text(comment[0]) if len(comment) > 0 else ""
+    source = _clean_text(comment[1]) if len(comment) > 1 else ""
+    snippet = _clean_text(comment[2]) if len(comment) > 2 else ""
+    page = _clean_text(comment[4]) if len(comment) > 4 else ""
+    if not page:
+        page = _clean_text(comment[3]) if len(comment) > 3 else ""
+    return [(label, source, snippet, page)]
+
+
+def _normalize_scalar(comment: Any) -> List[CitationEntry]:
+    value = _clean_text(comment)
+    if not value:
+        return []
+    return [("", "", value, "")]
+
+
+def _normalize_citation_entry(comment) -> List[CitationEntry]:
     # Accept a wide range of citation shapes (dict, list, scalar) so older runs
     # and new pipelines alike render consistently.
-    def _clean(value):
-        return str(value).strip() if value not in (None, "") else ""
-
     if not comment:
         return []
 
     if isinstance(comment, dict):
         if comment and all(str(k).isdigit() for k in comment.keys()):
-            entries = []
-            for key in sorted(comment.keys(), key=lambda k: int(str(k)) if str(k).isdigit() else str(k)):
-                payload = comment[key]
-                if isinstance(payload, dict):
-                    payload = dict(payload)
-                else:
-                    payload = {"text": payload}
-                payload.setdefault("label", key)
-                entries.extend(_normalize_citation_entry(payload))
-            return entries
-
-        label = _clean(
-            comment.get("label")
-            or comment.get("id")
-            or comment.get("index")
-            or comment.get("key")
-            or comment.get("citation")
-        )
-        source = _clean(
-            comment.get("source")
-            or comment.get("source_file")
-            or comment.get("document")
-            or comment.get("name")
-            or comment.get("file")
-        )
-        page = _clean(comment.get("page") or comment.get("section") or comment.get("location") or comment.get("page_label"))
-        snippet = _clean(comment.get("snippet") or comment.get("text") or comment.get("content") or comment.get("passage"))
-        extra = _clean(comment.get("meta") or comment.get("note"))
-        if not snippet and extra:
-            snippet = extra
-        elif snippet and extra:
-            snippet = f"{snippet} ({extra})"
-        return [(label, source, snippet, page)]
+            return _normalize_indexed_dict(comment)
+        return _normalize_plain_dict(comment)
 
     if isinstance(comment, (list, tuple)):
-        label = _clean(comment[0] if len(comment) > 0 else "")
-        source = _clean(comment[1] if len(comment) > 1 else "")
-        snippet = _clean(comment[2] if len(comment) > 2 else "")
-        page = _clean(comment[4] if len(comment) > 4 else "")
-        if not page:
-            page = _clean(comment[3] if len(comment) > 3 else "")
-        return [(label, source, snippet, page)]
+        return _normalize_sequence(comment)
 
-    value = _clean(comment)
-    if not value:
-        return []
-    return [("", "", value, "")]
+    return _normalize_scalar(comment)
 
 
 def render_live_answer(
@@ -111,11 +138,11 @@ def render_live_answer(
         st.markdown(f"**Answer:** {ans_text}")
         if include_citations:
             raw_items = comments if isinstance(comments, (list, tuple)) else [comments]
-            normalized: List[Any] = []
+            normalized: List[CitationEntry] = []
             for item in raw_items or []:
                 normalized.extend(_normalize_citation_entry(item))
 
-            entries = []
+            entries: List[CitationEntry] = []
             for label, source, snippet, page in normalized:
                 if any([label, source, snippet, page]):
                     entries.append((label, source, snippet, page))
