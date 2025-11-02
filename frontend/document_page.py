@@ -15,7 +15,8 @@ from backend.ui.components import (
     create_live_placeholder,
     render_live_answer,
 )
-from backend.answering import QuestionExtractor, Responder
+from backend.answering import Responder
+from backend.documents.extraction import QuestionExtractor
 from backend.documents.workflows import DocumentJobController
 from backend.llm.completions_client import CompletionsClient
 from frontend.config_panel import AppConfig

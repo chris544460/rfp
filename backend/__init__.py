@@ -45,7 +45,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional streamlit dependency
 from .llm.completions_client import CompletionsClient, get_openai_completion
 
 try:  # Optional dependency: QuestionExtractor pulls in spaCy at import time
-    from .answering import QuestionExtractor  # noqa: WPS433 - conditional import
+    from .documents.extraction import QuestionExtractor  # noqa: WPS433 - conditional import
 except ModuleNotFoundError:  # pragma: no cover - optional dependency unavailable
     QuestionExtractor = None  # type: ignore[assignment]
 
