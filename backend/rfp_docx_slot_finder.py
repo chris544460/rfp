@@ -1211,6 +1211,21 @@ def llm_refine(slots: List[QASlot], context_windows: List[str]) -> List[QASlot]:
 
 def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -> List[QASlot]:
     """If rule‑based detectors find nothing, let an LLM propose Q→A blanks."""
+    candidates, table_idx_map = _llm_scan_candidates(blocks, model=model)
+    if not candidates:
+        return []
+
+    results: List[QASlot] = []
+    for candidate in candidates:
+        slot = _candidate_to_slot(candidate, blocks, table_idx_map, model=model)
+        if slot:
+            results.append(slot)
+    return results
+
+
+def _llm_scan_candidates(
+    blocks: List[Union[Paragraph, Table]], *, model: str
+) -> Tuple[List[Dict[str, Any]], Dict[int, int]]:
     excerpt, table_idx_map = _render_rich_excerpt(blocks)
     dbg(f"llm_scan_blocks (rich): {len(excerpt)} chars, model={model}")
     dbg(f"Sending prompt to LLM (first 400 chars): {excerpt[:400]}...")
@@ -1222,78 +1237,115 @@ def llm_scan_blocks(blocks: List[Union[Paragraph, Table]], model: str = MODEL) -
         print(prompt)
         print("--- END PROMPT ---\n")
     try:
-        content = _call_llm_cached(
-            prompt,
-            json_output=True,
-            model=model,
-        )
+        content = _call_llm_cached(prompt, json_output=True, model=model)
         js = json.loads(content)
-        cand = js.get("slots", []) or []
+        candidates = js.get("slots", []) or []
         if SHOW_TEXT:
             print("\n--- COMPLETION (llm_scan_blocks) ---")
             print(content)
             print("--- END COMPLETION ---\n")
-        dbg(f"LLM returned {len(cand)} slot candidates")
-        dbg(f"LLM raw slot candidates: {cand}")
-    except Exception as e:
-        dbg(f"LLM error: {e}")
-        return []
+        dbg(f"LLM returned {len(candidates)} slot candidates")
+        dbg(f"LLM raw slot candidates: {candidates}")
+        return candidates, table_idx_map
+    except Exception as exc:
+        dbg(f"LLM error: {exc}")
+        return [], table_idx_map
 
-    results: List[QASlot] = []
-    for it in cand:
-        dbg(f"Processing candidate: {it}")
-        try:
-            kind = (it.get("kind") or "").strip()
-            if kind == "paragraph_after":
-                q_block = int(it["question"]["block"])
-                offset = max(1, min(3, int(it["answer"]["offset"])))
-                # derive question text if possible
-                if 0 <= q_block < len(blocks) and isinstance(blocks[q_block], Paragraph):
-                    q_text = (blocks[q_block].text or "").strip()
-                else:
-                    q_text = ""
-                results.append(QASlot(
-                    id=f"slot_{uuid.uuid4().hex[:8]}",
-                    question_text=q_text,
-                    answer_locator=AnswerLocator(type="paragraph_after", paragraph_index=q_block, offset=offset),
-                    answer_type=infer_answer_type(q_text, blocks, q_block),
-                    confidence=0.6,
-                    meta={"detector": "llm_rich", "q_block": q_block, "offset": offset}
-                ))
-                dbg(f"Appended slot from candidate: {results[-1]}")
-            elif kind == "table_cell":
-                q_block = int(it["question"]["block"])
-                qr = int(it["question"]["row"])
-                qc = int(it["question"]["col"])
-                ab = int(it["answer"]["block"])
-                ar = int(it["answer"]["row"])
-                ac = int(it["answer"]["col"])
-                # table index mapping
-                t_index = table_idx_map.get(q_block)
-                if t_index is None:
-                    # if the model referenced a table block incorrectly, skip
-                    continue
-                # derive question text if possible
-                q_text = ""
-                try:
-                    tbl = blocks[q_block]
-                    if isinstance(tbl, Table):
-                        q_text = (tbl.cell(qr, qc).text or "").strip()
-                except Exception:
-                    pass
-                results.append(QASlot(
-                    id=f"slot_{uuid.uuid4().hex[:8]}",
-                    question_text=q_text,
-                    answer_locator=AnswerLocator(type="table_cell", table_index=t_index, row=ar, col=ac),
-                    answer_type=infer_answer_type(q_text, blocks, q_block),
-                    confidence=0.65,
-                    meta={"detector": "llm_rich", "q_block": q_block, "answer_block": ab, "row": ar, "col": ac}
-                ))
-                dbg(f"Appended slot from candidate: {results[-1]}")
-        except Exception as e:
-            dbg(f"Parse candidate error: {e}")
-            continue
-    return results
+
+def _candidate_to_slot(
+    candidate: Dict[str, Any],
+    blocks: List[Union[Paragraph, Table]],
+    table_idx_map: Dict[int, int],
+    *,
+    model: str,
+) -> Optional[QASlot]:
+    dbg(f"Processing candidate: {candidate}")
+    kind = (candidate.get("kind") or "").strip()
+    try:
+        if kind == "paragraph_after":
+            return _slot_from_paragraph_candidate(candidate, blocks, model=model)
+        if kind == "table_cell":
+            return _slot_from_table_candidate(candidate, blocks, table_idx_map, model=model)
+    except Exception as exc:
+        dbg(f"Parse candidate error: {exc}")
+    return None
+
+
+def _slot_from_paragraph_candidate(
+    candidate: Dict[str, Any],
+    blocks: List[Union[Paragraph, Table]],
+    *,
+    model: str,
+) -> Optional[QASlot]:
+    q_block = int(candidate["question"]["block"])
+    offset = max(1, min(3, int(candidate["answer"]["offset"])))
+    if 0 <= q_block < len(blocks) and isinstance(blocks[q_block], Paragraph):
+        q_text = (blocks[q_block].text or "").strip()
+    else:
+        q_text = ""
+    slot = QASlot(
+        id=f"slot_{uuid.uuid4().hex[:8]}",
+        question_text=q_text,
+        answer_locator=AnswerLocator(
+            type="paragraph_after",
+            paragraph_index=q_block,
+            offset=offset,
+        ),
+        answer_type=infer_answer_type(q_text, blocks, q_block),
+        confidence=0.6,
+        meta={"detector": "llm_rich", "q_block": q_block, "offset": offset},
+    )
+    dbg(f"Appended slot from candidate: {slot}")
+    return slot
+
+
+def _slot_from_table_candidate(
+    candidate: Dict[str, Any],
+    blocks: List[Union[Paragraph, Table]],
+    table_idx_map: Dict[int, int],
+    *,
+    model: str,
+) -> Optional[QASlot]:
+    q_block = int(candidate["question"]["block"])
+    t_index = table_idx_map.get(q_block)
+    if t_index is None:
+        return None
+
+    q_row = int(candidate["question"]["row"])
+    q_col = int(candidate["question"]["col"])
+    a_row = int(candidate["answer"]["row"])
+    a_col = int(candidate["answer"]["col"])
+    a_block = int(candidate["answer"]["block"])
+
+    question_text = ""
+    try:
+        tbl = blocks[q_block]
+        if isinstance(tbl, Table):
+            question_text = (tbl.cell(q_row, q_col).text or "").strip()
+    except Exception:
+        pass
+
+    slot = QASlot(
+        id=f"slot_{uuid.uuid4().hex[:8]}",
+        question_text=question_text,
+        answer_locator=AnswerLocator(
+            type="table_cell",
+            table_index=t_index,
+            row=a_row,
+            col=a_col,
+        ),
+        answer_type=infer_answer_type(question_text, blocks, q_block),
+        confidence=0.65,
+        meta={
+            "detector": "llm_rich",
+            "q_block": q_block,
+            "answer_block": a_block,
+            "row": a_row,
+            "col": a_col,
+        },
+    )
+    dbg(f"Appended slot from candidate: {slot}")
+    return slot
 
 # ─────────────────── 2‑stage LLM helpers ───────────────────
 
@@ -1612,88 +1664,131 @@ def _collect_slots_fast_docx(
     return slots
 
 
+def _heuristic_question_indices(blocks: List[Union[Paragraph, Table]]) -> List[int]:
+    indices: List[int] = []
+    for idx, block in enumerate(blocks):
+        if not isinstance(block, Paragraph) or not block.text:
+            continue
+        raw = block.text.strip()
+        low = raw.lower()
+        reason = None
+        if "?" in raw:
+            reason = "contains '?'"
+        elif "please" in low:
+            reason = "contains 'please'"
+        if reason:
+            dbg(f"Heuristic flagged block {idx}: {reason} -> {raw}")
+            indices.append(idx)
+    return indices
+
+
+def _remaining_block_view(
+    blocks: List[Union[Paragraph, Table]],
+    skip_indices: Set[int],
+) -> Tuple[List[Union[Paragraph, Table]], Dict[int, int]]:
+    filtered: List[Union[Paragraph, Table]] = []
+    global_to_local: Dict[int, int] = {}
+    for global_idx, block in enumerate(blocks):
+        if global_idx in skip_indices:
+            continue
+        local_idx = len(filtered)
+        filtered.append(block)
+        global_to_local[local_idx] = global_idx
+    return filtered, global_to_local
+
+
+def _combine_candidate_indices(
+    blocks: List[Union[Paragraph, Table]],
+    *,
+    model: str,
+) -> List[int]:
+    heuristics = _heuristic_question_indices(blocks)
+    remaining_blocks, global_to_local = _remaining_block_view(blocks, set(heuristics))
+    local_hits = llm_detect_questions(remaining_blocks, model=model)
+    llm_indices = [global_to_local[idx] for idx in local_hits if idx in global_to_local]
+    return sorted(set(heuristics + llm_indices))
+
+
+async def _build_slot_async(
+    blocks: List[Union[Paragraph, Table]],
+    qb: int,
+    *,
+    model: str,
+) -> Optional[QASlot]:
+    try:
+        loc = await llm_locate_answer(blocks, qb, window=3, model=model)
+        if loc is None:
+            return None
+        q_text = (blocks[qb].text if isinstance(blocks[qb], Paragraph) else "").strip()
+        slot_obj = QASlot(
+            id=f"slot_{uuid.uuid4().hex[:8]}",
+            question_text=q_text,
+            answer_locator=loc,
+            answer_type=infer_answer_type(q_text, blocks, qb),
+            confidence=0.6,
+            meta={"detector": "two_stage", "q_block": qb},
+        )
+        q_par = blocks[qb] if isinstance(blocks[qb], Paragraph) else None
+        lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
+        hint, hint_level = derive_outline_hint_and_level(q_text)
+        slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
+        slot_obj.meta["needs_context"] = await llm_assess_context(blocks, qb, model=model)
+        dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
+        return slot_obj
+    except Exception as err:
+        dbg(f"Error processing q_block {qb}: {err}")
+        return None
+
+
+def _gather_slots_for_indices(
+    indices: List[int],
+    blocks: List[Union[Paragraph, Table]],
+    *,
+    model: str,
+) -> List[QASlot]:
+    async def _runner() -> List[Optional[QASlot]]:
+        tasks = [asyncio.create_task(_build_slot_async(blocks, qb, model=model)) for qb in indices]
+        return await asyncio.gather(*tasks)
+
+    return [slot for slot in asyncio.run(_runner()) if slot]
+
+
+def _augment_with_raw_text_slots(
+    slots: List[QASlot],
+    blocks: List[Union[Paragraph, Table]],
+    *,
+    model: str,
+) -> List[QASlot]:
+    if FAST_DOCX or SKIP_RAWTEXT:
+        return slots
+    existing_qtexts = {
+        (slot.question_text or "").strip().lower()
+        for slot in slots
+        if slot.question_text
+    }
+    extra_blocks = llm_detect_questions_raw_text(
+        blocks,
+        existing_qtexts,
+        model=model,
+    )
+    for qb in extra_blocks:
+        extra_slot = asyncio.run(_build_slot_async(blocks, qb, model=model))
+        if extra_slot:
+            if extra_slot.meta is None:
+                extra_slot.meta = {}
+            extra_slot.meta["detector"] = "raw_text"
+            slots.append(extra_slot)
+    return slots
+
+
 def _collect_slots_two_stage(
     blocks: List[Union[Paragraph, Table]], *, model: str
 ) -> List[QASlot]:
-    q_indices_heur: List[int] = []
-    for i, block in enumerate(blocks):
-        if isinstance(block, Paragraph) and block.text:
-            raw = block.text.strip()
-            low = raw.lower()
-            reason = None
-            if "?" in raw:
-                reason = "contains '?'"
-            elif "please" in low:
-                reason = "contains 'please'"
-            if reason:
-                dbg(f"Heuristic flagged block {i}: {reason} -> {raw}")
-                q_indices_heur.append(i)
-
-    remaining_blocks: List[Union[Paragraph, Table]] = []
-    global_to_local: Dict[int, int] = {}
-    for gi, block in enumerate(blocks):
-        if gi in q_indices_heur:
-            continue
-        local_idx = len(remaining_blocks)
-        remaining_blocks.append(block)
-        global_to_local[local_idx] = gi
-
-    local_q_indices = llm_detect_questions(remaining_blocks, model=model)
-    q_indices_llm = [global_to_local[idx] for idx in local_q_indices if idx in global_to_local]
-    q_indices = sorted(set(q_indices_heur + q_indices_llm))
-
-    async def process_q_block(qb: int) -> Optional[QASlot]:
-        try:
-            loc = await llm_locate_answer(blocks, qb, window=3, model=model)
-            if loc is None:
-                return None
-            q_text = (blocks[qb].text if isinstance(blocks[qb], Paragraph) else "").strip()
-            slot_obj = QASlot(
-                id=f"slot_{uuid.uuid4().hex[:8]}",
-                question_text=q_text,
-                answer_locator=loc,
-                answer_type=infer_answer_type(q_text, blocks, qb),
-                confidence=0.6,
-                meta={"detector": "two_stage", "q_block": qb},
-            )
-            q_par = blocks[qb] if isinstance(blocks[qb], Paragraph) else None
-            lvl_num = paragraph_level_from_numbering(q_par) if q_par else None
-            hint, hint_level = derive_outline_hint_and_level(q_text)
-            slot_obj.meta["outline"] = {"level": lvl_num or hint_level, "hint": hint}
-            slot_obj.meta["needs_context"] = await llm_assess_context(blocks, qb, model=model)
-            dbg(f"Created QASlot from q_block {qb}: {asdict(slot_obj)}")
-            return slot_obj
-        except Exception as err:
-            dbg(f"Error processing q_block {qb}: {err}")
-            return None
-
-    async def gather_slots() -> List[Optional[QASlot]]:
-        tasks = [asyncio.create_task(process_q_block(qb)) for qb in q_indices]
-        return await asyncio.gather(*tasks)
-
-    slots = [slot for slot in asyncio.run(gather_slots()) if slot]
-
-    if not FAST_DOCX and not SKIP_RAWTEXT:
-        existing_qtexts = {
-            (slot.question_text or "").strip().lower()
-            for slot in slots
-            if slot.question_text
-        }
-        extra_q_blocks = llm_detect_questions_raw_text(
-            blocks,
-            existing_qtexts,
-            model=model,
-        )
-        for qb in extra_q_blocks:
-            extra_slot = asyncio.run(process_q_block(qb))
-            if extra_slot:
-                if extra_slot.meta is None:
-                    extra_slot.meta = {}
-                extra_slot.meta["detector"] = "raw_text"
-                slots.append(extra_slot)
-
+    candidate_indices = _combine_candidate_indices(blocks, model=model)
+    slots = _gather_slots_for_indices(candidate_indices, blocks, model=model)
+    slots = _augment_with_raw_text_slots(slots, blocks, model=model)
     if not slots:
-        slots = llm_scan_blocks(blocks, model=model)
+        return llm_scan_blocks(blocks, model=model)
     return slots
 
 
