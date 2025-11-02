@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Composite question extraction utilities spanning Excel, DOCX, and raw text inputs."""
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -144,3 +146,10 @@ class QuestionExtractor:
             "path": str(path),
         }
         return questions
+
+
+# if __name__ == "__main__":
+#     from backend.llm.completions_client import CompletionsClient
+#     extractor = QuestionExtractor(llm_client=CompletionsClient())
+#     sample = extractor.extract("samples/questionnaire.docx")
+#     print(f"Extracted {len(sample)} questions")

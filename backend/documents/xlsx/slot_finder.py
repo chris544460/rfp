@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""
+LLM-assisted helpers for mapping Excel questions to answer slots.
+
+The Streamlit ingestion pipeline uses this module to:
+* profile workbooks into JSON so prompts can reference layout + styling
+* call staged LLM prompts to locate answer cells
+* export schema/slot metadata for downstream filling via `apply_answers`
+
+Most functions are composable so data-prep scripts can reuse individual steps.
+"""
+
 import json
 import os
 import re
@@ -805,3 +816,8 @@ __all__ = [
     "llm_classify_cells",
     "extract_questions_with_llm",
 ]
+
+# Quick smoke-test snippet:
+#     if __name__ == "__main__":
+#         import pprint
+#         pprint.pp(extract_schema_from_xlsx("samples/questionnaire.xlsx", debug=True))

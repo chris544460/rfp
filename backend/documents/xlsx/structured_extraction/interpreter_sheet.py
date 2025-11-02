@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Lightweight wrappers used by legacy sheet interpretation workflows."""
+
 from pathlib import Path
 from typing import Dict, List
 
@@ -28,3 +30,9 @@ def collect_non_empty_cells(path: str | Path) -> List[Dict[str, object]]:
                         }
                     )
     return cells
+
+
+# Quick CLI helper:
+# if __name__ == "__main__":
+#     from pprint import pprint
+#     pprint(collect_non_empty_cells("samples/workbook.xlsx")[:10])

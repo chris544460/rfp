@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""
+Streamlit controller orchestrating long-running document answering jobs.
+
+This module bridges the UI layer (progress spinners, downloads) with the
+answering pipeline (`Responder`, `DocumentFiller`, structured extraction).
+"""
+
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
@@ -13,6 +20,7 @@ from backend.answering import DocumentFiller
 
 
 def _resolve_concurrency(value: Optional[int]) -> int:
+    """Pick a sensible worker pool size, honouring CLI env overrides when present."""
     env = os.getenv("CLI_STREAMLIT_CONCURRENCY")
     resolved = value
     if resolved is None and env:
@@ -539,3 +547,9 @@ def _sanitize_table_answer(answer) -> str:
 
 
 __all__ = ["DocumentJobController"]
+
+# To dry-run the controller outside Streamlit, wire up fake responder/extractor:
+# if __name__ == "__main__":
+#     from types import SimpleNamespace
+#     controller = DocumentJobController(feedback=SimpleNamespace(info=lambda *a, **k: None))
+#     # Populate a minimal config dict then call controller.schedule(...)

@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-from __future__ import annotations
+"""
+Locate answer slots inside DOCX questionnaires using rule heuristics plus LLM prompts.
 
-# rfp_docx_slot_finder.py
-#
-# Requires environment variables for the chosen framework:
-#   • Framework selection: ANSWER_FRAMEWORK=openai|aladdin
-#   • OpenAI: set OPENAI_API_KEY (and optional OPENAI_MODEL)
-#   • Aladdin: set aladdin_studio_api_key, defaultWebServer, aladdin_user, aladdin_passwd
+The resulting JSON is consumed by `apply_answers_to_docx` and the Streamlit document
+workflow.  Environment variables control which LLM framework is used along with
+various performance toggles (spaCy, caching, staged prompts).
+
+Requires environment variables for the chosen framework:
+    #   • Framework selection: ANSWER_FRAMEWORK=openai|aladdin
+    #   • OpenAI: set OPENAI_API_KEY (and optional OPENAI_MODEL)
+    #   • Aladdin: set aladdin_studio_api_key, defaultWebServer, aladdin_user, aladdin_passwd
+"""
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -2527,3 +2532,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # Example:
+    # python backend/documents/docx/slot_finder.py --docx sample.docx --out slots.json

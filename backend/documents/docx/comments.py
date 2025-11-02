@@ -1,3 +1,5 @@
+"""Compatibility helpers for injecting Word comments via python-docx."""
+
 from datetime import datetime
 import uuid
 from typing import Optional

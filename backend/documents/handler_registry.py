@@ -50,3 +50,9 @@ def get_handlers(ext: str) -> Tuple[SlotExtractor, AnswerApplier]:
     slot_extractor = getattr(import_module(slot_mod), slot_func)
     answer_applier = getattr(import_module(apply_mod), apply_func)
     return slot_extractor, answer_applier
+
+
+# Example:
+# if __name__ == "__main__":
+#     extractor, applier = get_handlers(".docx")
+#     print("Extractor:", extractor.__name__, "Applier:", applier.__name__)

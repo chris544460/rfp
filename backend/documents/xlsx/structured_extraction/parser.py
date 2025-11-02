@@ -1,3 +1,11 @@
+"""
+Parsers for converting questionnaire-style Excel/DOCX artifacts into JSON.
+
+The structured extraction pipeline uses these helpers to normalize different
+vendor exports (Loopio, internal answer libraries, mixed DOCX content) into the
+common schema consumed by the embedding + document-filler workflows.
+"""
+
 import os
 import re
 import json

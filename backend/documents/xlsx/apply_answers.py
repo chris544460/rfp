@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+"""
+Utilities for writing LLM answers back into structured Excel templates.
+
+This module is the Excel counterpart to `backend.documents.docx.apply_answers`.
+It takes the sanitized payload produced by `DocumentFiller` and:
+* writes answer text into the correct workbook cells
+* builds a companion DOCX with comment snippets so we avoid leaking citations
+  directly into the spreadsheet
+
+Both the Streamlit UI and automation workflows delegate to `write_excel_answers`.
+"""
+
 import os
 import re
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -51,6 +63,7 @@ def _to_text_and_citations(ans: object) -> tuple[str, Dict[str, object]]:
 def _resolve_sheet_and_cell(
     entry: Dict[str, Any], worksheets: Dict[str, Any]
 ) -> tuple[Optional[Any], Optional[str], Optional[str], Optional[str]]:
+    """Return (cell, sheet, address, skip_reason) guarding against missing slots."""
     sheet_name = entry.get("sheet") or entry.get("sheet_name")
     if "answer_cell" in entry:
         address = entry.get("answer_cell")
@@ -83,6 +96,7 @@ def _resolve_answer_payload(
     answer: Optional[object],
     generator: Optional[Callable[..., object]],
 ) -> tuple[str, str, Dict[str, object]]:
+    """Normalise the answer input and optionally invoke the generator fallback."""
     question = (entry.get("question_text") or "").strip()
     current = answer
     attempt = 0
@@ -112,6 +126,7 @@ def _apply_text_to_cell(
     *,
     mode: str,
 ) -> None:
+    """Write the formatted answer into the target cell respecting the fill mode."""
     if mode == "replace":
         print(
             f"DEBUG: Replacing cell {sheet_name}!{address} contents with '{excel_text}'"
@@ -148,6 +163,7 @@ def _collect_doc_entry(
     text: str,
     citations: Dict[str, object],
 ) -> Optional[Dict[str, Any]]:
+    """Package a single answer for inclusion in the standalone comments DOCX."""
     if not citations:
         return None
     print(f"DEBUG: Collected {len(citations)} citations for question index {idx}")
@@ -163,6 +179,7 @@ def _prepare_comments_path(
     comments_docx_path: Optional[str],
     include_comments: bool,
 ) -> Optional[str]:
+    """Determine where the comments DOCX should live (if at all)."""
     if not include_comments:
         return None
     if comments_docx_path:
@@ -172,6 +189,7 @@ def _prepare_comments_path(
 
 
 def _create_comments_document() -> docx.document.Document:
+    """Create a fresh DOCX with TOC scaffolding ready for answer comment sections."""
     document = docx.Document()
     update = OxmlElement("w:updateFields")
     update.set(qn("w:val"), "true")
@@ -183,6 +201,7 @@ def _create_comments_document() -> docx.document.Document:
 
 
 def _add_toc_field(document: docx.document.Document) -> None:
+    """Insert a Word field pointing at the table-of-contents placeholder."""
     paragraph = document.add_paragraph()
     run = paragraph.add_run()
     field = OxmlElement("w:fldSimple")
@@ -196,6 +215,7 @@ def _append_comment_section(
     index: int,
     total_entries: int,
 ) -> None:
+    """Append a heading + answer paragraph (with citation comments) to the DOCX."""
     question = entry.get("question") or ""
     text = entry.get("text") or ""
     citations = entry.get("citations") or {}
@@ -221,6 +241,7 @@ def _add_answer_runs(
     text: str,
     citations: Dict[str, object],
 ) -> None:
+    """Render the answer text and attach inline comments for each citation marker."""
     position = 0
     for match in _CITATION_RE.finditer(text):
         if match.start() > position:
@@ -258,6 +279,7 @@ def _add_answer_runs(
 
 
 def _write_comments_doc(entries: List[Dict[str, Any]], path: Optional[str]) -> None:
+    """Persist the standalone comments DOCX, swallowing failures for older clients."""
     if not entries or not path:
         return
     try:
@@ -371,3 +393,18 @@ def write_excel_answers(
 
 
 __all__ = ["write_excel_answers"]
+
+# For a quick smoke test, point to a template and uncomment to run:
+#     if __name__ == "__main__":
+#         from pathlib import Path
+#         sample_schema = [
+#             {"sheet": "Responses", "answer_cell": "B2", "question_text": "Example?"}
+#         ]
+#         sample_answers = [{"text": "Sample answer", "citations": {1: {"text": "Snippet"}}}]
+#         write_excel_answers(
+#             sample_schema,
+#             sample_answers,
+#             source_xlsx_path="samples/template.xlsx",
+#             out_xlsx_path="samples/template_filled.xlsx",
+#             include_comments=True,
+#         )
