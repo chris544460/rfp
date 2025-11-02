@@ -88,6 +88,8 @@ def collect_relevant_snippets(
     if DEBUG:
         print("[qa_core] searching for context snippets")
 
+    # The "both" option runs each specialized index to keep recall high while
+    # downstream filtering removes overlapping snippets.
     if mode == "both":
         per_mode_k = max(1, k)
         hits = []
@@ -104,6 +106,8 @@ def collect_relevant_snippets(
         except AssertionError:
             if DEBUG:
                 print("[qa_core] blend index unavailable; skipping blend search")
+        # Blend approximates semantic search across all corpora, but we still
+        # call the question/answer specific indices to capture niche matches.
         hits.extend(
             search(
                 q,
@@ -134,6 +138,8 @@ def collect_relevant_snippets(
     if extra_docs:
         if DEBUG:
             print(f"[qa_core] LLM searching {len(extra_docs)} uploaded docs")
+        # Uploaded documents are searched via the LLM helper. It is slower than
+        # the vector index, so we only invoke it when users attach files.
         hits.extend(search_uploaded_docs(q, extra_docs, llm))
 
     if progress:
@@ -155,6 +161,7 @@ def collect_relevant_snippets(
                 f"    {i}. id={doc_id} score={score:.3f} source={src} text='{snippet}'"
             )
 
+    # Track seen snippet bodies so we do not surface redundant context rows.
     seen_snippets = set()
     rows: List[Tuple[str, str, str, float, str]] = []
     low_confidence = 0
@@ -182,6 +189,8 @@ def collect_relevant_snippets(
             date_str = "unknown"
 
         if score < min_confidence:
+            # A per-run confidence threshold lets enterprise users dial down
+            # noisy matches without retraining or editing the index.
             low_confidence += 1
             if DEBUG:
                 print(
@@ -236,6 +245,8 @@ def collect_relevant_snippets(
                 diagnostics.append(entry)
             continue
 
+        # Labels are assigned in discovery order so downstream renumbering can
+        # preserve user-facing ordering even when we drop low-confidence hits.
         lbl = f"[{len(rows)+1}]"
         rows.append((lbl, src_name, txt, score, date_str))
         seen_snippets.add(txt)
@@ -323,7 +334,9 @@ def answer_question(
             print("[qa_core] no relevant context found; returning fallback answer")
         return "No relevant information found.", []
 
-    # Build the context block presented to the model
+    # Build a compact provenance block: "[1] filename: snippet".
+    # This format keeps prompts short while still allowing deterministic
+    # Word/Excel comments later on.
     ctx_block = "\n\n".join(
         f"{lbl} {src}: {snippet}" for (lbl, src, snippet, _, _) in rows
     )
@@ -340,10 +353,14 @@ def answer_question(
     else:
         length_instr = PRESET_INSTRUCTIONS.get(length or "medium", "")
 
+    # Inject the length guidance inline so the reusable prompt template stays
+    # oblivious to UI-specific knobs (dropdown length vs. explicit word count).
     prompt = f"{length_instr}\n\n{PROMPTS['answer_llm'].format(context=ctx_block, question=q)}"
 
     ans = ""
     comments: List[Tuple[str, str, str, float, str]] = []
+    # The retry loop mitigates the occasional "citations but no comments" bug
+    # we observed with some models. We bail early once comments look sane.
     for attempt in range(MAX_COMMENT_RETRIES + 1):
         if DEBUG:
             print(f"[qa_core] calling language model (attempt {attempt + 1})")
@@ -378,6 +395,8 @@ def answer_question(
                 if tok not in order:
                     order.append(tok)
 
+        # Some models jumble citation numbers; remap them to a monotonic series
+        # so downstream display logic can rely on simple 1..N markers.
         mapping = {old: f"[{i+1}]" for i, old in enumerate(order)}
         if DEBUG:
             print(f"[qa_core] citation order: {order}")
@@ -387,6 +406,7 @@ def answer_question(
             nums = [n.strip() for n in match.group(1).split(",")]
             return "".join(mapping.get(f"[{n}]", f"[{n}]") for n in nums)
 
+        # Renumbering here keeps answer text and exported comments consistent.
         ans = CITATION_RE.sub(_repl, ans)
         if DEBUG:
             print("[qa_core] renumbered citations")

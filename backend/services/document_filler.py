@@ -32,6 +32,7 @@ class DocumentFiller:
     ) -> Dict[str, Any]:
         answers_payload = [self._prepare_answer_for_storage(entry) for entry in qa_results]
 
+        # Write to a temp path so Streamlit can offer a real file download.
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
         tmp.close()
         write_excel_answers(
@@ -101,6 +102,8 @@ class DocumentFiller:
         for qa in qa_results:
             slot_id = qa.get("slot_id")
             if slot_id:
+                # Persist the sanitized answer so we can merge with the original
+                # slot payload when writing the final document.
                 storage = self._prepare_answer_for_storage(qa)
                 slot_map[str(slot_id)] = storage
                 slot_answers[str(slot_id)] = qa
@@ -128,6 +131,7 @@ class DocumentFiller:
             gen_name="document_filler.responder",
         )
 
+        # Clean up the scratch JSON files once the docx writer is done.
         for temp_path in (answers_tmp.name, slots_tmp.name):
             try:
                 os.unlink(temp_path)
@@ -182,6 +186,8 @@ class DocumentFiller:
     ) -> Dict[str, Any]:
         answers_text = [qa.get("answer", "") for qa in qa_results]
         comments = [qa.get("raw_comments") or [] for qa in qa_results]
+        # Summaries mimic the docx layout used in slot-filling so the UX stays
+        # consistent across document types.
         doc_bytes = self._generate_summary_doc(
             questions=list(questions),
             answers=answers_text,
@@ -218,6 +224,8 @@ class DocumentFiller:
         return {"downloads": downloads, "qa_pairs": qa_pairs}
 
     def _prepare_answer_for_storage(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        # Only persist the bare minimum for downstream writers; the UI keeps the
+        # richer payload in-memory.
         return {
             "text": entry.get("answer", ""),
             "citations": entry.get("citations") or {},
@@ -227,6 +235,7 @@ class DocumentFiller:
         text = entry.get("answer", "")
         citations = entry.get("citations") or {}
         if not include_citations:
+            # Callers may strip citations for exports intended for redacted sharing.
             return text
         return {"text": text, "citations": citations}
 
@@ -284,6 +293,7 @@ class DocumentFiller:
         mime: Optional[str],
         order: int,
     ) -> Dict[str, Any]:
+        # Read the file into memory so we can hand Streamlit a bytes payload.
         data = Path(path).read_bytes()
         try:
             os.unlink(path)

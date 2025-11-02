@@ -22,6 +22,8 @@ def _resolve_concurrency(value: Optional[int]) -> int:
         except ValueError:
             print(f"[WARN] Invalid CLI_STREAMLIT_CONCURRENCY '{env}'; falling back to default")
     if resolved is None:
+        # Pick a sensible default for local laptops: bound by CPU count but
+        # capped to avoid overwhelming rate-limited backends.
         cpu_default = max(1, (os.cpu_count() or 4))
         resolved = min(8, max(2, cpu_default))
     return max(1, resolved)
@@ -47,6 +49,8 @@ class DocumentJobController:
         include_citations = config["include_citations"]
         extra_doc_names = config.get("extra_doc_names", [])
 
+        # Central job record consumed by both the UI loop and finalize step.
+        # It captures worker futures, intermediate answers, and download info.
         job: Dict[str, Any] = {
             "status": "running",
             "mode": None,
@@ -70,6 +74,8 @@ class DocumentJobController:
             "include_citations": include_citations,
         }
 
+        # Route to the correct workflow: Excel slots, docx slot injection, or
+        # plain Q/A summary depending on file type and user toggles.
         if suffix in {".xlsx", ".xls"}:
             job.update(self._schedule_excel(config, responder, extractor))
         elif suffix == ".docx" and not config["docx_as_text"]:
@@ -90,6 +96,8 @@ class DocumentJobController:
             info = future_info[future]
             if future.done():
                 idx = info["index"]
+                # Futures complete out-of-order; only record the first terminal
+                # result for each slot/question.
                 if 0 <= idx < len(answers) and answers[idx] is None:
                     try:
                         result = future.result()
@@ -115,6 +123,8 @@ class DocumentJobController:
                 executor.shutdown(wait=False)
                 job["executor"] = None
             if job.get("status") == "running":
+                # Consumers treat "ready_for_finalize" as a cue to generate
+                # output bundles (downloads, docx injection, etc.).
                 job["status"] = "ready_for_finalize"
 
     def finalize(self, job: Dict[str, Any]) -> None:
@@ -149,6 +159,7 @@ class DocumentJobController:
                         "raw_comments": comments,
                     }
                 )
+            # build_excel_bundle handles temp files + download metadata for the UI.
             bundle = filler.build_excel_bundle(
                 source_path=config["input_path"],
                 schema=schema,
@@ -195,6 +206,7 @@ class DocumentJobController:
                         "slot_id": slot_id,
                     }
                 )
+            # For docx we keep both answered file and metadata about skipped slots.
             bundle = filler.build_docx_slot_bundle(
                 source_path=config["input_path"],
                 slots_payload=slots_payload,
@@ -308,6 +320,8 @@ class DocumentJobController:
                         q = (entry.get("question_text") or "").strip() or "[blank question text]"
                         st.markdown(f"- **{q}** — {reason}")
 
+        # Each QA card gets its own placeholder so we can stream answers as they
+        # complete without rerendering the entire list.
         qa_box = st.container()
         for idx in range(total):
             question_text = questions_text[idx] if idx < len(questions_text) else f"Question {idx + 1}"
@@ -350,6 +364,8 @@ class DocumentJobController:
             "answers": [None] * total,
         }
         if total > 0:
+            # Allow operators to tune concurrency via env var while keeping a
+            # hard upper bound so we respect API rate limits.
             worker_limit = _resolve_concurrency(None) or total
             worker_limit = max(1, min(worker_limit, total))
             executor = ThreadPoolExecutor(max_workers=worker_limit)
@@ -382,6 +398,8 @@ class DocumentJobController:
             "answers": [None] * total,
         }
         if total > 0:
+            # Docx slot answering can be slow; keep concurrency modest to avoid
+            # saturating the language model or file IO.
             worker_limit = _resolve_concurrency(None) or total
             worker_limit = max(1, min(worker_limit, total))
             executor = ThreadPoolExecutor(max_workers=worker_limit)
@@ -409,6 +427,8 @@ class DocumentJobController:
             "treat_docx_as_text": treat_docx_as_text,
         }
         if total > 0:
+            # Summary mode is cheaper, so we can lean on the same concurrency
+            # guard used elsewhere to prevent runaway thread counts.
             worker_limit = _resolve_concurrency(None) or total
             worker_limit = max(1, min(worker_limit, total))
             executor = ThreadPoolExecutor(max_workers=worker_limit)
@@ -428,6 +448,8 @@ class DocumentJobController:
 
 def _run_excel_task(responder, question_text: str) -> Dict[str, Any]:
     result = responder.answer(question_text)
+    # Excel mode keeps the original responder payload for live display but
+    # stores a flattened structure for the workbook writer.
     return {
         "question": question_text,
         "answer_payload": result,
@@ -462,6 +484,8 @@ def _run_docx_task(responder, slot: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_summary_task(responder, question_text: str) -> Dict[str, Any]:
     result = responder.answer(question_text)
+    # Summary bundle mirrors the Excel storage shape so downstream exporters
+    # can reuse serialization helpers.
     return {
         "question": question_text,
         "answer_payload": result,
@@ -485,6 +509,8 @@ def _sanitize_table_answer(answer) -> str:
         text = str(answer or "")
     text = re.sub(r"\[\d+\]", "", text)
 
+    # The docx writer struggles with raw markdown tables. Flatten them into a
+    # short sentence so the final document reads naturally.
     def _collapse_table_like(line: str) -> str:
         working = line.replace("\t", " | ").strip()
         if not working:

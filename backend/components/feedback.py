@@ -61,6 +61,7 @@ class FeedbackUI:
         answer: str,
         message_payload: Dict[str, Any],
     ) -> None:
+        # Track submissions per message so we do not show the form twice.
         submitted_map = st.session_state.setdefault("chat_feedback_submitted", {})
         feedback_key = f"chat_{message_index}"
         if submitted_map.get(feedback_key):
@@ -136,6 +137,7 @@ class FeedbackUI:
         container: Optional[Any] = None,
         title: str = "How was this answer?",
     ) -> bool:
+        # Deduplicate feedback per card: one submission per document answer.
         submitted_map = st.session_state.setdefault("doc_card_feedback_submitted", {})
         run_name = (run_context or {}).get("uploaded_name") or "document"
         feedback_key = f"{run_name}_card_{int(card_index)}"
@@ -144,6 +146,8 @@ class FeedbackUI:
             target.caption("Feedback recorded — thank you!")
             return False
 
+        # Allow callers to inject a custom container; default to a collapsible
+        # expander so the page stays compact.
         context_manager = container or st.expander(title, expanded=False)
         with context_manager:
             rating_key = f"card_rating_{feedback_key}"

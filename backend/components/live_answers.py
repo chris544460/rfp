@@ -12,6 +12,8 @@ from .feedback import FeedbackUI
 def create_live_placeholder(container, idx: int, question_text: str):
     if container is None:
         return None
+    # Streamlit cannot mutate text in-place, so we pre-render a placeholder card
+    # for each question and update it once the async answer arrives.
     cleaned_q = ' '.join((question_text or '').strip().split())
     col = container.columns(1)[0]
     with col:
@@ -25,6 +27,8 @@ def create_live_placeholder(container, idx: int, question_text: str):
 
 
 def _normalize_citation_entry(comment):
+    # Accept a wide range of citation shapes (dict, list, scalar) so older runs
+    # and new pipelines alike render consistently.
     def _clean(value):
         return str(value).strip() if value not in (None, "") else ""
 

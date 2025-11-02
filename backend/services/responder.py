@@ -38,6 +38,8 @@ class Responder:
         self.extra_docs = extra_docs or []
 
     def with_updates(self, **overrides: Any) -> "Responder":
+        # Build a fresh Responder so Streamlit can tweak per-request knobs
+        # without mutating the shared instance held in session state.
         params = {
             "llm_client": overrides.get("llm_client", self.llm),
             "search_mode": overrides.get("search_mode", self.search_mode),
@@ -95,6 +97,8 @@ class Responder:
     ) -> List[Dict[str, Any]]:
         normalized: List[Tuple[int, str, Dict[str, Any]]] = []
         for idx, item in enumerate(questions):
+            # The Streamlit UI can pass bare strings or rich dict metadata; we
+            # normalize here so batching logic can treat everything uniformly.
             if isinstance(item, str):
                 normalized.append((idx, item, {}))
             elif isinstance(item, dict):
@@ -119,6 +123,8 @@ class Responder:
 
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                # Fan out questions to the worker pool but retain the original
+                # ordering so downstream consumers can match answers by index.
                 future_map = {
                     pool.submit(_run_single, idx, q_text): (idx, q_text, meta)
                     for idx, q_text, meta in normalized
@@ -166,6 +172,8 @@ class Responder:
         payload["question"] = payload.get("question") or question_text
         payload["answer"] = formatted["text"]
         payload["citations"] = formatted["citations"]
+        # Keep the raw snippet tuples only if the caller asked for citations;
+        # otherwise we avoid leaking potentially sensitive context strings.
         include = self.include_citations if include_citations is None else include_citations
         payload["raw_comments"] = comments if include else []
         return payload
@@ -180,6 +188,8 @@ class Responder:
         text = ans or ""
         citations: Dict[str, Dict[str, Any]] = {}
         if not include:
+            # Consumers like Excel/Word exports rely on bracket markers; strip
+            # them when callers explicitly disable citations.
             text = re.sub(r"\[\d+\]", "", text)
             comments = []
         else:

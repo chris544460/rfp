@@ -24,6 +24,7 @@ def _load_input_text(path: str) -> str:
             from PyPDF2 import PdfReader
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("PyPDF2 is required to read PDF inputs") from exc
+        # Fall back to a naive text extraction; good enough for seeded PDFs.
         out: List[str] = []
         with p.open("rb") as f:
             reader = PdfReader(f)
@@ -37,6 +38,8 @@ def _load_input_text(path: str) -> str:
 
 
 def _extract_questions(text: str, llm_client) -> List[str]:
+    # Use the shared prompt so the LLM extracts numbered lines the UI knows how
+    # to parse. We trim the leading numerals here.
     prompt = _EXTRACT_PROMPT.format(text=text)
     result = llm_client.get_completion(prompt)
     if isinstance(result, tuple):
@@ -71,6 +74,8 @@ class QuestionExtractor:
             return self._extract_from_excel(path_obj)
         if suffix == ".docx" and not treat_docx_as_text:
             return self._extract_from_docx_slots(path_obj)
+        # Fallback: load the raw text (PDF/Docx/plain) and ask the LLM to tease
+        # out numbered questions.
         return self.extract_from_text(_load_input_text(str(path_obj)), source=str(path_obj))
 
     def extract_from_text(self, text: str, *, source: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -93,6 +98,7 @@ class QuestionExtractor:
         return payload
 
     def _extract_from_excel(self, path: Path) -> List[Dict[str, Any]]:
+        # Warm the interpreter cache so worksheet-level heuristics run only once.
         collect_non_empty_cells(str(path))
         schema = ask_sheet_schema(str(path))
         questions = []
