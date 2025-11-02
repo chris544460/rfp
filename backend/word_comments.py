@@ -62,7 +62,6 @@ def ensure_comments_ext_part(document):
         return add_part()
 
     # Fallback: create an empty commentsExt part manually
-    from docx.opc.constants import RELATIONSHIP_TYPE as RT
     from docx.opc.package import OpcPackage
     from docx.opc.part import XmlPart
 
@@ -161,10 +160,13 @@ def add_comment_to_run(
         pass
 
     # Anchor comment to the run
-    start = OxmlElement("w:commentRangeStart"); start.set(qn("w:id"), str(next_id))
-    end   = OxmlElement("w:commentRangeEnd");   end.set(qn("w:id"), str(next_id))
+    start = OxmlElement("w:commentRangeStart")
+    start.set(qn("w:id"), str(next_id))
+    end = OxmlElement("w:commentRangeEnd")
+    end.set(qn("w:id"), str(next_id))
     ref_r = OxmlElement("w:r")
-    ref   = OxmlElement("w:commentReference");  ref.set(qn("w:id"), str(next_id))
+    ref = OxmlElement("w:commentReference")
+    ref.set(qn("w:id"), str(next_id))
     ref_r.append(ref)
 
     parent = run._r.getparent()

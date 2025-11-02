@@ -2,7 +2,12 @@
 # rfp_docx_apply_answers.py
 # Apply answers into a DOCX according to slots.json produced by rfp_docx_slot_finder.py
 
-import argparse, json, os, sys, re, asyncio
+import argparse
+import json
+import os
+import sys
+import re
+import asyncio
 import importlib
 import traceback
 from types import ModuleType
@@ -135,75 +140,167 @@ def _append_with_bold(paragraph: Paragraph, text: str, bold_state: bool) -> bool
     return bold_state
 
 
+def _parse_citation_numbers(raw_numbers: str) -> List[str]:
+    return [num.strip() for num in raw_numbers.split(",") if num.strip()]
+
+
+def _resolve_citation_entry(citations: Dict[object, object], num: str):
+    entry = citations.get(num)
+    if entry is None:
+        try:
+            entry = citations.get(int(num))  # type: ignore[arg-type]
+        except (ValueError, TypeError):
+            entry = None
+    return entry
+
+
+def _extract_comment_payload(data: object) -> Tuple[Optional[str], Optional[str]]:
+    snippet: Optional[str] = None
+    source_file: Optional[str] = None
+    if isinstance(data, dict):
+        raw_snippet = data.get("text") or data.get("snippet") or data.get("content")
+        snippet = str(raw_snippet) if raw_snippet else None
+        source_value = data.get("source_file")
+        source_file = str(source_value) if source_value else None
+    elif data is not None:
+        snippet = str(data)
+    return snippet, source_file
+
+
+def _append_citation_runs(
+    paragraph: Paragraph,
+    doc,
+    citation_numbers: List[str],
+    citations: Dict[object, object],
+) -> None:
+    for idx, num in enumerate(citation_numbers):
+        run = paragraph.add_run(f"[{num}]")
+        data = _resolve_citation_entry(citations, num)
+        snippet, source_file = _extract_comment_payload(data)
+        if snippet:
+            add_comment_to_run(
+                doc,
+                run,
+                snippet,
+                bold_prefix="Source Text: ",
+                source_file=source_file,
+            )
+        if idx < len(citation_numbers) - 1:
+            paragraph.add_run(" ")
+
+
+def _render_text_line(
+    paragraph: Paragraph,
+    line: str,
+    citations: Dict[object, object],
+    bold_state: bool,
+    doc,
+) -> bool:
+    pos = 0
+    for match in _CITATION_RE.finditer(line):
+        if match.start() > pos:
+            bold_state = _append_with_bold(paragraph, line[pos:match.start()], bold_state)
+        citation_numbers = _parse_citation_numbers(match.group(1))
+        if citation_numbers:
+            _append_citation_runs(paragraph, doc, citation_numbers, citations)
+        pos = match.end()
+    if pos < len(line):
+        bold_state = _append_with_bold(paragraph, line[pos:], bold_state)
+    return bold_state
+
+
 def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, object]) -> None:
     """Write text and attach Word comments to each [n] marker using Utilities helper."""
     doc = paragraph.part.document
     parts = text.split("\n")
     bold_state = False
-    for li, line in enumerate(parts):
-        pos = 0
-        for match in _CITATION_RE.finditer(line):
-            if match.start() > pos:
-                bold_state = _append_with_bold(paragraph, line[pos:match.start()], bold_state)
-            nums = [n.strip() for n in match.group(1).split(",")]
-            for i, num in enumerate(nums):
-                run = paragraph.add_run(f"[{num}]")
-                data = citations.get(num) or citations.get(int(num))
-                snippet = None
-                source_file = None
-                if isinstance(data, dict):
-                    snippet = data.get("text") or data.get("snippet") or data.get("content")
-                    source_file = data.get("source_file")
-                elif data is not None:
-                    snippet = str(data)
-                if snippet:
-                    add_comment_to_run(
-                        doc,
-                        run,
-                        str(snippet),
-                        bold_prefix="Source Text: ",
-                        source_file=source_file,
-                    )
-                if i < len(nums) - 1:
-                    paragraph.add_run(" ")
-            pos = match.end()
-        if pos < len(line):
-            bold_state = _append_with_bold(paragraph, line[pos:], bold_state)
-        if li < len(parts) - 1:
+    for index, line in enumerate(parts):
+        bold_state = _render_text_line(paragraph, line, citations, bold_state, doc)
+        if index < len(parts) - 1:
             paragraph.add_run().add_break()
 
 # ---------------------------- Answers loader ----------------------------
+def _populate_from_mapping(by_id: Dict[str, object], by_q: Dict[str, object], mapping: Dict[str, object]) -> None:
+    for key, value in mapping.items():
+        key_str = str(key)
+        if key_str.startswith("slot_"):
+            by_id[key_str] = value
+        else:
+            by_q[normalize_question(key_str)] = value
+
+
+def _populate_from_grouped_dict(by_id: Dict[str, object], by_q: Dict[str, object], data: Dict[str, object]) -> None:
+    for key, value in (data.get("by_id") or {}).items():
+        by_id[str(key)] = value
+    for key, value in (data.get("by_question") or {}).items():
+        by_q[normalize_question(key)] = value
+
+
+def _populate_from_list(by_id: Dict[str, object], by_q: Dict[str, object], items: List[object]) -> None:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "slot_id" in item:
+            by_id[str(item["slot_id"])] = item.get("answer", "")
+        elif "question_text" in item:
+            question = normalize_question(str(item["question_text"]))
+            by_q[question] = item.get("answer", "")
+
+
 def load_answers(answers_path: str) -> Tuple[Dict[str, object], Dict[str, object]]:
     with open(answers_path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
     by_id: Dict[str, object] = {}
     by_q: Dict[str, object] = {}
+
     if isinstance(data, dict):
         if "by_id" in data or "by_question" in data:
-            for k, v in (data.get("by_id") or {}).items():
-                by_id[str(k)] = v
-            for k, v in (data.get("by_question") or {}).items():
-                by_q[normalize_question(k)] = v
+            _populate_from_grouped_dict(by_id, by_q, data)
         else:
-            for k, v in data.items():
-                kstr = str(k)
-                if kstr.startswith("slot_"):
-                    by_id[kstr] = v
-                else:
-                    by_q[normalize_question(kstr)] = v
-    elif isinstance(data, list):
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            if "slot_id" in item:
-                by_id[str(item["slot_id"])] = item.get("answer", "")
-            elif "question_text" in item:
-                by_q[normalize_question(str(item["question_text"]))] = item.get("answer", "")
-    else:
-        raise ValueError("Unsupported answers JSON structure.")
-    return by_id, by_q
+            _populate_from_mapping(by_id, by_q, data)
+        return by_id, by_q
+
+    if isinstance(data, list):
+        _populate_from_list(by_id, by_q, data)
+        return by_id, by_q
+
+    raise ValueError("Unsupported answers JSON structure.")
 
 # ---------------------------- Locator resolution ----------------------------
+def _coerce_int(value: object) -> Optional[int]:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_paragraph_from_paragraphs(paragraphs: List[Paragraph], index: Optional[int]) -> Optional[Paragraph]:
+    if index is None or not (0 <= index < len(paragraphs)):
+        return None
+    return paragraphs[index]
+
+
+def _get_paragraph_from_blocks(blocks: List[Union[Paragraph, Table]], index: Optional[int]) -> Optional[Paragraph]:
+    if index is None or not (0 <= index < len(blocks)):
+        return None
+    candidate = blocks[index]
+    return candidate if isinstance(candidate, Paragraph) else None
+
+
+def _extract_q_block_index(meta: Optional[Dict[str, object]]) -> Optional[int]:
+    if not isinstance(meta, dict):
+        return None
+    return _coerce_int(meta.get("q_block"))
+
+
+def _first_paragraph(*candidates: Optional[Paragraph]) -> Optional[Paragraph]:
+    for candidate in candidates:
+        if candidate is not None:
+            return candidate
+    return None
+
+
 def resolve_anchor_paragraph(
     doc: docx.document.Document,
     blocks: List[Union[Paragraph, Table]],
@@ -212,29 +309,78 @@ def resolve_anchor_paragraph(
     locator: Dict[str, object],
     meta: Optional[Dict[str, object]]
 ) -> Optional[Paragraph]:
-    ltype = str(locator.get("type", ""))
-    p_idx = locator.get("paragraph_index")
-    p_idx = int(p_idx) if p_idx is not None else None
-    if ltype == "paragraph":
-        if p_idx is None:
-            return None
-        if 0 <= p_idx < len(paragraphs):
-            return paragraphs[p_idx]
-        return None
-    if ltype == "paragraph_after":
-        qb = None
-        if isinstance(meta, dict) and "q_block" in meta:
-            try:
-                qb = int(meta["q_block"])
-            except Exception:
-                qb = None
-        if qb is not None and 0 <= qb < len(blocks) and isinstance(blocks[qb], Paragraph):
-            return blocks[qb]  # type: ignore
-        if p_idx is not None and 0 <= p_idx < len(blocks) and isinstance(blocks[p_idx], Paragraph):
-            return blocks[p_idx]  # type: ignore
-        if p_idx is not None and 0 <= p_idx < len(paragraphs):
-            return paragraphs[p_idx]
+    locator_type = str(locator.get("type", ""))
+    paragraph_index = _coerce_int(locator.get("paragraph_index"))
+
+    if locator_type == "paragraph":
+        return _get_paragraph_from_paragraphs(paragraphs, paragraph_index)
+
+    if locator_type == "paragraph_after":
+        q_block_index = _extract_q_block_index(meta)
+        return _first_paragraph(
+            _get_paragraph_from_blocks(blocks, q_block_index),
+            _get_paragraph_from_blocks(blocks, paragraph_index),
+            _get_paragraph_from_paragraphs(paragraphs, paragraph_index),
+        )
+
     return None
+
+def _find_anchor_indices(
+    blocks: List[Union[Paragraph, Table]],
+    block_to_para: Dict[int, int],
+    paragraphs: List[Paragraph],
+    anchor_para: Paragraph,
+) -> Tuple[Optional[int], int]:
+    for block_index, block in enumerate(blocks):
+        if isinstance(block, Paragraph) and block is anchor_para:
+            return block_index, block_to_para[block_index]
+    return None, paragraphs.index(anchor_para)
+
+
+def _collect_following_paragraphs_from_blocks(
+    blocks: List[Union[Paragraph, Table]],
+    start_index: int,
+) -> List[Paragraph]:
+    collected: List[Paragraph] = []
+    for block in blocks[start_index:]:
+        if isinstance(block, Paragraph):
+            text = (block.text or "").strip()
+            if _looks_like_question(text):
+                break
+            collected.append(block)
+    return collected
+
+
+def _collect_following_paragraphs_from_paragraphs(
+    paragraphs: List[Paragraph],
+    start_index: int,
+) -> List[Paragraph]:
+    collected: List[Paragraph] = []
+    for paragraph in paragraphs[start_index:]:
+        text = (paragraph.text or "").strip()
+        if _looks_like_question(text):
+            break
+        collected.append(paragraph)
+    return collected
+
+
+def _ensure_paragraph_offset(
+    anchor_para: Paragraph,
+    collected: List[Paragraph],
+    offset: int,
+) -> Paragraph:
+    if len(collected) >= offset:
+        return collected[offset - 1]
+
+    needed = offset - len(collected)
+    dbg(f"Not enough following paragraphs: need to insert {needed} after anchor")
+    last = collected[-1] if collected else anchor_para
+    created = last
+    for _ in range(needed):
+        created = insert_paragraph_after(created, "")
+        collected.append(created)
+    return collected[offset - 1]
+
 
 def get_target_paragraph_after_anchor(
     blocks: List[Union[Paragraph, Table]],
@@ -243,80 +389,108 @@ def get_target_paragraph_after_anchor(
     anchor_para: Paragraph,
     offset: int
 ) -> Paragraph:
-    anchor_para_index = None
-    anchor_block_index = None
-    for bi, b in enumerate(blocks):
-        if isinstance(b, Paragraph) and b is anchor_para:
-            anchor_block_index = bi
-            anchor_para_index = block_to_para[bi]
-            break
-    if anchor_block_index is None or anchor_para_index is None:
-        anchor_para_index = paragraphs.index(anchor_para)
-    subsequent_paras: List[Paragraph] = []
+    anchor_block_index, anchor_para_index = _find_anchor_indices(
+        blocks,
+        block_to_para,
+        paragraphs,
+        anchor_para,
+    )
+
     if anchor_block_index is not None:
-        for b in blocks[anchor_block_index + 1:]:
-            if isinstance(b, Paragraph):
-                txt = (b.text or "").strip()
-                if _looks_like_question(txt):
-                    break
-                subsequent_paras.append(b)
+        following = _collect_following_paragraphs_from_blocks(
+            blocks,
+            anchor_block_index + 1,
+        )
     else:
-        for p in paragraphs[anchor_para_index + 1:]:
-            txt = (p.text or "").strip()
-            if _looks_like_question(txt):
-                break
-            subsequent_paras.append(p)
-    if len(subsequent_paras) >= offset:
-        return subsequent_paras[offset - 1]
-    needed = offset - len(subsequent_paras)
-    dbg(f"Not enough following paragraphs: need to insert {needed} after anchor")
-    last = anchor_para if not subsequent_paras else subsequent_paras[-1]
-    created: Paragraph = last
-    for _ in range(needed):
-        created = insert_paragraph_after(created, "")
-        subsequent_paras.append(created)
-    return subsequent_paras[offset - 1]
+        following = _collect_following_paragraphs_from_paragraphs(
+            paragraphs,
+            anchor_para_index + 1,
+        )
+
+    return _ensure_paragraph_offset(anchor_para, following, offset)
 
 # ---------------------------- Apply operations ----------------------------
-def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") -> None:
+def _extract_answer_components(answer: object) -> Tuple[str, Dict[str, object]]:
     if isinstance(answer, dict):
-        answer_text = str(answer.get("text", ""))
+        text = str(answer.get("text", ""))
         citations = _normalize_citations(answer.get("citations"))
     else:
-        answer_text = str(answer)
+        text = str(answer)
         citations = {}
+    return text, citations
+
+
+def _apply_answer_text(
+    paragraph: Paragraph,
+    answer_text: str,
+    citations: Dict[str, object],
+    *,
+    append: bool = False,
+) -> None:
+    if append:
+        paragraph.add_run("\n")
+    else:
+        paragraph.text = ""
+    _add_text_with_citations(paragraph, answer_text, citations)
+
+
+def _get_next_paragraph(target: Paragraph) -> Optional[Paragraph]:
+    next_p_element = target._p.getnext()
+    if next_p_element is not None and next_p_element.tag.endswith("p"):
+        return Paragraph(next_p_element, target._parent)
+    return None
+
+
+def _replace_if_matching(
+    paragraph: Paragraph,
+    answer_text: str,
+    citations: Dict[str, object],
+    answer_norm: str,
+    *,
+    note: str,
+) -> bool:
+    if (paragraph.text or "").strip() != answer_norm:
+        return False
+    paragraph.text = ""
+    _add_text_with_citations(paragraph, answer_text, citations)
+    dbg(note)
+    return True
+
+
+def apply_to_paragraph(target: Paragraph, answer: object, mode: str = "fill") -> None:
+    answer_text, citations = _extract_answer_components(answer)
     existing = target.text or ""
+
     if mode == "replace":
-        target.text = ""
-        _add_text_with_citations(target, answer_text, citations)
+        _apply_answer_text(target, answer_text, citations, append=False)
         return
+
     if mode == "append":
-        if existing:
-            target.add_run("\n")
-        else:
-            target.text = ""
-        _add_text_with_citations(target, answer_text, citations)
+        _apply_answer_text(target, answer_text, citations, append=bool(existing))
         return
+
     if is_blank_para(target) or not existing.strip():
-        target.text = ""
-        _add_text_with_citations(target, answer_text, citations)
+        _apply_answer_text(target, answer_text, citations, append=False)
         return
 
     answer_norm = answer_text.strip()
-    if existing.strip() == answer_norm:
-        target.text = ""
-        _add_text_with_citations(target, answer_text, citations)
-        dbg("Replaced existing matching answer in target paragraph.")
+    if _replace_if_matching(
+        target,
+        answer_text,
+        citations,
+        answer_norm,
+        note="Replaced existing matching answer in target paragraph.",
+    ):
         return
 
-    next_p_elm = target._p.getnext()
-    next_para = None
-    if next_p_elm is not None and next_p_elm.tag.endswith("p"):
-        next_para = Paragraph(next_p_elm, target._parent)
-    if next_para and (next_para.text or "").strip() == answer_norm:
-        next_para.text = ""
-        _add_text_with_citations(next_para, answer_text, citations)
-        dbg("Replaced matching answer in subsequent paragraph.")
+    next_para = _get_next_paragraph(target)
+    if next_para and _replace_if_matching(
+        next_para,
+        answer_text,
+        citations,
+        answer_norm,
+        note="Replaced matching answer in subsequent paragraph.",
+    ):
         return
 
     new_p = insert_paragraph_after(target, "")
@@ -349,6 +523,86 @@ def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: st
         p = cell.paragraphs[0]
         _add_text_with_citations(p, answer_text, citations)
 
+
+
+def _validate_choice_meta(
+    choices_meta: List[Dict[str, object]],
+    index: Optional[int],
+) -> Optional[Dict[str, object]]:
+    if not isinstance(choices_meta, list):
+        return None
+    if index is None or not (0 <= index < len(choices_meta)):
+        return None
+    return choices_meta[index]
+
+
+def _resolve_choice_paragraph(
+    blocks: List[Union[Paragraph, Table]],
+    meta: Dict[str, object],
+) -> Optional[Paragraph]:
+    block_index = int(meta.get("block_index", -1))
+    if not (0 <= block_index < len(blocks)):
+        return None
+    paragraph = blocks[block_index]
+    return paragraph if isinstance(paragraph, Paragraph) else None
+
+
+def _determine_choice_style(style: Optional[str], prefix: str) -> str:
+    if style not in (None, "", "auto"):
+        return style
+    if any(ch in prefix for ch in _CHECKBOX_CHARS):
+        return "checkbox"
+    trimmed = prefix.strip()
+    if trimmed in ("()", "[]"):
+        return "fill"
+    return "highlight"
+
+
+def _mark_checkbox_style(paragraph: Paragraph, text: str) -> None:
+    paragraph.text = re.sub(rf"[{_CHECKBOX_CHARS}]", "☑", text, count=1)
+
+
+def _mark_fill_style(paragraph: Paragraph, text: str, prefix: str) -> None:
+    mark = prefix[0] + "X" + prefix[1]
+    paragraph.text = text.replace(prefix, mark, 1)
+
+
+def _mark_highlight_style(paragraph: Paragraph) -> None:
+    for run in paragraph.runs:
+        run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+
+
+def _mark_with_style(paragraph: Paragraph, style: str, prefix: str, text: str) -> None:
+    if style == "checkbox" and any(ch in prefix for ch in _CHECKBOX_CHARS):
+        _mark_checkbox_style(paragraph, text)
+    elif style == "fill" and prefix.strip() in ("()", "[]"):
+        _mark_fill_style(paragraph, text, prefix)
+    elif style == "highlight":
+        _mark_highlight_style(paragraph)
+    else:
+        paragraph.text = "X " + text
+
+
+def _add_choice_comment(
+    doc: docx.document.Document,
+    paragraph: Paragraph,
+    comment_text: Optional[str],
+) -> None:
+    if not comment_text:
+        return
+    run = paragraph.runs[0] if paragraph.runs else paragraph.add_run()
+    try:
+        add_comment_to_run(
+            doc,
+            run,
+            comment_text,
+            bold_prefix="Source Text: ",
+            source_file=None,
+        )
+    except Exception as exc:
+        dbg(f"  -> error adding comment: {exc}")
+
+
 def mark_multiple_choice(
     doc: docx.document.Document,
     blocks: List[Union[Paragraph, Table]],
@@ -357,44 +611,98 @@ def mark_multiple_choice(
     style: Optional[str] = None,
     comment_text: Optional[str] = None,
 ) -> None:
-    if not isinstance(choices_meta, list):
+    meta = _validate_choice_meta(choices_meta, index)
+    if meta is None:
         return
-    if index is None or not (0 <= index < len(choices_meta)):
+
+    paragraph = _resolve_choice_paragraph(blocks, meta)
+    if paragraph is None:
         return
-    meta = choices_meta[index]
-    b_idx = int(meta.get("block_index", -1))
-    if not (0 <= b_idx < len(blocks)):
-        return
-    para = blocks[b_idx]
-    if not isinstance(para, Paragraph):
-        return
+
     prefix = str(meta.get("prefix", ""))
-    text = para.text or ""
-    if style in (None, "", "auto"):
-        if any(ch in prefix for ch in _CHECKBOX_CHARS):
-            style = "checkbox"
-        elif prefix.strip() in ("()", "[]"):
-            style = "fill"
-        else:
-            style = "highlight"
-    if style == "checkbox" and any(ch in prefix for ch in _CHECKBOX_CHARS):
-        para.text = re.sub(rf"[{_CHECKBOX_CHARS}]", "☑", text, count=1)
-    elif style == "fill" and prefix.strip() in ("()", "[]"):
-        mark = prefix[0] + "X" + prefix[1]
-        para.text = text.replace(prefix, mark, 1)
-    elif style == "highlight":
-        for run in para.runs:
-            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
-    else:
-        para.text = "X " + text
-    if comment_text:
-        run = para.runs[0] if para.runs else para.add_run()
-        try:
-            add_comment_to_run(
-                doc, run, comment_text, bold_prefix="Source Text: ", source_file=None
-            )
-        except Exception as e:
-            dbg(f"  -> error adding comment: {e}")
+    text = paragraph.text or ""
+    resolved_style = _determine_choice_style(style, prefix)
+
+    _mark_with_style(paragraph, resolved_style, prefix, text)
+    _add_choice_comment(doc, paragraph, comment_text)
+
+
+
+def _extract_slot_metadata(slot: Dict[str, object]) -> Tuple[str, str, Dict[str, object]]:
+    sid = str(slot.get("id", ""))
+    question_text = str(slot.get("question_text") or "").strip()
+    meta = slot.get("meta") or {}
+    return sid, question_text, meta
+
+
+def _resolve_existing_answer(
+    sid: str,
+    question_text: str,
+    by_id: Dict[str, object],
+    by_q: Dict[str, object],
+) -> Optional[object]:
+    if sid in by_id:
+        return by_id[sid]
+    key = normalize_question(question_text)
+    return by_q.get(key)
+
+
+def _prepare_generation_kwargs(
+    slot: Dict[str, object],
+    meta: Dict[str, object],
+) -> Dict[str, object]:
+    kwargs: Dict[str, object] = {}
+    if slot.get("answer_type") == "multiple_choice":
+        choice_meta = meta.get("choices", [])
+        kwargs["choices"] = [
+            c.get("text") if isinstance(c, dict) else str(c)
+            for c in choice_meta
+        ]
+        kwargs["choice_meta"] = choice_meta
+    return kwargs
+
+
+def _queue_generation_job(
+    jobs: List[Tuple[str, str, Dict[str, object]]],
+    slot: Dict[str, object],
+    sid: str,
+    question_text: str,
+    meta: Dict[str, object],
+) -> None:
+    kwargs = _prepare_generation_kwargs(slot, meta)
+    jobs.append((sid, question_text, kwargs))
+
+
+def _generate_missing_answers(
+    jobs: List[Tuple[str, str, Dict[str, object]]],
+    generator: Optional[Callable[..., object]],
+    gen_name: str,
+) -> Tuple[Dict[str, object], int]:
+    if not jobs or generator is None:
+        return {}, 0
+
+    async def run_all() -> List[Tuple[str, Optional[object]]]:
+        async def worker(sid: str, question: str, kwargs: Dict[str, object]):
+            try:
+                ans = await asyncio.to_thread(generator, question, **kwargs)
+                dbg(f"Generated answer via {gen_name} for slot {sid}: {ans}")
+                return sid, ans
+            except Exception as exc:
+                dbg(f"Generator error for question '{question}': {exc}")
+                dbg(f"Generator error details: {traceback.format_exc()}")
+                return sid, None
+
+        tasks = [asyncio.create_task(worker(*job)) for job in jobs]
+        return await asyncio.gather(*tasks)
+
+    results = asyncio.run(run_all())
+    updates: Dict[str, object] = {}
+    generated = 0
+    for sid, ans in results:
+        if ans is not None:
+            updates[sid] = ans
+            generated += 1
+    return updates, generated
 
 
 def _build_answers_map(
@@ -406,55 +714,26 @@ def _build_answers_map(
     gen_name: str,
 ) -> Tuple[Dict[str, Optional[object]], int]:
     answers: Dict[str, Optional[object]] = {}
-    to_generate: List[Tuple[str, str, dict]] = []
+    jobs: List[Tuple[str, str, Dict[str, object]]] = []
+
     for slot in slots:
-        sid = slot.get("id", "")
-        question_text = (slot.get("question_text") or "").strip()
-        meta = slot.get("meta") or {}
-        answer: Optional[object]
-        if sid in by_id:
-            answer = by_id[sid]
-        else:
-            key = normalize_question(question_text)
-            answer = by_q.get(key)
+        sid, question_text, meta = _extract_slot_metadata(slot)
+        answer = _resolve_existing_answer(sid, question_text, by_id, by_q)
+
         if answer is None and generator is not None:
             if not question_text:
                 dbg(f"Skipping generation for slot {sid}: blank question text")
             else:
-                kwargs: Dict[str, object] = {}
-                if slot.get("answer_type") == "multiple_choice":
-                    choice_meta = meta.get("choices", [])
-                    kwargs["choices"] = [
-                        c.get("text") if isinstance(c, dict) else str(c)
-                        for c in choice_meta
-                    ]
-                    kwargs["choice_meta"] = choice_meta
-                to_generate.append((sid, question_text, kwargs))
+                _queue_generation_job(jobs, slot, sid, question_text, meta)
+
         answers[sid] = answer
 
-    generated = 0
-    if to_generate and generator is not None:
-
-        async def run_all() -> List[Tuple[str, Optional[object]]]:
-            async def worker(sid: str, question: str, kwargs: Dict[str, object]):
-                try:
-                    ans = await asyncio.to_thread(generator, question, **kwargs)
-                    dbg(f"Generated answer via {gen_name} for slot {sid}: {ans}")
-                    return sid, ans
-                except Exception as exc:
-                    dbg(f"Generator error for question '{question}': {exc}")
-                    dbg(f"Generator error details: {traceback.format_exc()}")
-                    return sid, None
-
-            tasks = [asyncio.create_task(worker(*item)) for item in to_generate]
-            return await asyncio.gather(*tasks)
-
-        for sid, ans in asyncio.run(run_all()):
-            if ans is not None:
-                answers[sid] = ans
-                generated += 1
+    updates, generated = _generate_missing_answers(jobs, generator, gen_name)
+    for sid, value in updates.items():
+        answers[sid] = value
 
     return answers, generated
+
 
 
 def _format_citation_comment(raw: object) -> Optional[str]:
@@ -711,15 +990,24 @@ def apply_answers_to_docx(
         "generated": generated,
     }
 
-# ---------------------------- CLI ----------------------------
-def main():
+
+def _parse_arguments(argv: List[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Apply answers into a DOCX using slots.json")
     ap.add_argument("docx_path", help="Path to the original .docx")
     ap.add_argument("slots_json", help="Path to slots.json produced by the detector")
-    ap.add_argument("answers_json", nargs="?", default="", help="Path to answers.json (optional if using --generate)")
+    ap.add_argument(
+        "answers_json",
+        nargs="?",
+        default="",
+        help="Path to answers.json (optional if using --generate)",
+    )
     ap.add_argument("-o", "--out", required=True, help="Path to write updated .docx")
-    ap.add_argument("--mode", choices=["replace", "append", "fill"], default="fill",
-                    help="Write mode for paragraphs/cells (default: fill)")
+    ap.add_argument(
+        "--mode",
+        choices=["replace", "append", "fill"],
+        default="fill",
+        help="Write mode for paragraphs/cells (default: fill)",
+    )
     ap.add_argument(
         "--debug",
         dest="debug",
@@ -733,48 +1021,84 @@ def main():
         action="store_false",
         help="Disable debug logging",
     )
-    ap.add_argument("--generate", metavar="MODULE:FUNC", help="Dynamically generate answers by calling given function for each question (e.g. rfp_utils.my_module:gen_answer)")
-    if len(sys.argv) == 1:
+    ap.add_argument(
+        "--generate",
+        metavar="MODULE:FUNC",
+        help="Dynamically generate answers by calling given function for each question (e.g. rfp_utils.my_module:gen_answer)",
+    )
+    if len(argv) == 1:
         ap.print_help()
         sys.exit(1)
-    args = ap.parse_args()
+    return ap.parse_args(argv[1:])
+
+
+def _validate_input_paths(docx_path: str, slots_json: str, debug: bool) -> None:
+    required_paths = [docx_path, slots_json]
+    for path in required_paths:
+        if not os.path.isfile(path):
+            print(f"Error: '{path}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+    if debug:
+        print("[apply_answers] validated input paths")
+
+
+def _maybe_load_generator(spec: Optional[str], debug: bool) -> Tuple[Optional[Callable[..., object]], str]:
+    if not spec:
+        return None, ""
+    if ":" not in spec:
+        print("Error: --generate requires MODULE:FUNC", file=sys.stderr)
+        sys.exit(1)
+    module_name, func_name = spec.split(":", 1)
+    try:
+        module: ModuleType = importlib.import_module(module_name)
+        func = getattr(module, func_name)
+        if not callable(func):
+            raise AttributeError
+        if debug:
+            print(f"Loaded generator function {spec}")
+        return func, spec
+    except Exception as exc:
+        print(f"Error: failed to load generator function {spec}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _validate_answers_path(path: str, generate_spec: Optional[str]) -> None:
+    if not path or path == "-":
+        return
+    if os.path.isfile(path):
+        return
+    if generate_spec:
+        return
+    print(
+        f"Error: answers file '{path}' does not exist and no --generate specified.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _print_debug_header(args: argparse.Namespace) -> None:
+    print("### APPLY DEBUG MODE ON ###")
+    print(f"[apply_answers] source={args.docx_path} slots={args.slots_json}")
+
+
+def _print_summary(summary: Dict[str, int]) -> None:
+    print("--- APPLY SUMMARY ---")
+    for key, value in summary.items():
+        print(f"{key}: {value}")
+
+# ---------------------------- CLI ----------------------------
+
+def main():
+    args = _parse_arguments(sys.argv)
 
     global DEBUG
     DEBUG = args.debug
     if DEBUG:
-        print("### APPLY DEBUG MODE ON ###")
-        print(f"[apply_answers] source={args.docx_path} slots={args.slots_json}")
+        _print_debug_header(args)
 
-    required_paths = [args.docx_path, args.slots_json]
-    for p in required_paths:
-        if not os.path.isfile(p):
-            print(f"Error: '{p}' does not exist.", file=sys.stderr)
-            sys.exit(1)
-    if DEBUG:
-        print("[apply_answers] validated input paths")
-    if args.answers_json and args.answers_json != "-" and not os.path.isfile(args.answers_json):
-        if not args.generate:
-            print(f"Error: answers file '{args.answers_json}' does not exist and no --generate specified.", file=sys.stderr)
-            sys.exit(1)
-
-    gen_callable = None
-    gen_name = ""
-    if args.generate:
-        if ":" not in args.generate:
-            print("Error: --generate requires MODULE:FUNC", file=sys.stderr)
-            sys.exit(1)
-        mod_name, func_name = args.generate.split(":", 1)
-        try:
-            module: ModuleType = importlib.import_module(mod_name)
-            gen_callable = getattr(module, func_name)
-            if not callable(gen_callable):
-                raise AttributeError
-            gen_name = args.generate
-            if DEBUG:
-                print(f"Loaded generator function {gen_name}")
-        except Exception as e:
-            print(f"Error: failed to load generator function {args.generate}: {e}", file=sys.stderr)
-            sys.exit(1)
+    _validate_input_paths(args.docx_path, args.slots_json, DEBUG)
+    _validate_answers_path(args.answers_json, args.generate)
+    generator, gen_name = _maybe_load_generator(args.generate, DEBUG)
 
     try:
         if DEBUG:
@@ -785,17 +1109,14 @@ def main():
             args.answers_json,
             args.out,
             mode=args.mode,
-            generator=gen_callable,
-            gen_name=gen_name
+            generator=generator,
+            gen_name=gen_name,
         )
-    except Exception as e:
-        print(f"Error: failed to apply answers: {e}", file=sys.stderr)
+    except Exception as exc:
+        print(f"Error: failed to apply answers: {exc}", file=sys.stderr)
         sys.exit(1)
 
     if DEBUG:
-        print("--- APPLY SUMMARY ---")
-        for k, v in summary.items():
-            print(f"{k}: {v}")
-
+        _print_summary(summary)
 if __name__ == "__main__":
     main()
