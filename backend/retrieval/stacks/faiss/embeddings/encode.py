@@ -10,9 +10,9 @@ Azure-OpenAI embedding endpoint, blends answer/question vectors, and writes:
 
 Typical usage:
 
-    python backend/embeddings/encode.py \
-        --file documents/xlsx/structured_extraction/parsed_json_outputs/embedding_data.json \
-        --output vector_store \
+    python backend/retrieval/stacks/faiss/embeddings/encode.py \
+        --file backend/retrieval/stacks/faiss/structured_extraction/parsed_json_outputs/embedding_data.json \
+        --output backend/retrieval/vector_store/answer \
         --workers 4 \
         --model text-embedding-ada-002 \
         --weight 0.65
@@ -27,9 +27,8 @@ import concurrent.futures
 from pathlib import Path
 from typing import List, Dict
 
-DEFAULT_EMBEDDING_FILE = Path(
-    "documents/xlsx/structured_extraction/parsed_json_outputs/embedding_data.json"
-)
+STACK_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EMBEDDING_FILE = STACK_ROOT / "structured_extraction" / "parsed_json_outputs" / "embedding_data.json"
 
 import numpy as np
 import faiss
@@ -219,7 +218,7 @@ def main():
         default=str(DEFAULT_EMBEDDING_FILE),
         help=(
             "Path to the JSON file of records (each must have 'text' and metadata.question). "
-            "Defaults to documents/xlsx/structured_extraction/parsed_json_outputs/embedding_data.json."
+            "Defaults to backend/retrieval/stacks/faiss/structured_extraction/parsed_json_outputs/embedding_data.json."
         ),
     )
     ap.add_argument(

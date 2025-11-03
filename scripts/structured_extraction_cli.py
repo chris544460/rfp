@@ -2,13 +2,14 @@
 
 This script guides a user through the typical pipeline:
 
-1. Place source files (DOCX or Excel) inside ``structured_extraction/data_sources/``.
+1. Place source files (DOCX or Excel) inside
+   ``backend/retrieval/stacks/faiss/structured_extraction/data_sources/``.
 2. Convert a selected file into JSON using the parsers in
-   ``structured_extraction/parser.py`` (outputs land in
-   ``parsed_json_outputs/``).
+   ``structured_extraction/parser.py`` (outputs land in the neighbouring
+   ``parsed_json_outputs/`` directory).
 3. Optionally rebuild the aggregated datasets produced by
    ``structured_extraction/prepare_data.py`` (outputs stored in
-   ``structured_extraction/parsed_json_outputs/``).
+   ``parsed_json_outputs/``).
 
 Running the script presents a small interactive menu allowing the user to:
 
@@ -29,14 +30,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from backend.documents.xlsx.structured_extraction.parser import (
+from backend.retrieval.stacks.faiss.structured_extraction.parser import (
     MixedDocParser,
     process_excel_file_with_detection,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STRUCTURED_EXTRACTION_DIR = (
-    BASE_DIR.parent / "backend" / "documents" / "xlsx" / "structured_extraction"
+    BASE_DIR.parent / "backend" / "retrieval" / "stacks" / "faiss" / "structured_extraction"
 )
 DATA_SOURCES_DIR = STRUCTURED_EXTRACTION_DIR / "data_sources"
 PARSED_OUTPUT_DIR = STRUCTURED_EXTRACTION_DIR / "parsed_json_outputs"
@@ -156,8 +157,10 @@ def parse_file(source_path: Path) -> None:
 def run_prepare_data() -> None:
     """Execute ``prepare_data.py`` and move its outputs into ``prepared_data``."""
 
-    print("\nRunning structured_extraction.prepare_data ...")
-    runpy.run_module("structured_extraction.prepare_data", run_name="__main__")
+    print("\nRunning backend.retrieval.stacks.faiss.structured_extraction.prepare_data ...")
+    runpy.run_module(
+        "backend.retrieval.stacks.faiss.structured_extraction.prepare_data", run_name="__main__"
+    )
 
     for filename in ["embedding_data.json", "fine_tuning_data.json"]:
         produced = PREPARED_OUTPUT_DIR / filename

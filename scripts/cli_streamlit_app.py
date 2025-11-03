@@ -34,7 +34,7 @@ from docx.text.paragraph import Paragraph
 from .cli_app import build_docx, extract_questions, load_input_text
 from backend.answering.qa_engine import answer_question, collect_relevant_snippets
 from backend.llm.completions_client import CompletionsClient, get_openai_completion
-from backend.documents.xlsx.structured_extraction.interpreter_sheet import collect_non_empty_cells
+from backend.retrieval.stacks.faiss.structured_extraction.interpreter_sheet import collect_non_empty_cells
 from backend.documents.xlsx.slot_finder import ask_sheet_schema
 from backend.documents.xlsx.apply_answers import write_excel_answers
 from backend.documents.docx.slot_finder import (
@@ -211,8 +211,9 @@ def load_fund_tags() -> List[str]:
     path = (
         Path(__file__).resolve().parent.parent
         / "backend"
-        / "documents"
-        / "xlsx"
+        / "retrieval"
+        / "stacks"
+        / "faiss"
         / "structured_extraction"
         / "parsed_json_outputs"
         / "embedding_data.json"

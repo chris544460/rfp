@@ -42,22 +42,18 @@ except ModuleNotFoundError:
 
 load_dotenv()
 
-# Resolve repository root dynamically (two levels up from this file)
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
+# Resolve directories relative to the FAISS stack package.
+STACK_ROOT = Path(__file__).resolve().parent
+BACKEND_ROOT = STACK_ROOT.parents[2]
 RETRIEVAL_DIR = BACKEND_ROOT / "retrieval"
 VECTOR_DIR = RETRIEVAL_DIR / "vector_store"
 ANSWER_DIR = VECTOR_DIR / "answer"
 QUESTION_DIR = VECTOR_DIR / "question"
 BLEND_DIR = VECTOR_DIR / "blend"  # optional
 
-RECORDS_PATH = (
-    BACKEND_ROOT
-    / "documents"
-    / "xlsx"
-    / "structured_extraction"
-    / "parsed_json_outputs"
-    / "embedding_data.json"
-)
+STRUCTURED_EXTRACTION_DIR = STACK_ROOT / "structured_extraction"
+PARSED_OUTPUT_DIR = STRUCTURED_EXTRACTION_DIR / "parsed_json_outputs"
+RECORDS_PATH = PARSED_OUTPUT_DIR / "embedding_data.json"
 
 SURF_URL = os.getenv(
     "SURFACE_EMB_URL",

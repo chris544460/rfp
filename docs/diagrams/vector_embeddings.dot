@@ -4,7 +4,7 @@ digraph VectorEmbeddingPipeline {
     splines=true;
     node [shape=rect, style="rounded,filled", fillcolor="#eef3ff", fontname="Helvetica", fontsize=11];
 
-    dataset [label="Q/A dataset\nstructured_extraction/…/embedding_data.json\nEach record: answer text, matching question, tags"];
+    dataset [label="Q/A dataset\nfaiss/structured_extraction/…/embedding_data.json\nEach record: answer text, matching question, tags"];
     orchestrator [label="embed.sh\nRuns encode.py with three weights:\n• w = 0.0 → answer view\n• w = 1.0 → question view\n• w = 0.65 → blended view"];
     dataset -> orchestrator;
 

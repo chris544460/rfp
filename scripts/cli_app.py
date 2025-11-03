@@ -37,7 +37,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from backend.documents.xlsx.structured_extraction.interpreter_sheet import collect_non_empty_cells
+from backend.retrieval.stacks.faiss.structured_extraction.interpreter_sheet import collect_non_empty_cells
 
 from backend.llm.completions_client import CompletionsClient
 from backend.retrieval.vector_search import search

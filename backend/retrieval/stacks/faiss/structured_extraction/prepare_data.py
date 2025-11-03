@@ -4,7 +4,7 @@ Aggregate parsed Excel QA JSON into embedding and fine-tuning datasets.
 This script runs after the structured extraction pipeline saves per-question JSON
 files under `parsed_json_outputs/`.  It produces two consolidated artifacts:
 
-* `embedding_data.json` - consumed by `backend.embeddings.encode` to refresh the vector store.
+* `embedding_data.json` - consumed by `backend.retrieval.stacks.faiss.embeddings.encode` to refresh the vector store.
 * `fine_tuning_data.json` - a SQuAD-style payload for extractive QA experiments.
 """
 

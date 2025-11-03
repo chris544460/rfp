@@ -7,14 +7,14 @@
 
 set -euo pipefail
 
-EMBED_FILE="${1:-documents/xlsx/structured_extraction/parsed_json_outputs/embedding_data.json}"
+EMBED_FILE="${1:-backend/retrieval/stacks/faiss/structured_extraction/parsed_json_outputs/embedding_data.json}"
 OUTPUT_DIR="${2:-backend/retrieval/vector_store/blend}"
 AZURE_JSON="${3:-backend/retrieval/vector_store/blend/azure_payload.json}"
 WORKERS="${WORKERS:-4}"
 MODEL="${MODEL:-text-embedding-ada-002}"
 WEIGHT="${WEIGHT:-0.65}"
 
-python3 backend/embeddings/encode.py \
+python3 backend/retrieval/stacks/faiss/embeddings/encode.py \
   --file "${EMBED_FILE}" \
   --output "${OUTPUT_DIR}" \
   --workers "${WORKERS}" \

@@ -8,7 +8,7 @@ from typing import Any, Dict, IO, List, Optional, Tuple
 
 from docx import Document
 
-from backend.documents.xlsx.structured_extraction.interpreter_sheet import collect_non_empty_cells
+from backend.retrieval.stacks.faiss.structured_extraction.interpreter_sheet import collect_non_empty_cells
 from backend.documents.docx.slot_finder import extract_slots_from_docx
 from backend.documents.xlsx.slot_finder import ask_sheet_schema
 from backend.prompts import read_prompt

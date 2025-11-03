@@ -250,8 +250,9 @@ def load_fund_tags() -> List[str]:
     path = (
         base_dir
         / "backend"
-        / "documents"
-        / "xlsx"
+        / "retrieval"
+        / "stacks"
+        / "faiss"
         / "structured_extraction"
         / "parsed_json_outputs"
         / "embedding_data.json"
