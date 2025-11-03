@@ -24,7 +24,24 @@ def gather_vector_hits(
 ) -> List[dict]:
     """Delegate to the active retrieval stack (legacy helper)."""
 
-    stack = get_stack()
+    try:
+        stack = get_stack()
+    except LookupError as exc:
+        # Attempt to lazily instantiate the FAISS stack so legacy callers get
+        # a more actionable error when vector assets are missing.
+        try:
+            from backend.retrieval.stacks.faiss.stack import FaissRetrievalStack
+
+            stack = FaissRetrievalStack()
+            register_stack(stack, default=True)
+        except Exception as inner_exc:  # pragma: no cover - depends on env assets
+            raise RuntimeError(
+                "No retrieval stack has been registered. Ensure FAISS indexes are "
+                "built (run backend/retrieval/stacks/faiss/embeddings/embed.sh) and "
+                "optional dependencies are installed."
+            ) from inner_exc
+        else:
+            register_stack(stack, default=True)
     return stack.search(
         query,
         mode=mode,
