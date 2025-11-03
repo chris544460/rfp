@@ -1,6 +1,6 @@
 {
-  "aiSearchEndpoint": "https://example.search.windows.net",
-  "indexName": "rfp-stack-index",
+  "aiSearchEndpoint": "https://search-gio.search.windows.net",
+  "indexName": "rfp-ai",
   "semanticConfiguration": "default-rfp-ai",
   "vectorField": "embedding",
   "contentField": "content",
