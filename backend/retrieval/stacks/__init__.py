@@ -24,6 +24,10 @@ try:
         "backend.retrieval.vector_store.search",
         importlib.import_module("backend.retrieval.stacks.faiss.stack"),
     )
+    sys.modules.setdefault(
+        "backend.retrieval.vect_stacks",
+        importlib.import_module("backend.retrieval.vect_stacks"),
+    )
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     _faiss_pkg = None  # type: ignore
 
