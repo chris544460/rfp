@@ -42,10 +42,10 @@ def configure_page() -> None:
 
 @st.cache_resource
 def cached_install(package: str) -> None:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", package])
 
 
-SETUP_VERSION = "2025-10-pydantic-fix"
+SETUP_VERSION = "2025-10-pydantic-upgrade"
 
 REQUIRED_PACKAGES = [
     "certifi",
@@ -54,7 +54,8 @@ REQUIRED_PACKAGES = [
     "idna",
     "numpy",
     "packaging",
-    "pydantic==1.10.15",
+    "pydantic==2.11.7",
+    "pydantic_core==2.33.2",
     "python-dotenv",
     "requests",
     "urllib3",
