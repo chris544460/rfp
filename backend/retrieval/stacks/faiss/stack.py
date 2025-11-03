@@ -297,9 +297,13 @@ class FaissRetrievalStack(RetrievalStack):
         raise ValueError(f"Unknown mode '{mode}'")
 
 
-# Instantiate and register the default stack immediately on import.
-DEFAULT_STACK = FaissRetrievalStack()
-register_stack(DEFAULT_STACK, default=True)
+# Instantiate and register the default stack immediately on import when assets are available.
+try:  # pragma: no cover - depends on deployment assets
+    DEFAULT_STACK = FaissRetrievalStack()
+except Exception:
+    DEFAULT_STACK = None  # type: ignore
+else:
+    register_stack(DEFAULT_STACK, default=True)
 
 
 def search(
@@ -311,6 +315,8 @@ def search(
     include_vectors: bool = False,
 ) -> List[Dict[str, object]]:
     """Module-level helper delegating to the default FAISS stack."""
+    if DEFAULT_STACK is None:
+        raise RuntimeError("FAISS stack is not initialized; vector_store assets missing?")
     return DEFAULT_STACK.search(
         query,
         mode=mode,
@@ -322,6 +328,8 @@ def search(
 
 def index_size(mode: str) -> int:
     """Return the number of records available for the requested mode."""
+    if DEFAULT_STACK is None:
+        raise RuntimeError("FAISS stack is not initialized; vector_store assets missing?")
     return DEFAULT_STACK.index_size(mode)
 
 
