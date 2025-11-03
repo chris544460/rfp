@@ -19,7 +19,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - informative but non-fat
     _AZURE_IMPORT_ERROR = ModuleNotFoundError(
         "The Azure retrieval stack requires the 'azure-search-documents' package. "
         "Install it with: pip install azure-search-documents"
-    ) from exc
+    )
+    _AZURE_IMPORT_ERROR.__cause__ = exc
 
 from .completitions import Completitions
 

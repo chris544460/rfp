@@ -1,17 +1,23 @@
-"""Convenience wrapper around the Azure AI Search retrieval stack."""
+"""Legacy compatibility helpers for Azure AI Search.
+
+This module mirrors the historic `backend.azure_ai_search` interface so that
+callers can continue importing `RetrieverClient` and `create_filter` while the
+modern retrieval stack implementation lives under `backend.retrieval.stacks`.
+"""
 
 from __future__ import annotations
 
 from typing import List, Optional
 
-from backend.retrieval.stacks.azure.stack import AzureSearchStack
+from .stack import AzureSearchStack
 
 
 def create_filter(tag: Optional[str], source: Optional[str]) -> Optional[str]:
-    """Mirror the manager-provided filter helper for downstream callers."""
+    """Build an Azure Search OData filter mirroring the legacy helper."""
 
     if not tag and not source:
         return None
+
     parts: List[str] = []
     if tag:
         safe_tag = tag.replace("'", "''")
@@ -23,12 +29,7 @@ def create_filter(tag: Optional[str], source: Optional[str]) -> Optional[str]:
 
 
 class RetrieverClient:
-    """
-    Thin adapter that mirrors the manager-provided helper.
-
-    It delegates to the AzureSearchStack so that downstream code (tests, UI)
-    can continue calling `search_data` without knowing about the stack interface.
-    """
+    """Adapter that preserves the legacy `search_data` helper."""
 
     def __init__(self) -> None:
         self._stack = AzureSearchStack()
@@ -41,7 +42,7 @@ class RetrieverClient:
         *,
         k: int = 20,
     ) -> List[dict]:
-        """Fetch Azure AI Search results, optionally filtering by tag/source."""
+        """Fetch results using the Azure Search stack, optionally filtering."""
 
         hits = self._stack.search(query, fund_filter=tag, mode="answer", k=k)
         if source:
@@ -55,3 +56,4 @@ class RetrieverClient:
 
 
 __all__ = ["RetrieverClient", "create_filter"]
+
