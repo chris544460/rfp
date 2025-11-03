@@ -105,3 +105,14 @@ if AzureSearchStack is not None:
     _stacks_module.__all__.append("AzureSearchStack")
 
 sys.modules.setdefault("backend.stacks", _stacks_module)
+
+# Provide a similar module for document helpers so callers can import:
+#     from backend.document import QuestionExtractor
+_document_module = types.ModuleType("backend.document", doc="Convenience access to document tooling.")
+_document_module.__all__ = []
+
+if QuestionExtractor is not None:
+    _document_module.QuestionExtractor = QuestionExtractor
+    _document_module.__all__.append("QuestionExtractor")
+
+sys.modules.setdefault("backend.document", _document_module)
