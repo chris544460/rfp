@@ -44,14 +44,46 @@ def configure_page() -> None:
 def cached_install(package: str) -> str:
     """Install a package and return pip's output (cached per package)."""
 
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", package],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+    def _run(cmd):
+        return subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+    install_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", package]
+    result = _run(install_cmd)
+    if result.returncode == 0:
+        return result.stdout
+
+    output = result.stdout or ""
+    lowered = output.lower()
+    if "permission denied" in lowered or "errno 13" in lowered:
+        user_cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--user",
+            package,
+        ]
+        user_result = _run(user_cmd)
+        if user_result.returncode == 0:
+            return (output + "\n" + (user_result.stdout or "")).strip()
+        raise subprocess.CalledProcessError(
+            user_result.returncode,
+            user_cmd,
+            output=(user_result.stdout or ""),
+        )
+
+    raise subprocess.CalledProcessError(
+        result.returncode,
+        install_cmd,
+        output=output,
     )
-    return result.stdout
 
 
 SETUP_VERSION = "2025-10-pydantic-v2"
