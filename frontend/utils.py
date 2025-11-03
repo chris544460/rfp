@@ -4,9 +4,28 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from backend.llm.completions_client import CompletionsClient, get_openai_completion
+if TYPE_CHECKING:  # pragma: no cover - import only for type checking
+    from backend.llm.completions_client import CompletionsClient as _CompletionsClient
+    from backend.llm.completions_client import (
+        get_openai_completion as _get_openai_completion,
+    )
+
+_COMPLETIONS_CLIENT: Any = None
+_GET_OPENAI_COMPLETION: Any = None
+
+
+def _ensure_completions_clients():
+    global _COMPLETIONS_CLIENT, _GET_OPENAI_COMPLETION
+    if _COMPLETIONS_CLIENT is None or _GET_OPENAI_COMPLETION is None:
+        from backend.llm.completions_client import CompletionsClient, get_openai_completion
+
+        _COMPLETIONS_CLIENT = CompletionsClient
+        _GET_OPENAI_COMPLETION = get_openai_completion
+    assert _COMPLETIONS_CLIENT is not None
+    assert _GET_OPENAI_COMPLETION is not None
+    return _COMPLETIONS_CLIENT, _GET_OPENAI_COMPLETION
 
 
 class OpenAIClient:
@@ -16,6 +35,7 @@ class OpenAIClient:
         self.model = model
 
     def get_completion(self, prompt: str, json_output: bool = False):
+        _, get_openai_completion = _ensure_completions_clients()
         return get_openai_completion(prompt, self.model, json_output=json_output)
 
 
@@ -64,6 +84,7 @@ def select_top_preapproved_answers(
 
     model_name = os.environ.get("ALADDIN_RERANK_MODEL", "o3-2025-04-16_research")
     try:
+        CompletionsClient, _ = _ensure_completions_clients()
         client = CompletionsClient(model=model_name)
         content, _ = client.get_completion(prompt, json_output=True)
         data = json.loads(content or "{}")
