@@ -81,6 +81,7 @@ class AzureSearchStack(RetrievalStack):
         k: int = 6,
         fund_filter: Optional[str] = None,
         include_vectors: bool = False,
+        owner_id: str | None = None,
     ) -> List[Dict[str, object]]:
         """
         Execute a semantic + vector search against Azure AI Search.
@@ -97,11 +98,10 @@ class AzureSearchStack(RetrievalStack):
         if not embedding:
             return []
 
-        azure_filter = self._build_filter(fund_filter)
-        overfetch = max(k * 2, 20)
+        azure_filter = self._build_filter(fund_filter, owner_id)
         vector_query = VectorizedQuery(
             vector=embedding,
-            k_nearest_neighbors=overfetch,
+            k_nearest_neighbors=100,
             fields=self._vector_field,
         )
 
@@ -111,9 +111,9 @@ class AzureSearchStack(RetrievalStack):
             filter=azure_filter,
             semantic_configuration_name=self._semantic_config,
             query_type="semantic",
-            top=overfetch,
+            top=5,
             vector_filter_mode="postFilter",
-            select=["*", self._vector_field],
+            select="*",
         )
 
         hits: List[Dict[str, object]] = []
@@ -163,12 +163,19 @@ class AzureSearchStack(RetrievalStack):
                 "Azure retrieval stack does not support index_size lookup without query permissions."
             )
 
-    def _build_filter(self, fund_filter: Optional[str]) -> Optional[str]:
-        if not fund_filter:
-            return None
-        tag_field = self._tags_field or "tags"
-        safe_value = fund_filter.replace("'", "''")
-        return f"{tag_field}/any(t: t eq '{safe_value}')"
+    def _build_filter(self, fund_filter: Optional[str], owner_id: str | None) -> Optional[str]:
+        # Default visibility: documents with no owner or owned by the requesting user.
+        if owner_id is not None:
+            output = f"(ownerId eq null or ownerId eq '{owner_id}')"
+        else:
+            output = "ownerId eq null"
+
+        if fund_filter:
+            tag_field = self._tags_field or "tags"
+            safe_value = fund_filter.replace("'", "''")
+            output += f" and {tag_field}/any(t: t eq '{safe_value}')"
+
+        return output.strip() if output else None
 
 
 # Register stack on import when configuration is available.
