@@ -158,14 +158,16 @@ def ensure_packages() -> None:
     except Exception:
         user_paths = []
 
+    for module_name in list(sys.modules.keys()):
+        if module_name.startswith("pydantic") or module_name.startswith("packaging"):
+            sys.modules.pop(module_name, None)
+
     try:
         import importlib
 
-        for name in list(sys.modules.keys()):
-            if name.startswith("pydantic"):
-                del sys.modules[name]
         importlib.invalidate_caches()
         importlib.import_module("pydantic")
+        importlib.import_module("packaging.version")
     except Exception:
         pass
 
