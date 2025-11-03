@@ -41,11 +41,20 @@ def configure_page() -> None:
 
 
 @st.cache_resource
-def cached_install(package: str) -> None:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", package])
+def cached_install(package: str) -> str:
+    """Install a package and return pip's output (cached per package)."""
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", package],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return result.stdout
 
 
-SETUP_VERSION = "2025-10-pydantic-upgrade"
+SETUP_VERSION = "2025-10-pydantic-v2"
 
 REQUIRED_PACKAGES = [
     "certifi",
@@ -78,11 +87,16 @@ def ensure_packages() -> None:
     for idx, package in enumerate(REQUIRED_PACKAGES, start=1):
         try:
             cached_install(package)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
             progress_placeholder.empty()
-            st.error(
-                "Something went wrong while setting things up. Please try again or contact support."
+            output = (exc.output or "").strip()
+            message = (
+                f"pip failed while installing `{package}` (exit code {exc.returncode})."
+                " If you are running in a managed environment, install the dependency manually."
             )
+            st.error(message)
+            if output:
+                st.code(output[-2000:])
             return
         percent = int(idx / total * 100)
         message = f"Setting up step {idx} of {total}..."
