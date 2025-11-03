@@ -45,7 +45,7 @@ def cached_install(package: str) -> None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
 
-SETUP_VERSION = "2025-09-azure-feedback"
+SETUP_VERSION = "2025-10-pydantic-fix"
 
 REQUIRED_PACKAGES = [
     "certifi",
@@ -54,6 +54,7 @@ REQUIRED_PACKAGES = [
     "idna",
     "numpy",
     "packaging",
+    "pydantic==1.10.15",
     "python-dotenv",
     "requests",
     "urllib3",
