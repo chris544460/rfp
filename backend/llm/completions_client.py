@@ -28,6 +28,7 @@ import json
 import os
 import time
 import uuid
+from typing import Dict, List, Optional
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -83,7 +84,13 @@ class CompletionsClient:
             "gpt-4o": {"input": 5.0, "output": 15.0},
         }
 
-    def get_completion(self, prompt: str, json_output: bool = False) -> tuple[str, dict]:
+    def get_completion(
+        self,
+        prompt: str = "",
+        json_output: bool = False,
+        *,
+        messages: Optional[List[Dict[str, str]]] = None,
+    ) -> tuple[str, dict]:
         """Send a single chat completion request and return (reply, usage)."""
 
         # Try the regular async endpoint first
@@ -92,10 +99,11 @@ class CompletionsClient:
                 f"{self.base_url}/api/ai-platform/toolkit/chat-completion/v1/chatCompletions:compute"
             )
 
+            payload_messages = messages if messages is not None else [
+                {"prompt": prompt, "promptRole": "assistant"}
+            ]
             payload = {
-                "chatCompletionMessages": [
-                    {"prompt": prompt, "promptRole": "assistant"}
-                ],
+                "chatCompletionMessages": payload_messages,
                 "modelId": self.model,
             }
             if json_output:
@@ -134,19 +142,30 @@ class CompletionsClient:
             # If async fails, fall back to synchronous endpoint
             print(f"Async endpoint failed: {e}")
             print("Falling back to synchronous endpoint...")
-            return self._get_completion_sync(prompt, json_output)
+            return self._get_completion_sync(
+                prompt,
+                json_output,
+                messages=messages,
+            )
 
-    def _get_completion_sync(self, prompt: str, json_output: bool = False) -> tuple[str, dict]:
+    def _get_completion_sync(
+        self,
+        prompt: str = "",
+        json_output: bool = False,
+        *,
+        messages: Optional[List[Dict[str, str]]] = None,
+    ) -> tuple[str, dict]:
         """Send a single chat completion request using sync endpoint."""
 
         endpoint = (
             f"{self.base_url}/api/ai-platform/toolkit/chat-completion/v1/chatCompletionsSync:compute"
         )
 
+        payload_messages = messages if messages is not None else [
+            {"prompt": prompt, "promptRole": "assistant"}
+        ]
         payload = {
-            "chatCompletionMessages": [
-                {"prompt": prompt, "promptRole": "assistant"}
-            ],
+            "chatCompletionMessages": payload_messages,
             "modelId": self.model,
         }
         if json_output:

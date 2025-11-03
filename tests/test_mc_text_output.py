@@ -10,7 +10,7 @@ class DummyClient:
     def __init__(self, model: str | None = None):
         pass
 
-    def get_completion(self, prompt: str, json_output: bool = False):
+    def get_completion(self, prompt: str, json_output: bool = False, **kwargs):
         return "", {}
 
 fake_ac.CompletionsClient = DummyClient

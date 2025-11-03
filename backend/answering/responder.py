@@ -8,12 +8,14 @@ engine so Streamlit views, API callers, and background jobs can share the
 same batching and formatting logic.
 """
 
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from backend.retrieval.stacks import RetrievalStack, get_stack
+from backend.prompts import get_developer_prompt
 
 from .qa_engine import answer_question, collect_relevant_snippets
 
@@ -40,6 +42,7 @@ class Responder:
         extra_docs: Optional[List[str]] = None,
         retrieval_stack: Optional[Union[str, RetrievalStack]] = None,
         retrieval_backend: Optional[Union[str, RetrievalStack]] = None,
+        developer_prompt_team: Optional[str] = None,
     ) -> None:
         if retrieval_stack is None and retrieval_backend is not None:
             retrieval_stack = retrieval_backend
@@ -57,6 +60,8 @@ class Responder:
             self.retrieval_stack: Optional[RetrievalStack] = get_stack(retrieval_stack)
         else:
             self.retrieval_stack = retrieval_stack
+        self.developer_prompt_team = developer_prompt_team or os.getenv("RFP_DEVELOPER_PROMPT_TEAM")
+        self.developer_prompt = get_developer_prompt(self.developer_prompt_team)
 
     def with_updates(self, **overrides: Any) -> "Responder":
         """Return a new `Responder` using the current defaults plus any overrides."""
@@ -83,6 +88,9 @@ class Responder:
                 else self._retrieval_stack_param
                 if self._retrieval_stack_param is not None
                 else self.retrieval_stack,
+            ),
+            "developer_prompt_team": overrides.get(
+                "developer_prompt_team", self.developer_prompt_team
             ),
         }
         return Responder(**params)
@@ -198,6 +206,7 @@ class Responder:
             extra_docs=list(self.extra_docs),
             progress=progress,
             retrieval_stack=self.retrieval_stack,
+            developer_prompt=self.developer_prompt,
         )
 
     def _package_answer(

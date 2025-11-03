@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Optional
 
 
 def _resolve_prompts_dir() -> Path:
@@ -56,3 +57,36 @@ def _iter_prompt_files() -> Iterable[Path]:
 def load_prompts(defaults: Dict[str, str]) -> Dict[str, str]:
     """Load multiple prompt templates given a mapping of name->default."""
     return {k: read_prompt(k, v) for k, v in defaults.items()}
+
+
+_DEFAULT_DEVELOPER_PROMPT = (
+    "You are assisting with regulated RFP responses. Follow compliance guidance, stay factual, "
+    "and never invent information that is not grounded in the provided context."
+)
+
+
+def _sanitize_team_name(team: str) -> str:
+    """Normalize team identifiers so they map to filesystem-friendly prompt names."""
+    slug = re.sub(r"[^a-z0-9]+", "_", team.lower()).strip("_")
+    return slug or "default"
+
+
+def get_developer_prompt(team: Optional[str] = None) -> str:
+    """
+    Return the developer prompt text for the requested team.
+
+    Order of precedence:
+    1. Team-specific prompt file (prompts/developer/<team>.txt) when team is provided.
+    2. Default developer prompt file (prompts/developer/default.txt).
+    3. Hard-coded fallback instructions.
+    """
+    candidates = []
+    if team:
+        candidates.append(f"developer/{_sanitize_team_name(team)}")
+    candidates.append("developer/default")
+
+    for name in candidates:
+        prompt = read_prompt(name, "")
+        if prompt.strip():
+            return prompt
+    return _DEFAULT_DEVELOPER_PROMPT

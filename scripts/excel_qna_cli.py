@@ -124,7 +124,10 @@ class OpenAIClient:
     def __init__(self, model: str):
         self.model = model
 
-    def get_completion(self, prompt: str, json_output: bool = False):
+    def get_completion(self, prompt: str, json_output: bool = False, **kwargs):
+        messages = kwargs.get("messages")
+        if messages:
+            prompt = messages[-1]["prompt"]
         return get_openai_completion(prompt, self.model, json_output=json_output)
 
 

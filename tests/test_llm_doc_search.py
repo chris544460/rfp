@@ -21,7 +21,10 @@ from backend.retrieval.document_search import _extract_text_from_doc, search_upl
 
 
 class DummyLLM:
-    def get_completion(self, prompt: str):
+    def get_completion(self, prompt: str, **kwargs):
+        messages = kwargs.get("messages")
+        if messages:
+            prompt = messages[-1]["prompt"]
         if "Project Apollo is top secret." in prompt:
             return "YES: Project Apollo is top secret."
         if "Value 2" in prompt:

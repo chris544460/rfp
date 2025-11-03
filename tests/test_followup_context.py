@@ -10,7 +10,7 @@ class DummyClient:
     def __init__(self, model: str | None = None):
         pass
 
-    def get_completion(self, prompt: str, json_output: bool = False):
+    def get_completion(self, prompt: str, json_output: bool = False, **kwargs):
         return "", {}
 
 fake_ac.CompletionsClient = DummyClient
@@ -32,7 +32,10 @@ def test_followup_skips_search_and_uses_history(monkeypatch):
         search_calls.append(q)
         return "Initial answer [1]", [("1", "src.txt", "snippet", 0.9, "2024")]
 
-    def fake_completion(prompt, json_output=False):
+    def fake_completion(prompt, json_output=False, **kwargs):
+        messages = kwargs.get("messages")
+        if messages:
+            prompt = messages[-1]["prompt"]
         llm_calls.append(prompt)
         return "Follow-up reply", {}
 

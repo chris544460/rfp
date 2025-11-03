@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional docx dependency
 
 # Shared LLM client helpers and prompt loading utilities.
 from backend.llm.completions_client import CompletionsClient
-from backend.prompts import load_prompts
+from backend.prompts import get_developer_prompt, load_prompts
 
 
 # Default debug flag; defaults to True unless explicitly disabled via env.
@@ -434,13 +434,26 @@ def _length_instruction(length: Optional[str], approx_words: Optional[int]) -> s
     return PRESET_INSTRUCTIONS.get(length or "medium", "")
 
 
-def _invoke_llm(prompt: str, llm: CompletionsClient, question: str, attempt: int) -> str:
+def _invoke_llm(
+    prompt: str,
+    llm: CompletionsClient,
+    question: str,
+    attempt: int,
+    *,
+    developer_prompt: Optional[str] = None,
+) -> str:
     """Send the prompt to the configured completions client and normalise the response text."""
     if DEBUG:
         print(f"[qa_core] calling language model (attempt {attempt + 1})")
+        if developer_prompt:
+            print(f"[qa_core] developer prompt:\n{developer_prompt}")
         print(f"[qa_core] prompt:\n{prompt}")
         print(f"[qa_core] llm type: {type(llm)}")
-    raw_response = llm.get_completion(prompt)
+    messages = []
+    if developer_prompt:
+        messages.append({"prompt": developer_prompt, "promptRole": "developer"})
+    messages.append({"prompt": prompt, "promptRole": "user"})
+    raw_response = llm.get_completion(prompt, messages=messages)
     if DEBUG:
         print(f"[qa_core] raw response: {raw_response!r}")
     content = raw_response[0] if isinstance(raw_response, tuple) else raw_response
@@ -537,13 +550,20 @@ def _generate_answer_with_retries(
     prompt: str,
     llm: CompletionsClient,
     rows: List[Tuple[str, str, str, float, str]],
+    developer_prompt: Optional[str],
 ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
     """Call the LLM until citations align with snippets or we exhaust retry attempts."""
     answer = ""
     comments: List[Tuple[str, str, str, float, str]] = []
 
     for attempt in range(MAX_COMMENT_RETRIES + 1):
-        answer = _invoke_llm(prompt, llm, question, attempt)
+        answer = _invoke_llm(
+            prompt,
+            llm,
+            question,
+            attempt,
+            developer_prompt=developer_prompt,
+        )
         order = _extract_citation_order(answer)
         answer, mapping = _renumber_answer_citations(answer, order)
         comments = _build_comments_from_order(order, mapping, rows)
@@ -570,6 +590,7 @@ def answer_question(
     progress: Optional[Callable[[str], None]] = None,
     *,
     retrieval_stack: Optional[RetrievalStack] = None,
+    developer_prompt: Optional[str] = None,
 ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
     """
     Primary entrypoint consumed by `backend.answering.responder` and CLI utilities.
@@ -611,7 +632,17 @@ def answer_question(
     length_instr = _length_instruction(length, approx_words)
     prompt = f"{length_instr}\n\n{PROMPTS['answer_llm'].format(context=ctx_block, question=q)}"
 
-    ans, comments = _generate_answer_with_retries(q, prompt, llm, rows)
+    resolved_developer_prompt = developer_prompt or get_developer_prompt(
+        os.getenv("RFP_DEVELOPER_PROMPT_TEAM")
+    )
+
+    ans, comments = _generate_answer_with_retries(
+        q,
+        prompt,
+        llm,
+        rows,
+        resolved_developer_prompt,
+    )
 
     if DEBUG:
         print(f"[qa_core] returning answer with {len(comments)} comments")

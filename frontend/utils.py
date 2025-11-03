@@ -34,7 +34,10 @@ class OpenAIClient:
     def __init__(self, model: str) -> None:
         self.model = model
 
-    def get_completion(self, prompt: str, json_output: bool = False):
+    def get_completion(self, prompt: str, json_output: bool = False, **kwargs):
+        messages = kwargs.get("messages")
+        if messages:
+            prompt = messages[-1]["prompt"]
         _, get_openai_completion = _ensure_completions_clients()
         return get_openai_completion(prompt, self.model, json_output=json_output)
 
