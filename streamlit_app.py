@@ -234,8 +234,8 @@ class StreamlitApp:
 
 
 def main() -> None:
-    configure_page()
     ensure_packages()
+    configure_page()
     app = StreamlitApp()
     app.run()
 
