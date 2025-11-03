@@ -12,14 +12,17 @@ def _resolve_prompts_dir() -> Path:
         p = Path(env).expanduser()
         if p.is_dir():
             return p
-    here = Path(__file__).resolve().parent / "prompts"
-    if here.is_dir():
-        return here
-    cwdp = Path.cwd() / "prompts"
-    if cwdp.is_dir():
-        return cwdp
-    # Fallback still returns the 'here' path (reads will raise FileNotFoundError if missing)
-    return Path(__file__).resolve().parent / "prompts"
+
+    base = Path(__file__).resolve().parent
+    legacy_nested = base / "prompts"
+    cwd_prompts = Path.cwd() / "prompts"
+
+    for candidate in (legacy_nested, base, cwd_prompts):
+        if candidate.is_dir():
+            return candidate
+
+    # Fall back to the package directory so callers still get a deterministic path.
+    return base
 
 PROMPTS_DIR = _resolve_prompts_dir()
 
