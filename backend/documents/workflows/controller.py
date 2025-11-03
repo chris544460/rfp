@@ -7,16 +7,17 @@ This module bridges the UI layer (progress spinners, downloads) with the
 answering pipeline (`Responder`, `DocumentFiller`, structured extraction).
 """
 
-import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import re
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 import streamlit as st
 
 from backend.ui.components import FeedbackUI, create_live_placeholder, render_live_answer
-from backend.answering import DocumentFiller
+from backend.answering import DocumentFiller, DOCUMENT_FILLER_IMPORT_ERROR
 
 
 def _resolve_concurrency(value: Optional[int]) -> int:
@@ -144,6 +145,21 @@ class DocumentJobController:
         questions_text: List[str] = job.get("questions_text", [])
 
         if DocumentFiller is None:
+            missing = DOCUMENT_FILLER_IMPORT_ERROR
+            missing_name = getattr(missing, "name", None) if missing else None
+            print(
+                "[DocumentJobController] DocumentFiller import failed; optional dependencies"
+                " (python-docx/openpyxl) likely missing.",
+                "missing_module=",
+                repr(missing_name) if missing_name else repr(missing),
+            )
+            print(
+                "[DocumentJobController] job summary:",
+                f"mode={job.get('mode')}",
+                f"suffix={config.get('suffix')}",
+                f"framework={config.get('framework')}",
+                f"extra_docs={job.get('extra_doc_names')}",
+            )
             st.error(
                 "Document filling is unavailable because optional dependencies failed to "
                 "import."
@@ -155,11 +171,25 @@ class DocumentJobController:
                 "Also confirm optional env vars (e.g. aladdin_studio_api_key, "
                 "defaultWebServer) are configured."
             )
+            if missing is not None:
+                st.caption(f"Import error detail: {missing!r}")
             return
 
         try:
             filler = DocumentFiller()
         except Exception as exc:  # pragma: no cover - depends on runtime environment
+            print(
+                "[DocumentJobController] DocumentFiller initialization failed:",
+                repr(exc),
+            )
+            print(
+                "[DocumentJobController] job summary:",
+                f"mode={job.get('mode')}",
+                f"suffix={config.get('suffix')}",
+                f"input_path={config.get('input_path')}",
+                f"extra_docs={job.get('extra_doc_names')}",
+            )
+            traceback.print_exc()
             st.error(
                 "Document filling is unavailable because DocumentFiller could not initialize."
             )
