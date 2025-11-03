@@ -15,23 +15,29 @@ from typing import TYPE_CHECKING
 
 from frontend.session_state import initialize_session_state
 
+APP_TITLE = "RFP Responder"
+
 
 def configure_page() -> None:
-    """Configure Streamlit and apply the shared design system."""
+    """Configure Streamlit before any other UI commands run."""
 
-    from backend.ui.design import (
-        APP_NAME,
+    st.set_page_config(
+        page_title=APP_TITLE,
+        page_icon="📄",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+
+def apply_design_theme() -> None:
+    """Apply the shared design system once optional dependencies are ready."""
+
+    from backend.ui.design import (  # delayed import avoids premature heavy deps
         StyleCSS,
         StyleColors,
         display_aladdin_logos_and_app_title,
     )
 
-    st.set_page_config(
-        page_title=APP_NAME,
-        page_icon="📄",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
     StyleCSS.set_css_styling()
     StyleCSS.set_plotly_template(
         "aladdin",
@@ -104,6 +110,7 @@ REQUIRED_PACKAGES = [
     "pyarrow",
     "PyPDF2",
     "python-docx",
+    "openpyxl",
     "spacy",
     "azure-storage-blob",
 ]
@@ -333,6 +340,7 @@ class StreamlitApp:
 def main() -> None:
     configure_page()
     ensure_packages()
+    apply_design_theme()
     app = StreamlitApp()
     app.run()
 
