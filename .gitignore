@@ -10,6 +10,7 @@ env/
 output.txt
 msgmap.txt
 backend/retrieval/stacks/faiss/structured_extraction/parse_all_errors.txt
+backend/retrieval/stacks/faiss/vector_store/
 structured_extraction/data_sources/
 structured_extraction/parsed_json_outputs/
 structured_extraction/parse_all_errors.txt

@@ -12,7 +12,7 @@ Typical usage:
 
     python backend/retrieval/stacks/faiss/embeddings/encode.py \
         --file backend/retrieval/stacks/faiss/structured_extraction/parsed_json_outputs/embedding_data.json \
-        --output backend/retrieval/vector_store/answer \
+        --output backend/retrieval/stacks/faiss/vector_store/answer \
         --workers 4 \
         --model text-embedding-ada-002 \
         --weight 0.65

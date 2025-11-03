@@ -13,9 +13,9 @@ digraph VectorModes {
         label="Parallel searches (mode='both')";
         color="#34d399";
         style="rounded";
-        answer_hits [label="Answer index\nvector_store/answer\nExample hits:\n• ans_2041 (0.84) text='Our framework has three lines...'\n• ans_1012 (0.78) text='Risk governed by committee...'" fillcolor="#dcfce7"];
-        blend_hits [label="Blend index (if available)\nvector_store/blend\nExample hits:\n• blend_33 (0.81) text='Our three-line defence framework...'" fillcolor="#fde68a"];
-        question_hits [label="Question index\nvector_store/question\nExample hits:\n• q_773 (0.79) text='Describe your risk management framework.'" fillcolor="#bfdbfe"];
+        answer_hits [label="Answer index\nfaiss/vector_store/answer\nExample hits:\n• ans_2041 (0.84) text='Our framework has three lines...'\n• ans_1012 (0.78) text='Risk governed by committee...'" fillcolor="#dcfce7"];
+        blend_hits [label="Blend index (if available)\nfaiss/vector_store/blend\nExample hits:\n• blend_33 (0.81) text='Our three-line defence framework...'" fillcolor="#fde68a"];
+        question_hits [label="Question index\nfaiss/vector_store/question\nExample hits:\n• q_773 (0.79) text='Describe your risk management framework.'" fillcolor="#bfdbfe"];
     }
 
     embed -> answer_hits;

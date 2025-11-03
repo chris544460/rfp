@@ -38,9 +38,7 @@ load_dotenv()
 
 # Resolve the backend root dynamically (two levels up from this file)
 STACK_ROOT = Path(__file__).resolve().parents[1] / "stacks" / "faiss"
-BACKEND_ROOT = STACK_ROOT.parents[2]
-RETRIEVAL_DIR = BACKEND_ROOT / "retrieval"
-VECTOR_DIR  = RETRIEVAL_DIR / "vector_store"
+VECTOR_DIR  = STACK_ROOT / "vector_store"
 ANSWER_DIR  = VECTOR_DIR / "answer"
 QUESTION_DIR= VECTOR_DIR / "question"
 BLEND_DIR   = VECTOR_DIR / "blend"   # optional

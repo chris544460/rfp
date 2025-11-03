@@ -65,15 +65,15 @@ Renumber citations, bundle text + snippets"];
         build_query [label="Prepare request headers/auth for embedding service"];
         choose_index [label="Pick search strategy based on mode"];
         mode_answer [label="Mode: answer
-• Index: vector_store/answer/faiss.index
+• Index: faiss/vector_store/answer/faiss.index
 • Embeddings from vetted answer snippets
 • High precision (copy-ready language)"];
         mode_question [label="Mode: question
-• Index: vector_store/question/faiss.index
+• Index: faiss/vector_store/question/faiss.index
 • Embeddings from question prompts
 • Boosts recall when templates mirror past questions"];
         mode_blend [label="Mode: blend (optional)
-• Index: vector_store/blend/faiss.index
+• Index: faiss/vector_store/blend/faiss.index
 • Embeds concatenated question + answer
 • Balanced fallback when single perspectives miss"];
         mode_both [label="Mode: both / dual
