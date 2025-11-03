@@ -42,7 +42,7 @@ try:
 except Exception:
     # Fallback for environments where urllib3 Retry import path differs
     from requests.packages.urllib3.util.retry import Retry  # type: ignore
-from dotenv import load_dotenv
+from backend.utils.dotenv import load_dotenv
 
 load_dotenv()
 

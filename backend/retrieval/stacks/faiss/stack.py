@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import requests
-from dotenv import load_dotenv
+from backend.utils.dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
 
 from backend.retrieval.stacks.base import RetrievalStack, register_stack

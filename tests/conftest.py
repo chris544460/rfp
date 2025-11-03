@@ -1,7 +1,7 @@
 import sys
 import types
 
-from dotenv import load_dotenv
+from backend.utils.dotenv import load_dotenv
 
 load_dotenv(override=False)
 

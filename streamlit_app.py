@@ -92,6 +92,13 @@ def ensure_packages() -> None:
         "You're all set! Choose 'Upload document' to load an RFP or 'Ask a question' to chat. "
         "Provide any required API keys in the sidebar."
     )
+    try:
+        from backend.utils.dotenv import load_dotenv
+
+        load_dotenv(override=True)
+    except Exception:
+        # Missing dotenv should not stop the app; the helper already swallows ModuleNotFoundError.
+        pass
 
 
 class StreamlitApp:

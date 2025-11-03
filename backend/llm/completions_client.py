@@ -31,7 +31,7 @@ import uuid
 
 import requests
 from requests.auth import HTTPBasicAuth
-from dotenv import load_dotenv
+from backend.utils.dotenv import load_dotenv
 
 # Load all .env variables at startup
 load_dotenv(override=True)

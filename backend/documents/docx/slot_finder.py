@@ -29,7 +29,7 @@ import docx
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
-from dotenv import load_dotenv
+from backend.utils.dotenv import load_dotenv
 
 try:  # pragma: no cover - optional dependency
     import spacy  # type: ignore

@@ -13,7 +13,7 @@ from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
 import requests
-from dotenv import load_dotenv
+from backend.utils.dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
 
 # Ensure .env values are loaded when this module is imported.

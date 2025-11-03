@@ -32,7 +32,7 @@ except ModuleNotFoundError:
         ) from exc
 import requests
 from requests.auth import HTTPBasicAuth
-from dotenv import load_dotenv
+from backend.utils.dotenv import load_dotenv
 
 load_dotenv()
 

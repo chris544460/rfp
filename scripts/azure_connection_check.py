@@ -9,7 +9,7 @@ import sys
 import uuid
 from typing import Optional
 
-from dotenv import load_dotenv
+from backend.utils.dotenv import load_dotenv
 
 try:
     from azure.core.exceptions import ResourceNotFoundError
