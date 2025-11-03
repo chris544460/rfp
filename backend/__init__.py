@@ -7,6 +7,9 @@ working while still allowing direct imports from the more descriptive
 subpackages.
 """
 
+import sys
+import types
+
 from .answering import Responder, conversation
 
 try:
@@ -79,3 +82,26 @@ if extract_schema_from_xlsx is not None:
     __all__.append("extract_schema_from_xlsx")
 if extract_slots_from_xlsx is not None:
     __all__.append("extract_slots_from_xlsx")
+
+# Provide a lightweight module so callers can write:
+#     from backend.stacks import FaissRetrievalStack
+_stacks_module = types.ModuleType("backend.stacks", doc="Convenience access to retrieval stacks.")
+_stacks_module.__all__ = []
+
+try:  # pragma: no cover - optional dependency
+    from .retrieval.stacks.faiss import FaissRetrievalStack
+except ModuleNotFoundError:
+    FaissRetrievalStack = None  # type: ignore[assignment]
+if FaissRetrievalStack is not None:
+    _stacks_module.FaissRetrievalStack = FaissRetrievalStack
+    _stacks_module.__all__.append("FaissRetrievalStack")
+
+try:  # pragma: no cover - optional dependency
+    from .retrieval.stacks.azure.stack import AzureSearchStack
+except ModuleNotFoundError:
+    AzureSearchStack = None  # type: ignore[assignment]
+if AzureSearchStack is not None:
+    _stacks_module.AzureSearchStack = AzureSearchStack
+    _stacks_module.__all__.append("AzureSearchStack")
+
+sys.modules.setdefault("backend.stacks", _stacks_module)
