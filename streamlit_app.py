@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import site
 from typing import Optional, Tuple
 
 import streamlit as st
@@ -146,6 +147,26 @@ def ensure_packages() -> None:
         load_dotenv(override=True)
     except Exception:
         # Missing dotenv should not stop the app; the helper already swallows ModuleNotFoundError.
+        pass
+
+    try:
+        user_site = site.getusersitepackages()
+        user_paths = user_site if isinstance(user_site, (list, tuple)) else [user_site]
+        for path in reversed(user_paths):
+            if path and path not in sys.path:
+                sys.path.insert(0, path)
+    except Exception:
+        user_paths = []
+
+    try:
+        import importlib
+
+        for name in list(sys.modules.keys()):
+            if name.startswith("pydantic"):
+                del sys.modules[name]
+        importlib.invalidate_caches()
+        importlib.import_module("pydantic")
+    except Exception:
         pass
 
 
