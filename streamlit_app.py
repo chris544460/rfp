@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+import importlib.util
+import site
 import subprocess
 import sys
-import site
 from typing import Optional, Tuple
 
 import streamlit as st
@@ -93,7 +94,7 @@ def cached_install(package: str) -> str:
     )
 
 
-SETUP_VERSION = "2025-10-pydantic-v2"
+SETUP_VERSION = "2025-10-pydantic-v2-deps-1"
 
 REQUIRED_PACKAGES = [
     "certifi",
@@ -115,12 +116,35 @@ REQUIRED_PACKAGES = [
     "azure-storage-blob",
 ]
 
+MODULE_DEPENDENCIES = {
+    "python-docx": "docx",
+    "openpyxl": "openpyxl",
+}
+
+
+def _missing_modules() -> list[tuple[str, str]]:
+    missing: list[tuple[str, str]] = []
+    for package, module_name in MODULE_DEPENDENCIES.items():
+        if importlib.util.find_spec(module_name) is None:
+            missing.append((package, module_name))
+    return missing
+
 
 def ensure_packages() -> None:
     """Install user-space dependencies inside the Streamlit session."""
 
-    if st.session_state.get("setup_version") == SETUP_VERSION:
+    missing_before = _missing_modules()
+    setup_matches = st.session_state.get("setup_version") == SETUP_VERSION
+
+    if setup_matches and not missing_before:
         return
+
+    if missing_before:
+        package_list = ", ".join(pkg for pkg, _ in missing_before)
+        st.info(
+            "Installing missing components required for document filling: "
+            f"{package_list}."
+        )
 
     progress_placeholder = st.empty()
     total = len(REQUIRED_PACKAGES)
@@ -143,6 +167,16 @@ def ensure_packages() -> None:
         progress_placeholder.info(f"{message} ({percent}% complete)")
 
     progress_placeholder.success("Setup complete.")
+
+    missing_after = _missing_modules()
+    if missing_after:
+        names = ", ".join(f"{pkg} (module '{mod}')" for pkg, mod in missing_after)
+        st.error(
+            "Some optional dependencies are still missing after setup. "
+            f"Please install manually: {names}."
+        )
+        return
+
     st.session_state["setup_version"] = SETUP_VERSION
     st.toast(
         "You're all set! Choose 'Upload document' to load an RFP or 'Ask a question' to chat. "
