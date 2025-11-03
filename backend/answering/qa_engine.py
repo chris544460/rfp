@@ -591,6 +591,7 @@ def answer_question(
     *,
     retrieval_stack: Optional[RetrievalStack] = None,
     developer_prompt: Optional[str] = None,
+    context_rows: Optional[List[Tuple[str, str, str, float, str]]] = None,
 ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
     """
     Primary entrypoint consumed by `backend.answering.responder` and CLI utilities.
@@ -605,20 +606,28 @@ def answer_question(
     the language model.
     extra_docs: optional list of document paths to scan with an LLM in addition to vector search.
     retrieval_stack: optional override that chooses a specific retrieval stack instance.
+    context_rows: optional precomputed snippet tuples to use instead of running retrieval.
     """
     if DEBUG:
         print(f"[qa_core] answer_question start: q='{q}', mode={mode}, fund={fund}")
-    rows = collect_relevant_snippets(
-        q=q,
-        mode=mode,
-        fund=fund,
-        k=k,
-        min_confidence=min_confidence,
-        llm=llm,
-        extra_docs=extra_docs,
-        progress=progress,
-        retrieval_stack=retrieval_stack,
-    )
+    if context_rows is not None:
+        rows = context_rows
+        if DEBUG:
+            print(f"[qa_core] using {len(rows)} precomputed context rows")
+        if progress:
+            progress(f"Using provided context with {len(rows)} snippets.")
+    else:
+        rows = collect_relevant_snippets(
+            q=q,
+            mode=mode,
+            fund=fund,
+            k=k,
+            min_confidence=min_confidence,
+            llm=llm,
+            extra_docs=extra_docs,
+            progress=progress,
+            retrieval_stack=retrieval_stack,
+        )
 
     if not rows:
         if DEBUG:

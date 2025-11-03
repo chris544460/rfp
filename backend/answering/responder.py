@@ -124,9 +124,15 @@ class Responder:
         *,
         include_citations: Optional[bool] = None,
         progress: ProgressFn = None,
+        context: Optional[List[Tuple[str, str, str, float, str]]] = None,
     ) -> Dict[str, Any]:
-        """Answer a single question and wrap the result with citation metadata."""
-        ans, comments = self._answer_raw(question, progress=progress)
+        """Answer a single question and wrap the result with citation metadata.
+
+        When ``context`` is provided, it must be a list of snippet tuples in the
+        same shape produced by ``collect_relevant_snippets``; retrieval is skipped
+        and the supplied snippets are used directly.
+        """
+        ans, comments = self._answer_raw(question, progress=progress, context=context)
         include = self.include_citations if include_citations is None else include_citations
         formatted = dict(self._format_answer(ans, comments, include_citations))
         formatted["raw_comments"] = comments if include else []
@@ -140,18 +146,28 @@ class Responder:
         max_workers: int = 1,
         progress: BatchProgressFn = None,
     ) -> List[Dict[str, Any]]:
-        """Answer many questions, optionally parallelising work with a thread pool."""
-        normalized: List[Tuple[int, str, Dict[str, Any]]] = []
+        """Answer many questions, optionally parallelising work with a thread pool.
+
+        Individual question entries may be dicts containing a precomputed
+        ``context`` list matching ``collect_relevant_snippets`` output.
+        """
+        normalized: List[
+            Tuple[int, str, Dict[str, Any], Optional[List[Tuple[str, str, str, float, str]]]]
+        ] = []
         for idx, item in enumerate(questions):
             # The Streamlit UI can pass bare strings or rich dict metadata; we
             # normalize here so batching logic can treat everything uniformly.
             if isinstance(item, str):
-                normalized.append((idx, item, {}))
+                normalized.append((idx, item, {}, None))
             elif isinstance(item, dict):
                 text = str(item.get("question") or "").strip()
-                normalized.append((idx, text, item))
+                context_override = item.get("context")
+                if "context" in item:
+                    item = dict(item)
+                    item.pop("context", None)
+                normalized.append((idx, text, item, context_override))
             else:
-                normalized.append((idx, str(item), {}))
+                normalized.append((idx, str(item), {}, None))
 
         answers: List[Optional[Dict[str, Any]]] = [None] * len(normalized)
 
@@ -164,8 +180,16 @@ class Responder:
 
             return _inner
 
-        def _run_single(idx: int, q_text: str) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
-            return self._answer_raw(q_text, progress=_progress_wrapper(idx))
+        def _run_single(
+            idx: int,
+            q_text: str,
+            ctx_override: Optional[List[Tuple[str, str, str, float, str]]],
+        ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
+            return self._answer_raw(
+                q_text,
+                progress=_progress_wrapper(idx),
+                context=ctx_override,
+            )
 
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -173,16 +197,16 @@ class Responder:
                 # Fan out questions to the worker pool but retain the original
                 # ordering so downstream consumers can match answers by index.
                 future_map = {
-                    pool.submit(_run_single, idx, q_text): (idx, q_text, meta)
-                    for idx, q_text, meta in normalized
+                    pool.submit(_run_single, idx, q_text, ctx): (idx, q_text, meta)
+                    for idx, q_text, meta, ctx in normalized
                 }
                 for fut in as_completed(future_map):
                     idx, q_text, meta = future_map[fut]
                     ans, comments = fut.result()
                     answers[idx] = self._package_answer(q_text, meta, ans, comments, include_citations)
         else:
-            for idx, q_text, meta in normalized:
-                ans, comments = _run_single(idx, q_text)
+            for idx, q_text, meta, ctx in normalized:
+                ans, comments = _run_single(idx, q_text, ctx)
                 answers[idx] = self._package_answer(q_text, meta, ans, comments, include_citations)
 
         return [ans for ans in answers if ans is not None]
@@ -192,6 +216,7 @@ class Responder:
         question: str,
         *,
         progress: ProgressFn = None,
+        context: Optional[List[Tuple[str, str, str, float, str]]] = None,
     ) -> Tuple[str, List[Tuple[str, str, str, float, str]]]:
         """Call `qa_engine.answer_question` and return both answer text and raw snippets."""
         return answer_question(
@@ -207,6 +232,7 @@ class Responder:
             progress=progress,
             retrieval_stack=self.retrieval_stack,
             developer_prompt=self.developer_prompt,
+            context_rows=context,
         )
 
     def _package_answer(
