@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import io
 import json
 import os
 import re
@@ -2017,13 +2018,28 @@ def _write_slots_cache(cache_path: Optional[Path], payload: Dict[str, Any]) -> N
         dbg(f"Unable to write slot cache {cache_path}: {exc}")
 
 
-DocxSource = Union[str, Path, IO[bytes]]
+# Support callers that pass either filesystem paths or already-open binary buffers.
+DocxSource = Union[str, Path, IO[bytes], bytes, bytearray, memoryview]
+
+
+def _ensure_seekable(stream: IO[bytes]) -> IO[bytes]:
+    """Return a seekable binary stream positioned at the beginning."""
+    if hasattr(stream, "seek"):
+        try:
+            stream.seek(0)
+            return stream
+        except Exception:
+            data = stream.read()
+            return io.BytesIO(data)
+    data = stream.read()
+    return io.BytesIO(data)
 
 
 def extract_slots_from_docx(path: DocxSource) -> Dict[str, Any]:
     cached_payload: Optional[Dict[str, Any]] = None
     cache_path: Optional[Path] = None
     path_hint: Optional[str] = None
+    doc_source: Union[str, Path, IO[bytes]]
 
     if isinstance(path, (str, Path)):
         path_hint = str(path)
@@ -2032,7 +2048,20 @@ def extract_slots_from_docx(path: DocxSource) -> Dict[str, Any]:
             return cached_payload
         doc_source = path
     else:
-        path_hint = getattr(path, "name", None)
+        stream: Optional[IO[bytes]] = None
+
+        if isinstance(path, (bytes, bytearray, memoryview)):
+            # Coerce raw byte payloads to a BytesIO stream so python-docx can consume them.
+            stream = io.BytesIO(bytes(path))
+        elif hasattr(path, "read"):
+            # File-like objects (BytesIO, temp files, etc.) already expose read(); reuse them.
+            stream = path  # type: ignore[assignment]
+        else:
+            raise TypeError(
+                "extract_slots_from_docx expects a path or binary stream-like object."
+            )
+
+        path_hint = getattr(stream, "name", None)
         if path_hint:
             try:
                 if Path(path_hint).exists():
@@ -2042,11 +2071,14 @@ def extract_slots_from_docx(path: DocxSource) -> Dict[str, Any]:
             except Exception:
                 cached_payload = None
                 cache_path = None
-        doc_source = path
-        try:
-            doc_source.seek(0)
-        except Exception:
-            pass
+        # Ensure we hand python-docx a rewindable stream even if the caller passed a forward-only handle.
+        doc_source = _ensure_seekable(stream)
+        if path_hint and getattr(doc_source, "name", None) is None:
+            try:
+                # Preserve the original name when we wrapped the stream so cache/debug output stays informative.
+                doc_source.name = path_hint  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     doc = docx.Document(doc_source)
     blocks = _expand_doc_blocks(doc)
