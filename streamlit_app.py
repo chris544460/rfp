@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from typing import Tuple
+from typing import Optional, Tuple
 
 import streamlit as st
 
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
 from frontend.session_state import initialize_session_state
 
@@ -115,13 +115,13 @@ class StreamlitApp:
             ensure_api_credentials,
             select_framework,
         )
-        from frontend.document_page import render_document_page
+        self._render_document_page = None
+        self._document_import_error: Optional[Exception] = None
 
         self._render_chat_page = render_chat_page
         self._collect_app_config = collect_app_config
         self._ensure_api_credentials = ensure_api_credentials
         self._select_framework = select_framework
-        self._render_document_page = render_document_page
 
         feedback_manager = build_feedback_manager()
         self.feedback_manager = feedback_manager
@@ -152,7 +152,18 @@ class StreamlitApp:
 
         if input_mode == "Ask a question":
             self._render_chat_page(view_mode, config, self.feedback_ui)
-        else:
+            return
+
+        if self._render_document_page is None:
+            try:
+                from frontend.document_page import render_document_page  # type: ignore
+
+                self._render_document_page = render_document_page
+                self._document_import_error = None
+            except ImportError as exc:  # pragma: no cover - environment specific
+                self._document_import_error = exc
+
+        if self._render_document_page is not None:
             self._render_document_page(
                 view_mode,
                 config,
@@ -160,6 +171,14 @@ class StreamlitApp:
                 self.feedback_manager,
                 self.document_controller,
             )
+            return
+
+        st.error(
+            "Document upload experience is unavailable because required components "
+            "could not be imported."
+        )
+        if self._document_import_error and st.session_state.get("setup_version"):
+            st.warning(f"Document page import error: {self._document_import_error}")
 
     def _select_framework(self, view_mode: str) -> Tuple[str, str]:
         return select_framework(view_mode)
