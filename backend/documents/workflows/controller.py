@@ -143,7 +143,33 @@ class DocumentJobController:
         answers: List[Optional[Dict[str, Any]]] = job.get("answers", [])
         questions_text: List[str] = job.get("questions_text", [])
 
-        filler = DocumentFiller()
+        if DocumentFiller is None:
+            st.error(
+                "Document filling is unavailable because optional dependencies failed to "
+                "import."
+            )
+            st.info(
+                "Ensure python-docx, openpyxl, and related document packages are installed."
+            )
+            st.info(
+                "Also confirm optional env vars (e.g. aladdin_studio_api_key, "
+                "defaultWebServer) are configured."
+            )
+            return
+
+        try:
+            filler = DocumentFiller()
+        except Exception as exc:  # pragma: no cover - depends on runtime environment
+            st.error(
+                "Document filling is unavailable because DocumentFiller could not initialize."
+            )
+            st.info(
+                "This most often means dependencies or environment variables (e.g. "
+                "aladdin_studio_api_key, defaultWebServer, aladdin_user, aladdin_passwd) "
+                "are missing."
+            )
+            st.caption(f"DocumentFiller error: {exc}")
+            return
         mode = job.get("mode")
 
         if mode == "excel":
