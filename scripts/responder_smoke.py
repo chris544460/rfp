@@ -15,6 +15,9 @@ from scripts.retrieval_smoke_utils import load_azure_stack, load_faiss_stack
 # Default to quieter logs unless callers set RFP_QA_DEBUG explicitly.
 os.environ.setdefault("RFP_QA_DEBUG", os.getenv("RFP_QA_DEBUG", "0"))
 
+DEFAULT_RFP_MODEL = "o3-2025-04-16_research"
+os.environ.setdefault("RFP_LLM_MODEL", os.getenv("RFP_LLM_MODEL", DEFAULT_RFP_MODEL))
+
 
 class DummyLLM:
     """Minimal stub that pretends to be a completions client."""
@@ -92,13 +95,20 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--live-llm",
+        dest="live_llm",
         action="store_true",
         help="Use backend.llm.CompletionsClient instead of the stub (requires env credentials).",
     )
     parser.add_argument(
+        "--no-live-llm",
+        dest="live_llm",
+        action="store_false",
+        help="Force usage of the dummy LLM stub even when credentials are available.",
+    )
+    parser.add_argument(
         "--model",
         default=None,
-        help="Model ID to pass to CompletionsClient when --live-llm is set.",
+        help="Model ID to pass to CompletionsClient when --live-llm is set (defaults to RFP_LLM_MODEL or o3-2025-04-16_research).",
     )
     parser.add_argument(
         "--include-vectors",
@@ -125,6 +135,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="List registered retrieval stacks and exit.",
     )
+    parser.set_defaults(live_llm=True)
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -233,7 +244,7 @@ def _resolve_llm(args: argparse.Namespace):
             raise RuntimeError(
                 f"Failed to import CompletionsClient: {exc}. Ensure backend.llm dependencies are installed."
             ) from exc
-        model = args.model or os.getenv("RFP_LLM_MODEL", "gpt-5-nano")
+        model = args.model or os.getenv("RFP_LLM_MODEL", DEFAULT_RFP_MODEL)
         return CompletionsClient(model=model)
     return DummyLLM(template=args.dummy_template)
 
