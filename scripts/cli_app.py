@@ -45,7 +45,10 @@ from backend.prompts import read_prompt
 
 # DOCX slot finder + applier
 from backend.documents.docx.slot_finder import extract_slots_from_docx
-from backend.documents.docx.apply_answers import apply_answers_to_docx
+from backend.documents.docx.apply_answers import (
+    apply_answers_to_docx,
+    prepare_slots_with_answers,
+)
 from backend.documents.xlsx.apply_answers import write_excel_answers
 from backend.documents.xlsx.slot_finder import ask_sheet_schema
 from backend.answering.qa_engine import answer_question
@@ -415,15 +418,6 @@ def main():
         slots_payload = extract_slots_from_docx(str(infile))
         if args.slots:
             Path(args.slots).write_text(json.dumps(slots_payload), encoding="utf-8")
-            slots_path = str(Path(args.slots))
-        else:
-            # temp file for slots JSON
-            import tempfile, json
-
-            fd, tmp = tempfile.mkstemp(prefix="slots_", suffix=".json")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(slots_payload, f)
-            slots_path = tmp
 
         # 2) Prefer external generator from Utilities (keeps CLI thin)
         try:
@@ -450,24 +444,21 @@ def main():
             if args.output
             else infile.with_name(infile.stem + "_answered.docx")
         )
-        summary = apply_answers_to_docx(
-            docx_path=str(infile),
-            slots_json_path=slots_path,
-            answers_json_path="",  # we generate on-the-fly
-            out_path=str(out_path),
-            mode=args.docx_write_mode,
+        slots_list, generated = prepare_slots_with_answers(
+            slots_payload,
             generator=gen,
-            gen_name="cli_app:rag_gen",
+            gen_name=gen_name,
         )
+        _, summary = apply_answers_to_docx(
+            docx_source=str(infile),
+            slots=slots_list,
+            mode=args.docx_write_mode,
+            output_path=str(out_path),
+        )
+        summary["generated"] = generated
         print(f"Wrote {out_path}")
         print("[DEBUG] Apply summary:", summary)
-        # Cleanup temp slots if not user-provided
-        if not args.slots:
-            try:
-                os.unlink(slots_path)
-            except Exception:
-                pass
-            sys.exit(0)
+        sys.exit(0)
 
     # ---- Text flow (PDF/TXT or DOCX with --docx-as-text)
     raw = load_input_text(str(infile))

@@ -13,7 +13,7 @@ from typing import Callable, Dict, Tuple
 
 # Type aliases for clarity
 SlotExtractor = Callable[[str], dict]
-AnswerApplier = Callable[[str, str, str, str], dict]
+AnswerApplier = Callable[..., object]
 
 # Registry mapping lower‑case file extensions to the modules and function
 # names that implement the required operations for that format.

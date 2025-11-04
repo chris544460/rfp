@@ -47,7 +47,10 @@ from backend.documents.docx.slot_finder import (
     _looks_like_question,
     _spacy_docx_is_question,
 )
-from backend.documents.docx.apply_answers import apply_answers_to_docx
+from backend.documents.docx.apply_answers import (
+    apply_answers_to_docx,
+    prepare_slots_with_answers,
+)
 from backend.retrieval.vector_search import index_size, search
 
 
@@ -777,15 +780,17 @@ def process_docx_slots(
         slots_tmp.write_text(json.dumps(slots_payload), encoding="utf-8")
         answers_tmp.write_text(json.dumps({"by_id": answers_by_id}), encoding="utf-8")
 
+    slots_with_answers, _ = prepare_slots_with_answers(
+        slots_payload,
+        answers_by_id=answers_by_id,
+    )
+
     with timer.track("docx:apply_answers"):
         apply_answers_to_docx(
-            docx_path=str(input_path),
-            slots_json_path=str(slots_tmp),
-            answers_json_path=str(answers_tmp),
-            out_path=str(answered_path),
+            docx_source=str(input_path),
+            slots=slots_with_answers,
             mode=docx_write_mode,
-            generator=None,
-            gen_name="cli_streamlit_app:rag_gen",
+            output_path=str(answered_path),
         )
 
     qa_pairs = []

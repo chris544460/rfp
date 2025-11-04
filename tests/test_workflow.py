@@ -1,4 +1,3 @@
-import json
 import os
 import pathlib
 import sys
@@ -53,17 +52,18 @@ def test_pipeline_idempotent(tmp_path):
     src = tmp_path / "orig.docx"
     doc.save(src)
     slots_payload = build_slots(src)
-    slots_path = tmp_path / "slots.json"
-    with open(slots_path, "w", encoding="utf-8") as f:
-        json.dump(slots_payload, f)
     slot_id = slots_payload["slots"][0]["id"]
-    answers_path = tmp_path / "answers.json"
-    with open(answers_path, "w", encoding="utf-8") as f:
-        json.dump({slot_id: answer_text}, f)
+    slots_with_answers = []
+    for slot in slots_payload["slots"]:
+        slot_copy = dict(slot)
+        if slot_copy.get("id") == slot_id:
+            slot_copy["answer"] = answer_text
+        slots_with_answers.append(slot_copy)
+
     first = tmp_path / "out1.docx"
-    apply_answers_to_docx(str(src), str(slots_path), str(answers_path), str(first))
+    apply_answers_to_docx(str(src), slots_with_answers, output_path=str(first))
     second = tmp_path / "out2.docx"
-    apply_answers_to_docx(str(first), str(slots_path), str(answers_path), str(second))
+    apply_answers_to_docx(str(first), slots_with_answers, output_path=str(second))
     final_doc = docx.Document(second)
     texts = [p.text.strip() for p in final_doc.paragraphs]
     assert texts.count(answer_text) == 1

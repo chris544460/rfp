@@ -9,7 +9,6 @@ bridging internal answer formats with the Word/Excel writers in
 payload shape expected by the front end.
 """
 
-import json
 import os
 import tempfile
 from pathlib import Path
@@ -125,35 +124,23 @@ class DocumentFiller:
                 slot_map[str(slot_id)] = storage
                 slot_answers[str(slot_id)] = qa
 
-        answers_tmp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, suffix=".json")
-        json.dump({"by_id": slot_map}, answers_tmp)
-        answers_tmp.flush()
-        answers_tmp.close()
-
-        slots_tmp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, suffix=".json")
-        json.dump(slots_payload, slots_tmp)
-        slots_tmp.flush()
-        slots_tmp.close()
+        raw_slots = slots_payload.get("slots", []) or []
+        slots_with_answers = [dict(slot) for slot in raw_slots]
+        for slot in slots_with_answers:
+            sid = str(slot.get("id", "") or "")
+            stored_answer = slot_map.get(sid)
+            if stored_answer is not None:
+                slot["answer"] = stored_answer
 
         out_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
         out_tmp.close()
 
         apply_answers_to_docx(
-            docx_path=source_path,
-            slots_json_path=slots_tmp.name,
-            answers_json_path=answers_tmp.name,
-            out_path=out_tmp.name,
+            docx_source=Path(source_path).read_bytes(),
+            slots=slots_with_answers,
             mode=write_mode,
-            generator=None,
-            gen_name="document_filler.responder",
+            output_path=out_tmp.name,
         )
-
-        # Clean up the scratch JSON files once the docx writer is done.
-        for temp_path in (answers_tmp.name, slots_tmp.name):
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
 
         downloads = [
             self._build_download(

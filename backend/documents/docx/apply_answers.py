@@ -16,7 +16,18 @@ import asyncio
 import importlib
 import traceback
 from types import ModuleType
-from typing import List, Union, Optional, Dict, Tuple, Callable
+from io import BytesIO
+from typing import (
+    BinaryIO,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import docx
 from docx.text.paragraph import Paragraph
@@ -103,6 +114,78 @@ def insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
 def normalize_question(q: str) -> str:
     """Lowercase and squash whitespace so question text comparisons behave."""
     return " ".join((q or "").strip().lower().split())
+
+
+def _coerce_docx_bytes(
+    source: Union[str, os.PathLike[str], bytes, bytearray, memoryview, BinaryIO],
+) -> bytes:
+    """Return the raw DOCX bytes from a path, raw bytes, or binary stream."""
+    if hasattr(source, "read"):
+        stream = cast(BinaryIO, source)
+        try:
+            stream.seek(0)
+        except Exception:
+            pass
+        data = stream.read()
+    elif isinstance(source, (bytes, bytearray, memoryview)):
+        data = bytes(source)
+    elif isinstance(source, (str, os.PathLike)):
+        with open(source, "rb") as fh:
+            data = fh.read()
+    else:
+        raise TypeError("docx_source must be bytes, a binary stream, or a file path.")
+
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError("DOCX stream returned text data; expected bytes.")
+    payload = bytes(data)
+    if not payload:
+        raise ValueError("Empty DOCX payload provided.")
+    return payload
+
+
+def _coerce_slots_payload(
+    slots: Union[Sequence[Dict[str, object]], Dict[str, object]],
+) -> List[Dict[str, object]]:
+    """Normalize slot input into a concrete list of dicts without mutating the original."""
+    if isinstance(slots, dict):
+        slot_list = slots.get("slots")  # type: ignore[assignment]
+        if not isinstance(slot_list, list):
+            raise TypeError("Slot payload dict must contain a 'slots' list.")
+        return [dict(slot) for slot in slot_list]
+
+    if isinstance(slots, Sequence) and not isinstance(slots, (str, bytes, bytearray, memoryview)):
+        return [dict(slot) for slot in slots]  # shallow copy for safety
+
+    raise TypeError("Slots must be provided as a list of dicts or a payload containing a 'slots' list.")
+
+
+def prepare_slots_with_answers(
+    slots: Union[Sequence[Dict[str, object]], Dict[str, object]],
+    *,
+    answers_by_id: Optional[Dict[str, object]] = None,
+    answers_by_question: Optional[Dict[str, object]] = None,
+    generator: Optional[Callable[..., object]] = None,
+    gen_name: str = "",
+) -> Tuple[List[Dict[str, object]], int]:
+    """Return a normalized slot list with ``answer`` fields populated where possible."""
+    normalized = _coerce_slots_payload(slots)
+    answers_map, generated = _build_answers_map(
+        normalized,
+        by_id=answers_by_id or {},
+        by_q=answers_by_question or {},
+        generator=generator,
+        gen_name=gen_name,
+    )
+
+    for slot in normalized:
+        sid = str(slot.get("id", "") or "")
+        if slot.get("answer") is not None:
+            continue
+        answer = answers_map.get(sid)
+        if answer is not None:
+            slot["answer"] = answer
+
+    return normalized, generated
 
 def _normalize_citations(raw: object) -> Dict[str, object]:
     """Convert loose citation payloads into a {id -> {text, source_file}} map."""
@@ -979,56 +1062,50 @@ def _apply_slot_to_doc(
 
 # ---------------------------- Main application flow ----------------------------
 def apply_answers_to_docx(
-    docx_path: str,
-    slots_json_path: str,
-    answers_json_path: str,
-    out_path: str,
+    docx_source: Union[str, os.PathLike[str], bytes, bytearray, memoryview, BinaryIO],
+    slots: Union[Sequence[Dict[str, object]], Dict[str, object]],
+    *,
     mode: str = "fill",
-    generator: Optional[Callable[..., object]] = None,
-    gen_name: str = ""
-) -> Dict[str, int]:
-    """Merge answers into the DOCX according to slot metadata and return summary counts."""
-    with open(slots_json_path, "r", encoding="utf-8") as f:
-        slots_payload = json.load(f)
+    output_path: Optional[str] = None,
+) -> Tuple[bytes, Dict[str, int]]:
+    """
+    Merge answers embedded within the provided slot payload into a DOCX document.
 
-    by_id, by_q = ({}, {})
-    if answers_json_path and answers_json_path != "-" and os.path.isfile(answers_json_path):
-        by_id, by_q = load_answers(answers_json_path)
-        dbg(f"Answers loaded: by_id={len(by_id)}, by_question={len(by_q)}")
-    else:
-        dbg("No answers file provided; relying solely on generator (if any)")
+    Args:
+        docx_source: Raw DOCX bytes, a binary stream, or a filesystem path to the template.
+        slots: Either a list of slot dictionaries or a payload with a ``"slots"`` list.
+               Each slot should include an ``"answer"`` entry containing the prepared answer
+               payload (typically ``{"text": ..., "citations": ...}``).
+        mode: Controls how paragraph/table contents are updated (``fill``/``replace``/``append``).
+        output_path: Optional filesystem path to write the mutated DOCX. When omitted, callers
+            can use the returned bytes.
 
-    doc = docx.Document(docx_path)
-    blocks, paragraphs, block_to_para, block_to_table = build_indexes(doc)
+    Returns:
+        Tuple of ``(docx_bytes, summary_counts)``. The first element contains the resulting DOCX
+        as bytes; the second mirrors the legacy summary dictionary for compatibility.
+    """
+    doc_bytes = _coerce_docx_bytes(docx_source)
+    doc = docx.Document(BytesIO(doc_bytes))
+    blocks, paragraphs, block_to_para, _ = build_indexes(doc)
+
+    normalized_slots = _coerce_slots_payload(slots)
 
     applied = 0
     skipped_no_answer = 0
     skipped_bad_locator = 0
     skipped_table_oob = 0
-    generated = 0
 
-    slots = (slots_payload or {}).get("slots", [])
-
-    answers, generated = _build_answers_map(
-        slots,
-        by_id=by_id,
-        by_q=by_q,
-        generator=generator,
-        gen_name=gen_name,
-    )
-
-    for s in slots:
-        sid = s.get("id", "")
-        question_text = (s.get("question_text") or "").strip()
-        answer = answers.get(sid)
+    for slot in normalized_slots:
+        sid = str(slot.get("id", "") or "")
+        question_text = (slot.get("question_text") or "").strip()
+        answer = slot.get("answer")
         if answer is None:
-            # Nothing to write for this slot—count and move on to the next.
-            dbg(f"NO ANSWER for slot {sid!r} / question '{question_text}' — skipping")
+            dbg(f"NO ANSWER for slot {sid or question_text!r} — skipping")
             skipped_no_answer += 1
             continue
         try:
             status = _apply_slot_to_doc(
-                s,
+                slot,
                 answer,
                 doc=doc,
                 blocks=blocks,
@@ -1047,18 +1124,23 @@ def apply_answers_to_docx(
         else:
             skipped_bad_locator += 1
 
-    doc.save(out_path)
-    # Provide quick feedback for CLI users; callers still receive the structured summary.
-    print(f"Wrote {out_path}")
+    buffer = BytesIO()
+    doc.save(buffer)
+    result_bytes = buffer.getvalue()
 
-    return {
+    if output_path:
+        with open(output_path, "wb") as fh:
+            fh.write(result_bytes)
+
+    summary = {
         "applied": applied,
         "skipped_no_answer": skipped_no_answer,
         "skipped_bad_locator": skipped_bad_locator,
         "skipped_table_oob": skipped_table_oob,
-        "total_slots": len(slots),
-        "generated": generated,
+        "total_slots": len(normalized_slots),
+        "generated": 0,
     }
+    return result_bytes, summary
 
 
 def _parse_arguments(argv: List[str]) -> argparse.Namespace:
@@ -1177,24 +1259,46 @@ def main():
     _validate_answers_path(args.answers_json, args.generate)
     generator, gen_name = _maybe_load_generator(args.generate, DEBUG)
 
+    with open(args.slots_json, "r", encoding="utf-8") as fh:
+        slots_payload = json.load(fh)
+
+    by_id: Dict[str, object] = {}
+    by_q: Dict[str, object] = {}
+
+    if args.answers_json and args.answers_json not in {"", "-"} and os.path.isfile(args.answers_json):
+        by_id, by_q = load_answers(args.answers_json)
+        if DEBUG:
+            print(f"[apply_answers] answers loaded: by_id={len(by_id)} by_question={len(by_q)}")
+    elif DEBUG:
+        print("[apply_answers] no answers JSON provided; relying on existing slot answers or generator")
+
+    slots_list, generated = prepare_slots_with_answers(
+        slots_payload,
+        answers_by_id=by_id,
+        answers_by_question=by_q,
+        generator=generator,
+        gen_name=gen_name,
+    )
+
     try:
         if DEBUG:
             print("[apply_answers] applying answers to document")
-        summary = apply_answers_to_docx(
+        _, summary = apply_answers_to_docx(
             args.docx_path,
-            args.slots_json,
-            args.answers_json,
-            args.out,
+            slots_list,
             mode=args.mode,
-            generator=generator,
-            gen_name=gen_name,
+            output_path=args.out,
         )
     except Exception as exc:
         print(f"Error: failed to apply answers: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    summary["generated"] = generated
+
     if DEBUG:
         _print_summary(summary)
+    else:
+        print(f"Wrote {args.out}")
 if __name__ == "__main__":
     main()
     # Example:

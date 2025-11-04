@@ -13,7 +13,7 @@ import os
 import sys
 import tempfile
 import importlib
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict
 
 from backend.documents.handler_registry import get_handlers
 
@@ -132,15 +132,40 @@ def main() -> None:
     if args.debug:
         print("[rfp_pipeline] applying answers")
     try:
-        summary = apply_answers(
-            args.source_path,
-            slots_path,
-            args.answers_json or "",
-            out_path,
-            mode=args.mode,
-            generator=gen_callable,
-            gen_name=gen_name,
-        )
+        if ext == ".docx":
+            from backend.documents.docx.apply_answers import (
+                load_answers,
+                prepare_slots_with_answers,
+            )
+
+            answers_by_id: Dict[str, object] = {}
+            answers_by_q: Dict[str, object] = {}
+            if args.answers_json and os.path.isfile(args.answers_json):
+                answers_by_id, answers_by_q = load_answers(args.answers_json)
+            slots_list, generated = prepare_slots_with_answers(
+                slots_payload,
+                answers_by_id=answers_by_id,
+                answers_by_question=answers_by_q,
+                generator=gen_callable,
+                gen_name=gen_name,
+            )
+            _, summary = apply_answers(
+                args.source_path,
+                slots_list,
+                mode=args.mode,
+                output_path=out_path,
+            )
+            summary["generated"] = generated
+        else:
+            summary = apply_answers(
+                args.source_path,
+                slots_path,
+                args.answers_json or "",
+                out_path,
+                mode=args.mode,
+                generator=gen_callable,
+                gen_name=gen_name,
+            )
     except Exception as e:  # pragma: no cover - defensive
         print(f"Error: failed to apply answers: {e}", file=sys.stderr)
         if not args.slots:
