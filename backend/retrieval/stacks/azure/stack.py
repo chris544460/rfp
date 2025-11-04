@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Iterable, Union
 
 from backend.retrieval.stacks.base import RetrievalStack, register_stack
 
@@ -79,7 +79,7 @@ class AzureSearchStack(RetrievalStack):
         *,
         mode: str = "answer",
         k: int = 6,
-        fund_filter: Optional[str] = None,
+        fund_filter: Optional[Union[str, Iterable[str]]] = None,
         include_vectors: bool = False,
         owner_id: str | None = None,
     ) -> List[Dict[str, object]]:
@@ -92,13 +92,19 @@ class AzureSearchStack(RetrievalStack):
         if not query:
             return []
 
+        selected_fund = None
+        if isinstance(fund_filter, str):
+            selected_fund = fund_filter
+        elif fund_filter:
+            selected_fund = next(iter(fund_filter), None)
+
         embedding = self._embedding_client.get_embedding(
             query, model=self._embedding_model
         )
         if not embedding:
             return []
 
-        azure_filter = self._build_filter(fund_filter, owner_id)
+        azure_filter = self._build_filter(selected_fund, owner_id)
         vector_query = VectorizedQuery(
             vector=embedding,
             k_nearest_neighbors=100,
@@ -152,6 +158,25 @@ class AzureSearchStack(RetrievalStack):
                 break
 
         return hits
+
+    def search_batch(
+        self,
+        queries: Iterable[str],
+        *,
+        fund_filter: Optional[Union[str, Iterable[str]]] = None,
+        k: int = 6,
+        mode: str = "answer",
+    ) -> List[List[Dict[str, object]]]:
+        """Compatibility helper that mirrors earlier batch search APIs."""
+        return [
+            self.search(
+                query=q,
+                fund_filter=fund_filter,
+                k=k,
+                mode=mode,
+            )
+            for q in queries
+        ]
 
     def index_size(self, mode: str) -> int:
         """Azure stack cannot report index cardinality without an additional service call."""

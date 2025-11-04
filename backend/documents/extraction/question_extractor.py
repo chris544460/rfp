@@ -177,17 +177,14 @@ class QuestionExtractor:
         """Reuse the DOCX slot finder so we get consistent metadata everywhere."""
         payload = extract_slots_from_docx(_clone_buffer(data, source_name))
         slots = payload.get("slots") or []
-        questions = []
+        questions: List[Dict[str, Any]] = []
         for slot in slots:
             question_text = (slot.get("question_text") or "").strip()
-            questions.append(
-                {
-                    "question": question_text,
-                    "source": "docx_slots",
-                    "slot_id": slot.get("id"),
-                    "slot": slot,
-                }
-            )
+            slot_copy = dict(slot)
+            slot_copy["question"] = question_text
+            slot_copy.setdefault("source", "docx_slots")
+            slot_copy.setdefault("slot_id", slot_copy.get("id"))
+            questions.append(slot_copy)
         # Capture skipped slots for debugging so integrators can inspect misfires.
         skipped = payload.get("skipped_slots") or []
         heuristic = payload.get("heuristic_skips") or []
