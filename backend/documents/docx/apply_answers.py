@@ -85,6 +85,7 @@ _BLANK_RE = re.compile(r"_+\s*$")
 _CHECKBOX_CHARS = "\u2610\u2611\u2612\u25a1\u25a0\u2713\u2714\u2717\u2718"
 # Allow comma-separated citations like "[1,2]" or "[1, 2, 3]"
 _CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+_BULLET_LINE_RE = re.compile(r"^\s*-\s+(?P<body>.+)$")
 
 def is_blank_para(p: Paragraph) -> bool:
     """Heuristic check for placeholder paragraphs that should be overwritten."""
@@ -289,6 +290,31 @@ def _append_citation_runs(
             paragraph.add_run(" ")
 
 
+def _extract_bullet_text(line: str) -> Optional[str]:
+    """Return the payload for ``-`` prefixed bullet lines or ``None`` when absent."""
+    match = _BULLET_LINE_RE.match(line)
+    if not match:
+        return None
+    body = match.group("body").strip()
+    return body or None
+
+
+def _apply_bullet_style(paragraph: Paragraph) -> bool:
+    """
+    Attempt to convert the given paragraph into a built-in bullet list style.
+
+    Returns True if a style is applied; otherwise the caller should render a literal
+    bullet glyph as a fallback to ensure the visual marker is retained.
+    """
+    for style_name in ("List Bullet", "List Paragraph"):
+        try:
+            paragraph.style = style_name
+            return True
+        except (KeyError, ValueError, AttributeError):
+            continue
+    return False
+
+
 def _render_text_line(
     paragraph: Paragraph,
     line: str,
@@ -311,15 +337,72 @@ def _render_text_line(
     return bold_state
 
 
-def _add_text_with_citations(paragraph: Paragraph, text: str, citations: Dict[object, object]) -> None:
-    """Write text and attach Word comments to each [n] marker using Utilities helper."""
+def _add_text_with_citations(
+    paragraph: Paragraph,
+    text: str,
+    citations: Dict[object, object],
+    *,
+    append: bool = False,
+) -> None:
+    """
+    Write text and attach Word comments to each [n] marker using Utilities helper.
+
+    Markdown-style ``-`` prefixes are converted to actual DOCX bullet paragraphs so
+    that exported documents use Word's native list formatting instead of literal
+    hyphen characters.
+    """
     doc = paragraph.part.document
     parts = text.split("\n")
     bold_state = False
-    for index, line in enumerate(parts):
-        bold_state = _render_text_line(paragraph, line, citations, bold_state, doc)
-        if index < len(parts) - 1:
-            paragraph.add_run().add_break()
+    initial_text = paragraph.text or ""
+    plain_para = paragraph
+    last_para: Paragraph = paragraph
+    plain_line_started = bool(initial_text.strip())
+    suppress_plain_break = bool(append)
+    content_written = plain_line_started
+    last_output_was_bullet = False
+
+    for raw_line in parts:
+        bullet_text = _extract_bullet_text(raw_line)
+        if bullet_text:
+            if not content_written:
+                bullet_para = paragraph
+            else:
+                bullet_para = insert_paragraph_after(last_para, "")
+            bullet_para.text = ""
+            applied_style = _apply_bullet_style(bullet_para)
+            if not applied_style:
+                bullet_para.add_run("• ")
+            bold_state = _render_text_line(
+                bullet_para,
+                bullet_text,
+                citations,
+                bold_state,
+                doc,
+            )
+            last_para = bullet_para
+            last_output_was_bullet = True
+            content_written = True
+            continue
+
+        if last_output_was_bullet:
+            plain_para = insert_paragraph_after(last_para, "")
+            plain_para.text = ""
+            last_para = plain_para
+            plain_line_started = False
+            last_output_was_bullet = False
+            suppress_plain_break = False
+
+        target_para = plain_para
+        if plain_line_started:
+            if suppress_plain_break:
+                suppress_plain_break = False
+            else:
+                target_para.add_run().add_break()
+        bold_state = _render_text_line(target_para, raw_line, citations, bold_state, doc)
+        plain_line_started = True
+        content_written = True
+        last_para = target_para
 
 # ---------------------------- Answers loader ----------------------------
 def _populate_from_mapping(by_id: Dict[str, object], by_q: Dict[str, object], mapping: Dict[str, object]) -> None:
@@ -553,7 +636,7 @@ def _apply_answer_text(
         paragraph.add_run("\n")
     else:
         paragraph.text = ""
-    _add_text_with_citations(paragraph, answer_text, citations)
+    _add_text_with_citations(paragraph, answer_text, citations, append=append)
 
 
 def _get_next_paragraph(target: Paragraph) -> Optional[Paragraph]:
@@ -643,7 +726,7 @@ def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: st
     if current.strip():
         p = cell.paragraphs[-1]
         p.add_run().add_break()
-        _add_text_with_citations(p, answer_text, citations)
+        _add_text_with_citations(p, answer_text, citations, append=True)
     else:
         cell.text = ""
         p = cell.paragraphs[0]
