@@ -200,6 +200,8 @@ class AnswerLocator:
     table_index: Optional[int] = None       # for table_cell
     row: Optional[int] = None
     col: Optional[int] = None
+    question_col: Optional[int] = None
+    answer_col: Optional[int] = None
 
 @dataclass
 class QASlot:
@@ -373,6 +375,80 @@ def _is_blank_cell_text(text: str) -> bool:
     if _CELL_PLACEHOLDER_RE.match(stripped):
         return True
     return False
+
+
+_TWO_COL_QUESTION_HINTS = {
+    "question",
+    "prompt",
+    "requirement",
+    "item",
+    "description",
+    "criteria",
+    "topic",
+    "request",
+    "scope",
+    "specification",
+    "section",
+    "subject",
+}
+_TWO_COL_ANSWER_HINTS = {
+    "answer",
+    "response",
+    "responses",
+    "reply",
+    "input",
+    "comment",
+    "comments",
+    "notes",
+    "note",
+    "remark",
+    "remarks",
+    "narrative",
+    "explanation",
+    "vendor response",
+}
+
+
+def _contains_keyword(text: str, keywords: Set[str]) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(word in lowered for word in keywords)
+
+
+def _infer_two_column_roles(table: Table) -> Tuple[int, int, bool]:
+    """Return (question_col, answer_col, has_header) heuristics for 2-col tables."""
+    question_col = 0
+    answer_col = 1
+    if len(table.columns) != 2:
+        return question_col, answer_col, False
+    header_left = _table_cell_text(table, 0, 0)
+    header_right = _table_cell_text(table, 0, 1)
+    left_is_question = _contains_keyword(header_left, _TWO_COL_QUESTION_HINTS)
+    left_is_answer = _contains_keyword(header_left, _TWO_COL_ANSWER_HINTS)
+    right_is_question = _contains_keyword(header_right, _TWO_COL_QUESTION_HINTS)
+    right_is_answer = _contains_keyword(header_right, _TWO_COL_ANSWER_HINTS)
+    has_header = left_is_question or left_is_answer or right_is_question or right_is_answer
+    if has_header:
+        if left_is_answer and not right_is_answer:
+            answer_col = 0
+            question_col = 1
+        elif right_is_answer and not left_is_answer:
+            answer_col = 1
+            question_col = 0
+        elif right_is_question and not left_is_question:
+            question_col = 1
+            answer_col = 0
+        elif left_is_question and not right_is_question:
+            question_col = 0
+            answer_col = 1
+        elif left_is_answer and right_is_question:
+            answer_col = 0
+            question_col = 1
+        elif right_is_answer and left_is_question:
+            answer_col = 1
+            question_col = 0
+    return question_col, answer_col, has_header
 
 
 def _table_to_matrix(table: Table) -> List[List[str]]:
@@ -1053,27 +1129,36 @@ def detect_two_col_table_q_blank(blocks: List[Union[Paragraph, Table]]) -> List[
             table_counter += 1
             if len(b.columns) != 2:
                 continue
-            # Header detection
-            header_left = _table_cell_text(b, 0, 0).lower()
-            header_right = _table_cell_text(b, 0, 1).lower()
-            has_header = any(k in header_left for k in ("question", "prompt")) or any(k in header_right for k in ("answer", "response"))
+            question_col, answer_col, has_header = _infer_two_column_roles(b)
             start_row = 1 if has_header else 0
 
             for r in range(start_row, len(b.rows)):
-                left = _table_cell_text(b, r, 0)
-                right = _table_cell_text(b, r, 1)
-                if not left:
+                question_cell = _table_cell_text(b, r, question_col)
+                answer_cell = _table_cell_text(b, r, answer_col)
+                if not question_cell:
                     continue
                 # Question-like left, empty right
-                if _looks_like_question(left) and right == "":
+                if _looks_like_question(question_cell) and answer_cell == "":
                     conf = 0.8 if has_header else 0.7
                     slots.append(QASlot(
                         id=f"slot_{uuid.uuid4().hex[:8]}",
-                        question_text=left.strip(),
-                        answer_locator=AnswerLocator(type="table_cell", table_index=table_counter, row=r, col=1),
-                        answer_type=infer_answer_type(left, blocks, i),
+                        question_text=question_cell.strip(),
+                        answer_locator=AnswerLocator(
+                            type="table_cell",
+                            table_index=table_counter,
+                            row=r,
+                            col=answer_col,
+                            question_col=question_col,
+                            answer_col=answer_col,
+                        ),
+                        answer_type=infer_answer_type(question_cell, blocks, i),
                         confidence=conf,
-                        meta={"detector": "table_2col_q_left_blank_right", "has_header": has_header}
+                        meta={
+                            "detector": "table_2col_q_left_blank_right",
+                            "has_header": has_header,
+                            "question_col": question_col,
+                            "answer_col": answer_col,
+                        }
                     ))
     return slots
 

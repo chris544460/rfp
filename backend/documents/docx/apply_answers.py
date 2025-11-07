@@ -23,6 +23,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     Sequence,
     Tuple,
     Union,
@@ -34,7 +35,13 @@ from docx.text.paragraph import Paragraph
 from docx.table import Table
 from docx.oxml import OxmlElement
 from docx.enum.text import WD_COLOR_INDEX
-from .slot_finder import _looks_like_question
+from .slot_finder import (
+    _identify_header_rows,
+    _infer_two_column_roles,
+    _is_blank_cell_text,
+    _looks_like_question,
+    _table_to_matrix,
+)
 
 # NEW: real comment helper
 from .comments import add_comment_to_run
@@ -415,6 +422,53 @@ def _add_text_with_citations(
         content_written = True
         last_para = target_para
 
+# ---------------------------- Table helpers ----------------------------
+_TABLE_HEADER_CACHE: Dict[int, Set[int]] = {}
+
+
+def _table_header_rows(table: Table) -> Set[int]:
+    """Cache header row indexes for each table using slot_finder's heuristics."""
+    key = id(table._tbl)
+    cached = _TABLE_HEADER_CACHE.get(key)
+    if cached is None:
+        matrix = _table_to_matrix(table)
+        cached = _identify_header_rows(matrix)
+        _TABLE_HEADER_CACHE[key] = cached
+    return cached
+
+
+def _safe_table_cell_text(table: Table, row: int, col: int) -> str:
+    try:
+        return (table.cell(row, col).text or "").strip()
+    except Exception:
+        return ""
+
+
+def _find_next_data_row(
+    table: Table,
+    start_row: int,
+    answer_col: int,
+    question_col: Optional[int],
+    header_rows: Set[int],
+) -> Optional[int]:
+    """Search downward for the next non-header row with a blank answer cell."""
+    total_rows = len(table.rows)
+    col_count = len(table.columns)
+    if not (0 <= answer_col < col_count):
+        return None
+    question_col_valid = question_col is not None and 0 <= question_col < col_count
+    for r in range(start_row + 1, total_rows):
+        if r in header_rows:
+            continue
+        if question_col_valid:
+            question_text = _safe_table_cell_text(table, r, question_col)  # type: ignore[arg-type]
+            if not question_text:
+                continue
+        answer_text = _safe_table_cell_text(table, r, answer_col)
+        if _is_blank_cell_text(answer_text):
+            return r
+    return None
+
 # ---------------------------- Answers loader ----------------------------
 def _populate_from_mapping(by_id: Dict[str, object], by_q: Dict[str, object], mapping: Dict[str, object]) -> None:
     """Handle the simple ``{slot_id/question: answer}`` JSON structure."""
@@ -729,12 +783,13 @@ def apply_to_table_cell(tbl: Table, row: int, col: int, answer: object, mode: st
         answer_text = str(answer)
         citations = {}
     current = cell.text or ""
+    cell_is_blank = _is_blank_cell_text(current)
     if mode == "replace":
         cell.text = ""
         p = cell.paragraphs[0]
         _add_text_with_citations(p, answer_text, citations)
         return
-    if current.strip():
+    if not cell_is_blank:
         p = cell.paragraphs[-1]
         p.add_run().add_break()
         _add_text_with_citations(p, answer_text, citations, append=True)
@@ -1056,6 +1111,30 @@ def _apply_table_cell_slot(
         )
         return "table_oob"
     tbl = doc.tables[table_idx]
+    answer_col = _coerce_int(locator.get("answer_col"))
+    question_col = _coerce_int(locator.get("question_col"))
+    if len(tbl.columns) == 2:
+        inferred_q, inferred_a, _ = _infer_two_column_roles(tbl)
+        if answer_col is None:
+            answer_col = inferred_a
+        if question_col is None:
+            question_col = inferred_q
+    if answer_col is not None:
+        col = answer_col
+    if not (0 <= row < len(tbl.rows)):
+        dbg("  -> row index out of bounds for table")
+        return "bad_locator"
+    if not (0 <= col < len(tbl.columns)):
+        dbg("  -> column index out of bounds for table")
+        return "bad_locator"
+    header_rows = _table_header_rows(tbl)
+    if row in header_rows:
+        fallback_row = _find_next_data_row(tbl, row, col, question_col, header_rows)
+        if fallback_row is None:
+            dbg("  -> target row lies within table header; skipping to protect headings")
+            return "table_header"
+        dbg(f"  -> adjusted row from header {row} to {fallback_row}")
+        row = fallback_row
     apply_to_table_cell(tbl, row, col, answer, mode=mode)
     dbg(f"  -> wrote into table[{table_idx}] cell({row},{col})")
     return "applied"
@@ -1188,6 +1267,7 @@ def apply_answers_to_docx(
     skipped_no_answer = 0
     skipped_bad_locator = 0
     skipped_table_oob = 0
+    skipped_table_header = 0
 
     for slot in normalized_slots:
         sid = str(slot.get("id", "") or "")
@@ -1215,6 +1295,8 @@ def apply_answers_to_docx(
             applied += 1
         elif status == "table_oob":
             skipped_table_oob += 1
+        elif status == "table_header":
+            skipped_table_header += 1
         else:
             skipped_bad_locator += 1
 
@@ -1231,6 +1313,7 @@ def apply_answers_to_docx(
         "skipped_no_answer": skipped_no_answer,
         "skipped_bad_locator": skipped_bad_locator,
         "skipped_table_oob": skipped_table_oob,
+        "skipped_table_header": skipped_table_header,
         "total_slots": len(normalized_slots),
         "generated": 0,
     }
