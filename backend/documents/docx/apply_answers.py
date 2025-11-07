@@ -385,6 +385,17 @@ def _add_text_with_citations(
             content_written = True
             continue
 
+        if raw_line.strip() == "":
+            if not content_written:
+                continue
+            plain_para = insert_paragraph_after(last_para, "")
+            plain_para.text = ""
+            last_para = plain_para
+            plain_line_started = False
+            last_output_was_bullet = False
+            suppress_plain_break = True
+            continue
+
         if last_output_was_bullet:
             plain_para = insert_paragraph_after(last_para, "")
             plain_para.text = ""
