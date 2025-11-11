@@ -7,8 +7,10 @@ This module bridges the UI layer (progress spinners, downloads) with the
 answering pipeline (`Responder`, `DocumentFiller`, structured extraction).
 """
 
+import json
 import os
 import re
+import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -208,6 +210,7 @@ class DocumentJobController:
             for idx in range(len(answers)):
                 entry = answers[idx]
                 question_text = questions_text[idx] if idx < len(questions_text) else ""
+                question_meta = self._question_entry(job, idx)
                 if entry is None:
                     storage = {"text": "No answer generated.", "citations": {}}
                     comments: List[Any] = []
@@ -220,6 +223,7 @@ class DocumentJobController:
                         "answer": storage.get("text", ""),
                         "citations": storage.get("citations", {}),
                         "raw_comments": comments,
+                        "question_meta": question_meta,
                     }
                 )
             # build_excel_bundle handles temp files + download metadata for the UI.
@@ -243,6 +247,12 @@ class DocumentJobController:
                 "schema": schema,
                 "timestamp": datetime.utcnow().isoformat(),
             }
+            # Capture a log of generated answers in the Responsive upload format so operators
+            # can download and sync it manually even if we do not POST to the API yet.
+            responsive_export = self._build_responsive_export(job, qa_results, config)
+            if responsive_export:
+                bundle.setdefault("downloads", []).append(responsive_export["download"])
+                run_context["responsive_export"] = responsive_export["metadata"]
         elif mode == "docx_slots":
             slots_payload = job.get("slots_payload") or {}
             slots = job.get("questions") or []
@@ -267,6 +277,7 @@ class DocumentJobController:
                         "citations": storage.get("citations", {}),
                         "raw_comments": comments,
                         "slot_id": slot_id,
+                        "question_meta": slot if isinstance(slot, dict) else {},
                     }
                 )
             # For docx we keep both answered file and metadata about skipped slots.
@@ -291,11 +302,19 @@ class DocumentJobController:
                 "heuristic_skips": job.get("heuristic_skips", []),
                 "timestamp": datetime.utcnow().isoformat(),
             }
+            # Excel schema metadata often includes alternate questions/tags; include those
+            # details when building the Responsive-style payload.
+            responsive_export = self._build_responsive_export(job, qa_results, config)
+            if responsive_export:
+                bundle.setdefault("downloads", []).append(responsive_export["download"])
+                run_context["responsive_export"] = responsive_export["metadata"]
         else:
             qa_results = []
             total = len(questions_text)
             for idx in range(total):
                 entry = answers[idx] if idx < len(answers) else None
+                question_text = questions_text[idx] if idx < len(questions_text) else f"Question {idx + 1}"
+                question_meta = self._question_entry(job, idx)
                 if entry is None:
                     storage = {"text": "No answer generated.", "citations": {}}
                     comments = []
@@ -304,9 +323,11 @@ class DocumentJobController:
                     comments = entry.get("comments", [])
                 qa_results.append(
                     {
+                        "question": question_text,
                         "answer": storage.get("text", ""),
                         "citations": storage.get("citations", {}),
                         "raw_comments": comments,
+                        "question_meta": question_meta,
                     }
                 )
             bundle = filler.build_summary_bundle(
@@ -326,6 +347,11 @@ class DocumentJobController:
                 "qa_pairs": bundle.get("qa_pairs", []),
                 "timestamp": datetime.utcnow().isoformat(),
             }
+            # Summary mode has less structure, but we still want a portable Q/A log downstream.
+            responsive_export = self._build_responsive_export(job, qa_results, config)
+            if responsive_export:
+                bundle.setdefault("downloads", []).append(responsive_export["download"])
+                run_context["responsive_export"] = responsive_export["metadata"]
 
         job["downloads"] = bundle.get("downloads", [])
         job["run_context"] = run_context
@@ -411,6 +437,173 @@ class DocumentJobController:
                 run_context=run_context,
                 use_dialog=True,
             )
+
+    def _build_responsive_export(
+        self,
+        job: Dict[str, Any],
+        qa_results: List[Dict[str, Any]],
+        config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Generate a Responsive-compatible JSON payload plus download metadata.
+
+        The resulting list mirrors the POST /answer-lib/add contract:
+        ``[{question, alternateQuestions, answers[{key,value,isPrimary,languageCode}], tags}]``.
+        We only emit entries that have both question and answer text.
+        """
+        if not qa_results:
+            return None
+
+        question_meta = job.get("questions") or []
+        default_key = (config.get("responsive_answer_key") or "Answer").strip() or "Answer"
+        default_language = (config.get("responsive_language") or "en").strip() or "en"
+        default_tags = self._normalize_tag_list(config.get("responsive_tags"))
+
+        payload: List[Dict[str, Any]] = []
+        for idx, qa in enumerate(qa_results):
+            question_text = (qa.get("question") or "").strip()
+            answer_text = (qa.get("answer") or "").strip()
+            if not question_text or not answer_text:
+                # Responsive rejects empty fields; omit incomplete records.
+                continue
+            # Prefer the per-question metadata captured earlier (Excel schema entry,
+            # DOCX slot descriptor, etc.) so we can reuse alternate phrasing/tag info.
+            meta = {}
+            if isinstance(qa.get("question_meta"), dict):
+                meta = qa["question_meta"]
+            elif 0 <= idx < len(question_meta) and isinstance(question_meta[idx], dict):
+                meta = question_meta[idx]
+            alternate = self._extract_alternate_questions(meta)
+            tags = self._resolve_tags(meta, default_tags)
+            answer_key = self._resolve_answer_key(qa, meta, default_key)
+            language_code = self._resolve_language_code(qa, meta, default_language)
+
+            # Mirror POST /answer-lib/add: {question, alternateQuestions, answers[], tags}.
+            payload.append(
+                {
+                    "question": question_text,
+                    "alternateQuestions": alternate,
+                    "answers": [
+                        {
+                            "key": answer_key,
+                            "value": answer_text,
+                            "isPrimary": True,
+                            "languageCode": language_code,
+                        }
+                    ],
+                    "tags": tags,
+                }
+            )
+
+        if not payload:
+            # Nothing to download when no valid Q/A pairs were produced for this run.
+            return None
+
+        # Streamlit download buttons expect an in-memory bytes payload; write the JSON to
+        # a temp file first so we can read it back and immediately clean up the artifact.
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        with open(tmp.name, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        with open(tmp.name, "rb") as handle:
+            data = handle.read()
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+        stem = os.path.splitext(config.get("file_name") or "answer_library")[0] or "answer_library"
+        download = {
+            "key": "responsive_answer_library",
+            "label": "Download Responsive answer library JSON",
+            "data": data,
+            "file_name": f"{stem}_responsive.json",
+            "mime": "application/json",
+            "order": 90,
+        }
+        metadata = {
+            "record_count": len(payload),
+            "default_tags": default_tags,
+            "default_language": default_language,
+        }
+        return {"download": download, "metadata": metadata}
+
+    @staticmethod
+    def _question_entry(job: Dict[str, Any], idx: int) -> Dict[str, Any]:
+        """Return the raw question metadata for a given index if available."""
+        questions = job.get("questions") or []
+        if 0 <= idx < len(questions):
+            entry = questions[idx]
+            if isinstance(entry, dict):
+                return entry
+        return {}
+
+    def _extract_alternate_questions(self, meta: Dict[str, Any]) -> List[str]:
+        """Normalize alternate question strings from any available metadata."""
+        candidates = meta.get("alternateQuestions") or meta.get("alternate_questions")
+        schema_entry = meta.get("schema_entry")
+        if not candidates and isinstance(schema_entry, dict):
+            candidates = schema_entry.get("alternate_questions")
+        return [str(item).strip() for item in candidates or [] if str(item).strip()]
+
+    def _resolve_tags(self, meta: Dict[str, Any], default_tags: List[str]) -> List[str]:
+        """Prefer explicit tag metadata and fall back to the workflow defaults."""
+        schema_entry = meta.get("schema_entry")
+        tag_sources = [
+            meta.get("tags"),
+            meta.get("tag_list"),
+            meta.get("tag"),
+            schema_entry.get("tags") if isinstance(schema_entry, dict) else None,
+        ]
+        for source in tag_sources:
+            normalized = self._normalize_tag_list(source)
+            if normalized:
+                return normalized
+        return default_tags
+
+    @staticmethod
+    def _resolve_answer_key(
+        qa: Dict[str, Any],
+        meta: Dict[str, Any],
+        default_key: str,
+    ) -> str:
+        """Pick the first non-empty answer key while honouring per-question overrides."""
+        candidate = qa.get("answer_key") or meta.get("answer_key")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+        return default_key
+
+    @staticmethod
+    def _resolve_language_code(
+        qa: Dict[str, Any],
+        meta: Dict[str, Any],
+        default_language: str,
+    ) -> str:
+        """Return a language code from the QA payload/metadata or fall back to default."""
+        for candidate in (
+            qa.get("language_code"),
+            meta.get("language_code"),
+            meta.get("language"),
+        ):
+            if isinstance(candidate, str):
+                cleaned = candidate.strip()
+                if cleaned:
+                    return cleaned
+        return default_language
+
+    @staticmethod
+    def _normalize_tag_list(value) -> List[str]:
+        """Convert comma/semicolon delimited strings or iterables into a tag list."""
+        if not value:
+            return []
+        if isinstance(value, str):
+            items = re.split(r"[;,]", value)
+        else:
+            items = value
+        normalized: List[str] = []
+        for item in items:
+            text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return normalized
 
     # ── Internal helpers --------------------------------------------------
 
