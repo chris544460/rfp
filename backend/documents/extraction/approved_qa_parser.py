@@ -182,6 +182,8 @@ class ApprovedQAParser:
         current_section: Optional[str] = None
         for block in self._iter_docx_blocks(doc):
             if block["type"] == "heading":
+                # Headings are a natural divider. Finish whatever answer we were building
+                # so the next question starts fresh within the new section.
                 current_section = block["text"]
                 flush_pending()
                 continue
@@ -191,6 +193,8 @@ class ApprovedQAParser:
                 if not text:
                     continue
                 if self._looks_like_question(text):
+                    # This line looks like a question prompt. Close the previous pair (if any)
+                    # and start collecting lines for this new question.
                     flush_pending()
                     pending_question = self._strip_question_prefix(text)
                     pending_meta = {
@@ -199,10 +203,12 @@ class ApprovedQAParser:
                     }
                     pending_lines = []
                 elif pending_question:
+                    # Just a regular sentence that belongs to the current answer.
                     pending_lines.append(text)
                 continue
 
             if block["type"] == "table":
+                # Tables usually list a question in one column and an answer in another.
                 flush_pending()
                 table_records = self._parse_docx_table(
                     block["table"], section=current_section, source=Path(path).name
@@ -226,6 +232,8 @@ class ApprovedQAParser:
         parent = doc.element.body
         for child in parent.iterchildren():
             if isinstance(child, _DOCX_CTP):
+                # Turn each paragraph into a lightweight dict with its text and whether
+                # Word styled it as a heading.
                 paragraph = _DOCX_PARAGRAPH(child, doc)
                 text = paragraph.text.strip()
                 style = (
@@ -236,6 +244,7 @@ class ApprovedQAParser:
                 block_type = "heading" if style.startswith("heading") else "paragraph"
                 yield {"type": block_type, "text": text}
             elif isinstance(child, _DOCX_CTTBL):
+                # Pass tables downstream untouched so we can inspect every cell later.
                 yield {
                     "type": "table",
                     "table": _DOCX_TABLE(child, doc) if _DOCX_TABLE else None,
