@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
     spacy = None
 
 QUESTION_PREFIX_RE = re.compile(r"^(question\s*\d+[:.\-]|\bq[:.\-])\s*", re.IGNORECASE)
+NUMBERED_PREFIX_RE = re.compile(r"^(\d+[\).\s]+|[a-z][\).\s]+)", re.IGNORECASE)
 QUESTION_WORDS = {"who", "what", "when", "where", "why", "how", "which"}
 
 if spacy is not None:  # pragma: no cover - exercised via runtime
@@ -448,6 +449,8 @@ class ApprovedQAParser:
             return True
         if QUESTION_PREFIX_RE.match(cleaned):
             return True
+        if NUMBERED_PREFIX_RE.match(cleaned) and _spacy_is_question(cleaned):
+            return True
         if _spacy_is_question(cleaned):
             return True
         return False
@@ -457,6 +460,7 @@ class ApprovedQAParser:
         """Remove 'Question:'-style prefixes when building normalized text."""
         cleaned = text.strip()
         cleaned = QUESTION_PREFIX_RE.sub("", cleaned).strip()
+        cleaned = NUMBERED_PREFIX_RE.sub("", cleaned).strip()
         return cleaned
 
 
