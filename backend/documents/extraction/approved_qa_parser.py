@@ -1,12 +1,6 @@
+"""Parse approved RFP/DDQ answer libraries into normalized Q/A records."""
+
 from __future__ import annotations
-
-"""
-Utilities for parsing approved RFP/DDQ documents into normalized Q/A records.
-
-This module wraps the structured-extraction parsers so downstream code can
-consistently load Excel/DOCX answer libraries and obtain ready-to-export
-question/answer slots (e.g. for Responsive's POST /answer-lib/add payload).
-"""
 
 import logging
 import os
@@ -126,7 +120,7 @@ class ApprovedQAParser:
         for handler in parsers:
             try:
                 records = handler(path)
-            except Exception as exc:
+            except (ValueError, FileNotFoundError) as exc:
                 last_error = exc
                 continue
             if records:
@@ -329,11 +323,10 @@ class ApprovedQAParser:
             raise ValueError("Approved QA source is empty.")
 
         suffix = Path(file_name or "").suffix or ".tmp"
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        tmp.write(data)
-        tmp.flush()
-        tmp.close()
-        return tmp.name, True
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(data)
+            temp_path = tmp.name
+        return temp_path, True
 
     @staticmethod
     def _looks_like_question(text: str) -> bool:
