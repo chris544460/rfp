@@ -277,12 +277,12 @@ class ApprovedQAParser:
         Returns:
             List[QARecord]: Entries extracted from tables and paragraphs.
         """
-        if Document is None:
+        if _DOCX_DOCUMENT is None:
             raise RuntimeError(
                 "python-docx is required to parse DOCX answer libraries."
             )
         # Load the DOCX structure once so we can walk paragraphs and tables without re-reading disk.
-        doc = Document(path)
+        doc = _DOCX_DOCUMENT(path)
         # Collect normalized records in document order to preserve context.
         records: List[QARecord] = []
 
