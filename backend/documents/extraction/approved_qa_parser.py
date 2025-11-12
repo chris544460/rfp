@@ -100,6 +100,7 @@ class ApprovedQAParser:
         default_answer_key: str = "Answer",
         default_language: str = "en",
     ) -> None:
+        """Initialize parser defaults such as answer key labels and language."""
         self.default_answer_key = default_answer_key.strip() or "Answer"
         self.default_language = default_language.strip() or "en"
 
@@ -319,6 +320,7 @@ class ApprovedQAParser:
         pending_lines: List[str] = []
 
         def flush() -> None:
+            """Persist the buffered text as an answer for the pending question."""
             nonlocal pending_question, pending_lines
             if pending_question and pending_lines:
                 answer_text = "\n".join(pending_lines).strip()
