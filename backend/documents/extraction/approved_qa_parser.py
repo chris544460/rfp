@@ -22,7 +22,23 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
     CT_P = None  # type: ignore[assignment]
     CT_Tbl = None  # type: ignore[assignment]
 
+try:  # Optional spaCy dependency for question detection.
+    import spacy
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    spacy = None
+
 QUESTION_PREFIX_RE = re.compile(r"^(question\s*\d+[:.\-]|\bq[:.\-])\s*", re.IGNORECASE)
+QUESTION_WORDS = {"who", "what", "when", "where", "why", "how", "which"}
+
+if spacy is not None:  # pragma: no cover - exercised via runtime
+    try:
+        _NLP = spacy.load("en_core_web_sm")
+    except Exception:
+        _NLP = spacy.blank("en")
+        if "sentencizer" not in _NLP.pipe_names:
+            _NLP.add_pipe("sentencizer")
+else:  # pragma: no cover - spaCy unavailable
+    _NLP = None
 
 
 @dataclass
@@ -432,6 +448,8 @@ class ApprovedQAParser:
             return True
         if QUESTION_PREFIX_RE.match(cleaned):
             return True
+        if _spacy_is_question(cleaned):
+            return True
         return False
 
     @staticmethod
@@ -440,6 +458,29 @@ class ApprovedQAParser:
         cleaned = text.strip()
         cleaned = QUESTION_PREFIX_RE.sub("", cleaned).strip()
         return cleaned
+
+
+def _spacy_is_question(text: str) -> bool:
+    """Use spaCy to detect interrogative/imperative sentences similar to QuestionExtractor."""
+    if _NLP is None:
+        return False
+    doc = _NLP(text)
+    sentences = list(doc.sents) if doc.has_annotation("SENT_START") else [doc]
+    for sent in sentences:
+        sent_text = sent.text.strip()
+        if not sent_text:
+            continue
+        if sent_text.endswith("?"):
+            return True
+        if any(tok.lower_ in QUESTION_WORDS for tok in sent):
+            return True
+        root = sent.root
+        if "Imp" in root.morph.get("Mood"):
+            return True
+        first = sent[0]
+        if root.tag_ == "VB" and first is root:
+            return True
+    return False
 
 
 __all__ = ["ApprovedQAParser", "QARecord", "AnswerVariant"]
