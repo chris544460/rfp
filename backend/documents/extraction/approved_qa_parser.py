@@ -119,6 +119,14 @@ class ApprovedQAParser:
     # ── Excel parsing -----------------------------------------------------
 
     def _parse_excel(self, path: str) -> List[QARecord]:
+        """Attempt each supported Excel layout until one returns records.
+
+        Args:
+            path: Filesystem path to the Excel artifact.
+
+        Returns:
+            List of QARecord entries parsed from the file (may be empty).
+        """
         parsers = (
             self._parse_excel_answer_library,
             self._parse_excel_loopio,
@@ -138,6 +146,14 @@ class ApprovedQAParser:
         return []
 
     def _parse_excel_answer_library(self, path: str) -> List[QARecord]:
+        """Parse Answer Library-style exports into QARecord objects.
+
+        Args:
+            path: Filesystem path to the workbook.
+
+        Returns:
+            List of QARecord instances detected from the sheet.
+        """
         parser = ExcelAnswerLibraryParser(path)
         raw = parser.parse()
         return [
@@ -158,6 +174,14 @@ class ApprovedQAParser:
         ]
 
     def _parse_excel_loopio(self, path: str) -> List[QARecord]:
+        """Parse Loopio Excel exports into QARecord objects.
+
+        Args:
+            path: Filesystem path to the workbook.
+
+        Returns:
+            List of QARecord instances detected from the sheet.
+        """
         parser = LoopioExcelParser(path)
         raw = parser.parse()
         return [
@@ -177,6 +201,14 @@ class ApprovedQAParser:
         ]
 
     def _parse_excel_questionnaire(self, path: str) -> List[QARecord]:
+        """Parse two-column questionnaire spreadsheets into QARecord objects.
+
+        Args:
+            path: Filesystem path to the workbook.
+
+        Returns:
+            List of QARecord entries built from two-column Q/A rows.
+        """
         parser = ExcelQuestionnaireParser(path)
         raw = parser.parse()
         return [
@@ -197,6 +229,14 @@ class ApprovedQAParser:
     # ── DOCX parsing ------------------------------------------------------
 
     def _parse_docx(self, path: str) -> List[QARecord]:
+        """Parse DOCX tables (and paragraph-form Q/A) into QARecord objects.
+
+        Args:
+            path: Filesystem path to the DOCX artifact.
+
+        Returns:
+            List of QARecord entries extracted from tables/paragraphs.
+        """
         parser = MixedDocParser(path)
         raw = parser.parse()
         records: List[QARecord] = []
@@ -206,6 +246,7 @@ class ApprovedQAParser:
         pending_meta: Dict[str, object] = {}
 
         def flush_pending() -> None:
+            """Persist the currently buffered paragraph Q/A pair if possible."""
             nonlocal pending_question, pending_lines, pending_meta
             if pending_question and pending_lines:
                 answer_text = "\n".join(pending_lines).strip()
@@ -269,6 +310,14 @@ class ApprovedQAParser:
     # ── Helpers -----------------------------------------------------------
 
     def _build_answer_variants(self, values: Iterable[str]) -> List[AnswerVariant]:
+        """Normalize raw strings into AnswerVariant entries with default keys.
+
+        Args:
+            values: Iterable of answer strings gathered from the source.
+
+        Returns:
+            List of AnswerVariant entries (primary is the first non-empty value).
+        """
         variants: List[AnswerVariant] = []
         for idx, raw_value in enumerate(values):
             text = (raw_value or "").strip()
@@ -295,6 +344,19 @@ class ApprovedQAParser:
         source: Optional[str],
         metadata: Optional[Dict[str, object]],
     ) -> QARecord:
+        """Construct a QARecord while stripping whitespace and empty values.
+
+        Args:
+            question: Question text.
+            answers: List of AnswerVariant objects.
+            alternate: Alternate question phrasings.
+            tags: Associated tags.
+            source: Optional source identifier.
+            metadata: Optional metadata captured from the parser.
+
+        Returns:
+            QARecord containing the supplied data.
+        """
         return QARecord(
             question=question.strip(),
             answers=answers,
@@ -311,8 +373,20 @@ class ApprovedQAParser:
         file_name: Optional[str],
     ) -> Tuple[str, bool]:
         """
-        Return (file_path, cleanup_flag). When cleanup_flag is True the caller
-        must delete the temp file after use.
+        Copy input data into a temp file if needed.
+
+        Args:
+            source: Path, bytes, or binary stream containing the document.
+            file_name: Optional hint for deriving a suffix.
+
+        Returns:
+            Tuple[path, cleanup] where cleanup indicates the caller should
+            delete the temp file after use.
+
+        Raises:
+            FileNotFoundError: When the provided path does not exist.
+            TypeError: If the stream type is unsupported.
+            ValueError: When the data is empty.
         """
         if isinstance(source, (str, Path)):
             path = Path(source)
@@ -343,6 +417,14 @@ class ApprovedQAParser:
 
     @staticmethod
     def _looks_like_question(text: str) -> bool:
+        """Heuristic check for whether a paragraph resembles a question prompt.
+
+        Args:
+            text: Paragraph text to inspect.
+
+        Returns:
+            True if the string appears to represent a question, False otherwise.
+        """
         cleaned = text.strip()
         if not cleaned:
             return False
@@ -359,6 +441,14 @@ class ApprovedQAParser:
 
     @staticmethod
     def _strip_question_prefix(text: str) -> str:
+        """Remove 'Question:'-style prefixes when building normalized text.
+
+        Args:
+            text: Paragraph text potentially prefixed with numbering.
+
+        Returns:
+            Question text without leading numbering/prefixes.
+        """
         cleaned = text.strip()
         lowered = cleaned.lower()
         if lowered.startswith("question"):
