@@ -50,6 +50,35 @@ QUESTION_PREFIX_RE = re.compile(
 NUMBERED_PREFIX_RE = re.compile(
     r"^(\d+[\).\s]+|[a-z][\).\s]+)", re.IGNORECASE
 )
+# Broader enumeration matcher used to mimic slot_finder outline stripping.
+ENUM_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:\(?\d+(?:\.\d+)*\)?[.)]?)|"  # 1   1.1   2.3.4   (1)   1)
+    r"(?:[A-Za-z][.)])|"                   # a)   A)   a.   A.
+    r"(?:\([A-Za-z0-9]+\))"               # (a)  (A)  (i)  (1)
+    r")\s+",
+)
+# Common request cues reused from slot_finder so imperative prompts get caught.
+QUESTION_PHRASES = (
+    "please describe",
+    "please provide",
+    "explain",
+    "detail",
+    "outline",
+    "how do you",
+    "how will you",
+    "what is your",
+    "what are your",
+    "do you",
+    "can you",
+    "does your",
+    "have you",
+    "who",
+    "when",
+    "where",
+    "why",
+    "which",
+)
 # Core interrogative anchors to help spaCy decide whether imperative sentences are question-like.
 QUESTION_WORDS = {
     "who",
@@ -296,6 +325,9 @@ class ApprovedQAParser:
         def flush_pending() -> None:
             """Persist the currently buffered paragraph Q/A pair if possible.
 
+            Args:
+                None
+
             Returns:
                 None
             """
@@ -498,6 +530,9 @@ class ApprovedQAParser:
         def flush() -> None:
             """Persist the buffered text as an answer for the pending question.
 
+            Args:
+                None
+
             Returns:
                 None
             """
@@ -661,21 +696,40 @@ class ApprovedQAParser:
         Returns:
             bool: True if the text appears to be a question, False otherwise.
         """
-        cleaned = text.strip()
+        cleaned = (text or "").strip()
         if not cleaned:
             # Empty strings can't encode questions and just add noise.
             return False
-        if cleaned.endswith("?"):
-            # Literal question mark is the strongest indicator.
+
+        # Run the fast screen first so obvious prompts short-circuit quickly.
+        if _quick_question_candidate(cleaned):
             return True
-        if QUESTION_PREFIX_RE.match(cleaned):
-            # Explicit "Question:" cue means the author annotated prompts.
+
+        # Normalize enumeration cruft ("1.1", "(a)") before scanning for cues.
+        normalized = _strip_enum_prefix(cleaned)
+        lower_norm = normalized.lower()
+
+        # Slot-finder style cue phrases at the beginning or anywhere in the text.
+        if any(lower_norm.startswith(phrase) for phrase in QUESTION_PHRASES):
             return True
-        if NUMBERED_PREFIX_RE.match(cleaned) and _spacy_is_question(cleaned):
-            # Numbered lists need NLP confirmation so plain outlines do not trigger.
+        if any(phrase in lower_norm for phrase in QUESTION_PHRASES):
             return True
+
+        # Explicit "Question:" or "Prompt:" labels should always count.
+        lowered_clean = cleaned.lower()
+        if QUESTION_PREFIX_RE.match(cleaned) or lowered_clean.startswith(
+            ("prompt:", "rfp question:")
+        ):
+            return True
+
+        # Numbered outlines that also include cues are likely prompts even sans question mark.
+        if ENUM_PREFIX_RE.match(cleaned) and any(
+            phrase in lower_norm for phrase in QUESTION_PHRASES
+        ):
+            return True
+
+        # Fall back to spaCy heuristics (imperatives, interrogatives, etc.).
         if _spacy_is_question(cleaned):
-            # Fall back to NLP heuristics for imperatives like "Describe...".
             return True
         return False
 
@@ -732,6 +786,43 @@ def _spacy_is_question(text: str) -> bool:
             # Plain verb-first sentences (commands) imply a question even without punctuation.
             return True
     return False
+
+
+def _quick_question_candidate(text: str) -> bool:
+    """Fast screening heuristic mirroring slot_finder's first-layer check.
+
+    Args:
+        text (str): Candidate sentence or paragraph to inspect.
+
+    Returns:
+        bool: True if lightweight keyword checks suggest the text is a question.
+    """
+    # Normalize incoming text because blank lines and surrounding spaces are common.
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    # Lowercase once so phrase checks are case-insensitive.
+    lower = raw.lower()
+    if "?" in raw:
+        return True
+    # Reuse slot_finder keywords so we stay consistent with upstream heuristics.
+    return any(phrase in lower for phrase in QUESTION_PHRASES)
+
+
+def _strip_enum_prefix(text: str) -> str:
+    """Remove leading numbering/outline tokens.
+
+    Args:
+        text (str): Text that may begin with identifiers like "1.", "(a)", or "A)".
+
+    Returns:
+        str: Text with at most one leading outline token removed.
+    """
+    if not text:
+        return ""
+    # Remove only a single prefix so nested identifiers (e.g., "1.a)") retain structure.
+    stripped_once = ENUM_PREFIX_RE.sub("", text, count=1)
+    return stripped_once.strip()
 
 
 # Re-export public API so external modules can import the parser without digging through modules.
