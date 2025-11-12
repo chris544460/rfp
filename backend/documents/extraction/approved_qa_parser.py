@@ -34,7 +34,7 @@ QUESTION_WORDS = {"who", "what", "when", "where", "why", "how", "which"}
 if _SPACY is not None:  # pragma: no cover - exercised via runtime
     try:
         _NLP = _SPACY.load("en_core_web_sm")
-    except Exception:
+    except (OSError, IOError):
         _NLP = _SPACY.blank("en")
         if "sentencizer" not in _NLP.pipe_names:
             _NLP.add_pipe("sentencizer")
