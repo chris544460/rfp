@@ -43,7 +43,9 @@ class QARecord:
     def to_responsive_payload(self) -> Dict[str, object]:
         """Return a dict shaped like POST /answer-lib/add expects."""
         if not self.question or not self.answers:
-            raise ValueError("QARecord requires both question and answer text to serialize.")
+            raise ValueError(
+                "QARecord requires both question and answer text to serialize."
+            )
         payload = {
             "question": self.question,
             "alternateQuestions": list(self.alternate_questions),
@@ -60,7 +62,9 @@ class QARecord:
             "tags": list(self.tags),
         }
         if not payload["answers"]:
-            raise ValueError("QARecord cannot serialize when answers are empty after filtering.")
+            raise ValueError(
+                "QARecord cannot serialize when answers are empty after filtering."
+            )
         return payload
 
 
@@ -90,7 +94,9 @@ class ApprovedQAParser:
                 return self._parse_excel(path)
             if suffix == ".docx":
                 return self._parse_docx(path)
-            raise ValueError(f"Unsupported file type '{suffix}' for approved QA parsing.")
+            raise ValueError(
+                f"Unsupported file type '{suffix}' for approved QA parsing."
+            )
         finally:
             if cleanup:
                 try:
@@ -98,7 +104,9 @@ class ApprovedQAParser:
                 except OSError:
                     logger.debug("Failed to cleanup temp file %s", path, exc_info=True)
 
-    def to_responsive_payload(self, records: Sequence[QARecord]) -> List[Dict[str, object]]:
+    def to_responsive_payload(
+        self, records: Sequence[QARecord]
+    ) -> List[Dict[str, object]]:
         """Convert parsed records into the Responsive upload schema."""
         payload: List[Dict[str, object]] = []
         for record in records:
@@ -247,7 +255,10 @@ class ApprovedQAParser:
                 if self._looks_like_question(text):
                     flush_pending()
                     pending_question = self._strip_question_prefix(text)
-                    pending_meta = {"section": entry.get("section"), "source": entry.get("source")}
+                    pending_meta = {
+                        "section": entry.get("section"),
+                        "source": entry.get("source"),
+                    }
                     pending_lines = []
                 elif pending_question:
                     pending_lines.append(text)
@@ -318,7 +329,9 @@ class ApprovedQAParser:
             if hasattr(buffer, "read"):
                 data = buffer.read()
             else:
-                raise TypeError("ApprovedQAParser expects a path, bytes, or binary stream.")
+                raise TypeError(
+                    "ApprovedQAParser expects a path, bytes, or binary stream."
+                )
         if not data:
             raise ValueError("Approved QA source is empty.")
 
