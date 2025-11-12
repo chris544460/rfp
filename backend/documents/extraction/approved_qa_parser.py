@@ -10,32 +10,32 @@ from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 try:  # Optional dependency; docx parsing only.
-    from docx import Document
-    from docx.table import Table as DocxTable
-    from docx.text.paragraph import Paragraph
-    from docx.oxml.text.paragraph import CT_P
-    from docx.oxml.table import CT_Tbl
+    from docx import Document as _DOCX_DOCUMENT
+    from docx.table import Table as _DOCX_TABLE
+    from docx.text.paragraph import Paragraph as _DOCX_PARAGRAPH
+    from docx.oxml.text.paragraph import CT_P as _DOCX_CTP
+    from docx.oxml.table import CT_Tbl as _DOCX_CTTBL
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
-    Document = None  # type: ignore[assignment]
-    DocxTable = None  # type: ignore[assignment]
-    Paragraph = None  # type: ignore[assignment]
-    CT_P = None  # type: ignore[assignment]
-    CT_Tbl = None  # type: ignore[assignment]
+    _DOCX_DOCUMENT = None  # type: ignore[assignment]
+    _DOCX_TABLE = None  # type: ignore[assignment]
+    _DOCX_PARAGRAPH = None  # type: ignore[assignment]
+    _DOCX_CTP = None  # type: ignore[assignment]
+    _DOCX_CTTBL = None  # type: ignore[assignment]
 
 try:  # Optional spaCy dependency for question detection.
-    import spacy
+    import spacy as _SPACY
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
-    spacy = None
+    _SPACY = None
 
 QUESTION_PREFIX_RE = re.compile(r"^(question\s*\d+[:.\-]|\bq[:.\-])\s*", re.IGNORECASE)
 NUMBERED_PREFIX_RE = re.compile(r"^(\d+[\).\s]+|[a-z][\).\s]+)", re.IGNORECASE)
 QUESTION_WORDS = {"who", "what", "when", "where", "why", "how", "which"}
 
-if spacy is not None:  # pragma: no cover - exercised via runtime
+if _SPACY is not None:  # pragma: no cover - exercised via runtime
     try:
-        _NLP = spacy.load("en_core_web_sm")
+        _NLP = _SPACY.load("en_core_web_sm")
     except Exception:
-        _NLP = spacy.blank("en")
+        _NLP = _SPACY.blank("en")
         if "sentencizer" not in _NLP.pipe_names:
             _NLP.add_pipe("sentencizer")
 else:  # pragma: no cover - spaCy unavailable
@@ -220,12 +220,12 @@ class ApprovedQAParser:
         Yields:
             Dicts describing each block: {"type": "paragraph"/"heading"/"table", ...}.
         """
-        if CT_P is None or CT_Tbl is None or Paragraph is None:
+        if _DOCX_CTP is None or _DOCX_CTTBL is None or _DOCX_PARAGRAPH is None:
             return
         parent = doc.element.body
         for child in parent.iterchildren():
-            if isinstance(child, CT_P):
-                paragraph = Paragraph(child, doc)
+            if isinstance(child, _DOCX_CTP):
+                paragraph = _DOCX_PARAGRAPH(child, doc)
                 text = paragraph.text.strip()
                 style = (
                     paragraph.style.name.lower()
@@ -234,15 +234,15 @@ class ApprovedQAParser:
                 )
                 block_type = "heading" if style.startswith("heading") else "paragraph"
                 yield {"type": block_type, "text": text}
-            elif isinstance(child, CT_Tbl):
+            elif isinstance(child, _DOCX_CTTBL):
                 yield {
                     "type": "table",
-                    "table": DocxTable(child, doc) if DocxTable else None,
+                    "table": _DOCX_TABLE(child, doc) if _DOCX_TABLE else None,
                 }
 
     def _parse_docx_table(
         self,
-        table: Optional[DocxTable],
+        table: Optional[_DOCX_TABLE],
         *,
         section: Optional[str],
         source: str,
