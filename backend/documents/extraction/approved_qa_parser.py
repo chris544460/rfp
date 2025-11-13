@@ -888,6 +888,7 @@ class ApprovedQAParser:
 
     @classmethod
     def _build_record(
+        cls,
         *,
         question: str,
         answers: List[AnswerVariant],
