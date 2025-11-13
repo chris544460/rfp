@@ -33,7 +33,11 @@ from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from backend.documents.docx.slot_finder import QUESTION_PHRASES, _expand_doc_blocks
+from backend.documents.docx.slot_finder import (
+    QUESTION_PHRASES,
+    _expand_doc_blocks,
+    _iter_block_items,
+)
 from backend.documents.extraction.question_extractor import QuestionExtractor
 from backend.llm.completions_client import CompletionsClient
 
@@ -220,22 +224,45 @@ class DocxQuestionAnalyzer:
     def _load_blocks(self, path: Path) -> List[BlockRecord]:
         doc = Document(str(path))
         raw_blocks = _expand_doc_blocks(doc)
+        text_overrides = self._expanded_block_texts(doc, raw_blocks)
         records: List[BlockRecord] = []
         for idx, block in enumerate(raw_blocks):
             block_type: Literal["paragraph", "table"] = (
                 "table" if isinstance(block, Table) else "paragraph"
             )
-            text = self._extract_block_text(block)
+            text = text_overrides[idx]
             records.append(BlockRecord(index=idx, block_type=block_type, text=text))
         return records
 
-    @staticmethod
-    def _extract_block_text(block: Paragraph | Table) -> str:
+    def _expanded_block_texts(
+        self,
+        doc: Document,
+        expanded_blocks: List[Any],
+    ) -> List[str]:
+        texts: List[str] = []
+        for block in _iter_block_items(doc):
+            if isinstance(block, Paragraph) and "\n" in (block.text or ""):
+                lines = (block.text or "").splitlines()
+                if not lines:
+                    texts.append("")
+                else:
+                    texts.extend([line.strip() for line in lines])
+            else:
+                texts.append(self._raw_block_text(block))
+        if len(texts) != len(expanded_blocks):
+            texts = [self._raw_block_text(block) for block in expanded_blocks]
+        return texts
+
+    def _raw_block_text(self, block: Paragraph | Table) -> str:
         if isinstance(block, Paragraph):
             return (block.text or "").strip()
+        return self._extract_table_text(block)
+
+    @staticmethod
+    def _extract_table_text(table: Table) -> str:
         lines: List[str] = []
         try:
-            for row in block.rows:
+            for row in table.rows:
                 cells = [
                     (cell.text or "").strip()
                     for cell in row.cells
