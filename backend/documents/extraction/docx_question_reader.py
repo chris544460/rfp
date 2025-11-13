@@ -11,10 +11,13 @@ Examples:
     python backend/documents/extraction/docx_question_reader.py path/to/file.docx
     python backend/documents/extraction/docx_question_reader.py file.docx --json
     python backend/documents/extraction/docx_question_reader.py file.docx --show-metadata
+    python backend/documents/extraction/docx_question_reader.py file.docx --use-llm-classifier
 
 Use the --treat-docx-as-text flag to force the fallback text-extraction path.
 That mode requires the custom CompletionsClient environment variables because
 it calls the LLM prompt used in `QuestionExtractor.extract_from_text`.
+Similarly, --use-llm-classifier instantiates a CompletionsClient to have the
+LLM decide whether each block is a question, an answer, or unrelated.
 """
 from __future__ import annotations
 
@@ -24,7 +27,7 @@ import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from docx import Document
 from docx.table import Table
@@ -46,6 +49,19 @@ ANSWER_PREFIXES = (
     "the firm",
     "the company",
 )
+
+BLOCK_CLASSIFIER_PROMPT = """
+You analyze questionnaire-style DOCX documents. Each block of text can be a
+question, an answer to the most recent question, or unrelated/other.
+
+Consider the block content, the last confirmed question (if any), and the
+heuristic suggestion provided. Produce a short JSON object with keys:
+  - label: one of ["question", "answer", "none"]
+  - reason: brief justification referring to clues in the text
+
+Be decisive—choose the label that best fits the block's role. Always respond
+with valid JSON.
+""".strip()
 
 
 @dataclass
@@ -89,12 +105,91 @@ class ExtractionResult:
     qa_bundles: List[QuestionAnswerBundle]
 
 
+class LLMBlockClassifier:
+    """Lightweight wrapper that asks the LLM to label each block."""
+
+    def __init__(self, model: str):
+        self._client = CompletionsClient(model=model)
+
+    def classify(
+        self,
+        *,
+        block_index: int,
+        text: str,
+        previous_question: Optional[str],
+        heuristic_label: str,
+        heuristic_reason: str,
+    ) -> Optional[Tuple[str, str]]:
+        prompt = self._build_prompt(
+            block_index=block_index,
+            text=text,
+            previous_question=previous_question,
+            heuristic_label=heuristic_label,
+            heuristic_reason=heuristic_reason,
+        )
+        try:
+            response = self._client.get_completion(prompt, json_output=True)
+        except Exception:
+            return None
+        content = response[0] if isinstance(response, tuple) else response
+        return self._parse_response(content)
+
+    @staticmethod
+    def _build_prompt(
+        *,
+        block_index: int,
+        text: str,
+        previous_question: Optional[str],
+        heuristic_label: str,
+        heuristic_reason: str,
+    ) -> str:
+        prev_question = previous_question or "<none>"
+        snippet = text or "<blank>"
+        return (
+            f"{BLOCK_CLASSIFIER_PROMPT}\n\n"
+            f"Block index: {block_index}\n"
+            f"Previous question: {prev_question}\n"
+            f"Heuristic suggestion: label='{heuristic_label}' reason='{heuristic_reason}'\n"
+            f"Block text:\n{snippet}\n"
+        )
+
+    @staticmethod
+    def _parse_response(content: str) -> Optional[Tuple[str, str]]:
+        try:
+            data = json.loads(content)
+        except Exception:
+            match = re.search(r"\{.*\}", content, re.S)
+            if not match:
+                return None
+            try:
+                data = json.loads(match.group(0))
+            except Exception:
+                return None
+        label = str(data.get("label", "")).strip().lower()
+        if label not in {"question", "answer", "none"}:
+            return None
+        reason = str(data.get("reason") or "").strip() or "LLM classification."
+        return label, reason
+
+
 class DocxQuestionAnalyzer:
     """Core service that loads a DOCX and returns question/answer classifications."""
 
-    def __init__(self, *, treat_docx_as_text: bool = False, model: str = "gpt-5-nano"):
+    def __init__(
+        self,
+        *,
+        treat_docx_as_text: bool = False,
+        model: str = "gpt-5-nano",
+        use_llm_classifier: bool = False,
+        classifier_model: Optional[str] = None,
+    ):
         self.treat_docx_as_text = treat_docx_as_text
         self.model = model
+        self._block_classifier = (
+            LLMBlockClassifier(model=classifier_model or model)
+            if use_llm_classifier
+            else None
+        )
         self._extractor = QuestionExtractor(llm_client=self._build_llm())
 
     def _build_llm(self) -> Optional[CompletionsClient]:
@@ -158,55 +253,18 @@ class DocxQuestionAnalyzer:
         question_payload: List[Dict[str, Any]],
     ) -> List[BlockClassification]:
         slot_map = self._map_slots_to_blocks(blocks, question_payload)
+        has_slot_metadata = bool(slot_map)
         classifications: List[BlockClassification] = []
         active_question: Optional[str] = None
         distance_from_question: Optional[int] = None
         trailing_blank_blocks = 0
 
         for block in blocks:
+            if distance_from_question is not None:
+                distance_from_question += 1
             text = block.text.strip()
             slot_hits = slot_map.get(block.index, [])
-
-            if slot_hits:
-                question_text = self._slot_question_text(slot_hits, text)
-                reason = self._question_reason(slot_hits, block.index)
-                classifications.append(
-                    BlockClassification(
-                        index=block.index,
-                        block_type=block.block_type,
-                        classification="question",
-                        text=text,
-                        reason=reason,
-                        question_reference=question_text,
-                    )
-                )
-                active_question = question_text
-                distance_from_question = 0
-                trailing_blank_blocks = 0
-                continue
-
             heuristic_question = self._looks_like_question(text)
-            if heuristic_question and not slot_map:
-                reason = "Heuristic question phrasing detected in text-extraction mode."
-                classifications.append(
-                    BlockClassification(
-                        index=block.index,
-                        block_type=block.block_type,
-                        classification="question",
-                        text=text,
-                        reason=reason,
-                        question_reference=text or None,
-                    )
-                )
-                active_question = text or None
-                distance_from_question = 0
-                trailing_blank_blocks = 0
-                continue
-
-            if active_question is not None:
-                distance_from_question = (distance_from_question or 0) + 1
-            else:
-                distance_from_question = None
 
             if not text:
                 trailing_blank_blocks += 1
@@ -216,41 +274,105 @@ class DocxQuestionAnalyzer:
                 active_question = None
                 distance_from_question = None
 
-            answer_reason = self._answer_reason(
+            heur_label, heur_reason, question_candidate = self._heuristic_label(
                 block=block,
                 text=text,
+                slot_hits=slot_hits,
+                heuristic_question=heuristic_question,
                 active_question=active_question,
                 offset=distance_from_question,
+                has_slot_metadata=has_slot_metadata,
             )
-            if answer_reason:
-                classifications.append(
-                    BlockClassification(
-                        index=block.index,
-                        block_type=block.block_type,
-                        classification="answer",
-                        text=text,
-                        reason=answer_reason,
-                        question_reference=active_question,
-                    )
-                )
-                continue
 
-            none_reason = self._none_reason(
-                text=text,
-                has_question_context=active_question is not None,
-                heuristic_question=heuristic_question,
-            )
-            classifications.append(
-                BlockClassification(
-                    index=block.index,
-                    block_type=block.block_type,
-                    classification="none",
+            final_label = heur_label
+            final_reason = heur_reason
+            if self._block_classifier:
+                llm_result = self._block_classifier.classify(
+                    block_index=block.index,
                     text=text,
-                    reason=none_reason,
-                    question_reference=active_question,
+                    previous_question=active_question,
+                    heuristic_label=heur_label,
+                    heuristic_reason=heur_reason,
                 )
+                if llm_result:
+                    final_label, final_reason = llm_result
+
+            question_reference = self._determine_question_reference(
+                label=final_label,
+                question_candidate=question_candidate or text or None,
+                active_question=active_question,
             )
+
+            classification = BlockClassification(
+                index=block.index,
+                block_type=block.block_type,
+                classification=final_label,
+                text=text,
+                reason=final_reason,
+                question_reference=question_reference,
+            )
+            classifications.append(classification)
+
+            if final_label == "question":
+                active_question = question_reference
+                distance_from_question = 0
+                trailing_blank_blocks = 0
+            elif final_label == "answer":
+                # keep active_question for downstream answers
+                pass
+            else:
+                # 'none' keeps current context until blank reset
+                pass
         return classifications
+
+    def _heuristic_label(
+        self,
+        *,
+        block: BlockRecord,
+        text: str,
+        slot_hits: List[Dict[str, Any]],
+        heuristic_question: bool,
+        active_question: Optional[str],
+        offset: Optional[int],
+        has_slot_metadata: bool,
+    ) -> Tuple[str, str, Optional[str]]:
+        if slot_hits:
+            question_text = self._slot_question_text(slot_hits, text)
+            reason = self._question_reason(slot_hits, block.index)
+            return "question", reason, question_text
+
+        if heuristic_question and not has_slot_metadata:
+            reason = "Heuristic question phrasing detected in text-extraction mode."
+            return "question", reason, text or None
+
+        answer_reason = self._answer_reason(
+            block=block,
+            text=text,
+            active_question=active_question,
+            offset=offset,
+        )
+        if answer_reason:
+            return "answer", answer_reason, None
+
+        none_reason = self._none_reason(
+            text=text,
+            has_question_context=active_question is not None,
+            heuristic_question=heuristic_question,
+        )
+        return "none", none_reason, None
+
+    @staticmethod
+    def _determine_question_reference(
+        *,
+        label: str,
+        question_candidate: Optional[str],
+        active_question: Optional[str],
+    ) -> Optional[str]:
+        if label == "question":
+            return question_candidate
+        if label == "answer":
+            return active_question
+        return active_question if active_question else None
 
     @staticmethod
     def _bundle_questions_and_answers(
@@ -560,6 +682,16 @@ def _parse_args() -> argparse.Namespace:
         default="gpt-5-nano",
         help="LLM model name for --treat-docx-as-text (ignored otherwise).",
     )
+    parser.add_argument(
+        "--use-llm-classifier",
+        action="store_true",
+        help="Use the LLM to classify each block as question/answer/none.",
+    )
+    parser.add_argument(
+        "--classifier-model",
+        default=None,
+        help="Optional override model ID for the block classifier.",
+    )
     return parser.parse_args()
 
 
@@ -570,6 +702,8 @@ def _consume_args_or_defaults(
     model: Optional[str],
     output_json: Optional[bool],
     show_metadata: Optional[bool],
+    use_llm_classifier: Optional[bool],
+    classifier_model: Optional[str],
 ) -> Dict[str, Any]:
     if docx_path is not None:
         return {
@@ -578,6 +712,8 @@ def _consume_args_or_defaults(
             "model": model or "gpt-5-nano",
             "output_json": bool(output_json),
             "show_metadata": bool(show_metadata),
+            "use_llm_classifier": bool(use_llm_classifier),
+            "classifier_model": classifier_model or model or "gpt-5-nano",
             "cli_mode": False,
         }
     args = _parse_args()
@@ -587,6 +723,8 @@ def _consume_args_or_defaults(
         "model": args.model,
         "output_json": args.json,
         "show_metadata": args.show_metadata,
+        "use_llm_classifier": args.use_llm_classifier,
+        "classifier_model": args.classifier_model or args.model,
         "cli_mode": True,
     }
 
@@ -598,6 +736,8 @@ def main(
     model: Optional[str] = None,
     output_json: Optional[bool] = None,
     show_metadata: Optional[bool] = None,
+    use_llm_classifier: Optional[bool] = None,
+    classifier_model: Optional[str] = None,
 ) -> ExtractionResult:
     """
     Primary entry point so other modules can call `main(Path("foo.docx"))`
@@ -609,11 +749,15 @@ def main(
         model=model,
         output_json=output_json,
         show_metadata=show_metadata,
+        use_llm_classifier=use_llm_classifier,
+        classifier_model=classifier_model,
     )
 
     analyzer = DocxQuestionAnalyzer(
         treat_docx_as_text=cfg["treat_docx_as_text"],
         model=cfg["model"],
+        use_llm_classifier=cfg["use_llm_classifier"],
+        classifier_model=cfg["classifier_model"],
     )
     result = analyzer.extract_from_path(cfg["docx_path"])
 
