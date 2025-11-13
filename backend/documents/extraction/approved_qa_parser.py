@@ -124,7 +124,7 @@ def _default_llm_client() -> Optional[object]:
     model = (
         os.environ.get("APPROVED_QA_PARSER_LLM_MODEL")
         or os.environ.get("OPENAI_MODEL")
-        or "gpt-5-nano"
+        or "o3-2025-04-16_research"
     )
     try:
         print(
@@ -1083,6 +1083,44 @@ class ApprovedQAParser:
         # Return the bare prompt without numbering cruft to keep canonical questions consistent.
         return cleaned
 
+    @staticmethod
+    def _normalize_metadata(metadata: Optional[Dict[str, object]]) -> Dict[str, object]:
+        """Normalize metadata values (e.g., section names) and drop empty entries."""
+        cleaned: Dict[str, object] = {}
+        for key, value in (metadata or {}).items():
+            if value is None:
+                continue
+            if key == "section" and isinstance(value, str):
+                normalized_section = _normalize_section_name(value)
+                if normalized_section:
+                    cleaned[key] = normalized_section
+                continue
+            cleaned[key] = value
+        print(
+            f"[ApprovedQAParser] _normalize_metadata: keys={list(cleaned.keys())}, "
+            f"original_keys={list((metadata or {}).keys())}"
+        )
+        return cleaned
+
+    def _dedupe_records(self, records: Sequence[QARecord]) -> List[QARecord]:
+        """Remove duplicate questions while preserving order."""
+        seen: Set[str] = set()
+        deduped: List[QARecord] = []
+        for record in records:
+            normalized_key = re.sub(r"\s+", " ", record.question or "").strip().lower()
+            if not normalized_key:
+                deduped.append(record)
+                continue
+            if normalized_key in seen:
+                print(
+                    f"[ApprovedQAParser] Dedupe: dropping duplicate question {record.question[:80]!r}."
+                )
+                continue
+            seen.add(normalized_key)
+            deduped.append(record)
+        print(f"[ApprovedQAParser] Dedupe complete: {len(deduped)} unique records retained.")
+        return deduped
+
 
 def _spacy_is_question(text: str) -> bool:
     """Use spaCy to detect interrogative/imperative sentences.
@@ -1219,36 +1257,3 @@ __all__ = ["ApprovedQAParser", "QARecord", "AnswerVariant"]
 #     records = parser.parse("path/to/approved_document.docx")
 #     payload = parser.to_responsive_payload(records)
 #     print(f"Parsed {len(records)} QA pairs; first entry: {payload[0] if payload else 'N/A'}")
-    @staticmethod
-    def _normalize_metadata(metadata: Optional[Dict[str, object]]) -> Dict[str, object]:
-        """Normalize metadata values (e.g., section names) and drop empty entries."""
-        cleaned: Dict[str, object] = {}
-        for key, value in (metadata or {}).items():
-            if value is None:
-                continue
-            if key == "section" and isinstance(value, str):
-                normalized_section = _normalize_section_name(value)
-                if normalized_section:
-                    cleaned[key] = normalized_section
-                continue
-            cleaned[key] = value
-        return cleaned
-
-
-    def _dedupe_records(self, records: Sequence[QARecord]) -> List[QARecord]:
-        """Remove duplicate questions while preserving order."""
-        seen: Set[str] = set()
-        deduped: List[QARecord] = []
-        for record in records:
-            normalized_key = re.sub(r"\s+", " ", record.question or "").strip().lower()
-            if not normalized_key:
-                deduped.append(record)
-                continue
-            if normalized_key in seen:
-                print(
-                    f"[ApprovedQAParser] Dedupe: dropping duplicate question {record.question[:80]!r}."
-                )
-                continue
-            seen.add(normalized_key)
-            deduped.append(record)
-        return deduped
