@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 # Manage filesystem cleanup because parsing may create extra temp files.
+import json
 import os
 # Strip prefixes with regexes so heuristic detection stays fast and expressive.
 import re
@@ -12,7 +13,7 @@ import tempfile
 from dataclasses import dataclass, field
 # Normalize file handling across OSes when inferring suffixes or names.
 from pathlib import Path
-from typing import BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 # Optional dependency; needed only when users upload DOCX files.
 try:
@@ -41,6 +42,12 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     # Fall back to regex-only behavior when spaCy is missing so installs stay lightweight.
     _SPACY = None
+
+# Prompt utilities so we can reuse slot_finder's LLM cues when available.
+try:  # pragma: no cover - optional dependency
+    from backend.prompts import read_prompt as _read_prompt
+except ModuleNotFoundError:  # pragma: no cover
+    _read_prompt = None  # type: ignore[assignment]
 
 # Match literal "Question 3:" style intros so we can normalize noisy prompts.
 QUESTION_PREFIX_RE = re.compile(
@@ -166,9 +173,16 @@ class QARecord:
                 non-empty answers after filtering.
         """
         if not self.question or not self.answers:
+            print(
+                "[QARecord] Cannot serialize record because question or answers are missing."
+            )
             raise ValueError(
                 "QARecord requires both question and answer text to serialize."
             )
+        print(
+            f"[QARecord] Serializing question {self.question[:80]!r} "
+            f"with {len(self.answers)} answer variant(s)."
+        )
         payload = {
             # Keep the normalized prompt so Responsive can match duplicates reliably.
             "question": self.question,
@@ -213,12 +227,18 @@ class ApprovedQAParser:
         *,
         default_answer_key: str = "Answer",
         default_language: str = "en",
+        llm_client: Optional[object] = None,
+        llm_chunk_size: int = 40,
     ) -> None:
         """Configure parser defaults for answer labels and language metadata.
 
         Args:
             default_answer_key (str): Base string used when naming answer variants.
             default_language (str): ISO language code applied to new answer variants.
+            llm_client (Optional[object]): Client implementing get_completion used to
+                classify ambiguous DOCX blocks with an LLM. When omitted, the parser
+                falls back to heuristics only.
+            llm_chunk_size (int): Number of DOCX blocks to include per LLM prompt.
         """
         # Provide a predictable label even if callers pass blanks.
         self.default_answer_key = (
@@ -228,6 +248,18 @@ class ApprovedQAParser:
         self.default_language = (
             default_language.strip() or "en"
         )
+        print(
+            "[ApprovedQAParser] Initialized parser "
+            f"(default_answer_key={self.default_answer_key!r}, "
+            f"default_language={self.default_language!r})."
+        )
+        # Optional LLM plumbing mirrors slot_finder's question-detection stack.
+        self.llm_client = llm_client
+        self.llm_chunk_size = max(1, int(llm_chunk_size))
+        self._docx_detect_prompt = (
+            (_read_prompt("docx_detect_questions") if _read_prompt else "")
+        ).strip()
+        self._llm_block_char_limit = 800
 
     def parse(
         self,
@@ -251,18 +283,27 @@ class ApprovedQAParser:
             RuntimeError: If DOCX parsing is requested without python-docx.
             ValueError: If the provided data stream is empty.
         """
+        print(
+            f"[ApprovedQAParser] Starting parse (file_name={file_name!r}, type={type(source).__name__})."
+        )
         # Convert streams/bytes into a real file because python-docx and Path APIs need filenames.
         path, cleanup = self._materialize(source, file_name=file_name)
         try:
             # Route to parser-specific code paths using the file suffix to avoid expensive sniffing.
             suffix = Path(path).suffix.lower()
+            print(f"[ApprovedQAParser] Materialized path={path}, suffix={suffix or 'n/a'}.")
             if suffix == ".docx":
                 # Use the DOCX parser so we can pull Q/A pairs out of tables and headings.
-                return self._parse_docx(path)
-            # Parse everything else as plain text to keep behavior predictable.
-            text = Path(path).read_text(encoding="utf-8", errors="ignore")
-            # Heuristic paragraph parsing handles adhoc copy/paste exports.
-            return self._parse_text(text, source_name=file_name or Path(path).name)
+                records = self._parse_docx(path)
+            else:
+                # Parse everything else as plain text to keep behavior predictable.
+                text = Path(path).read_text(encoding="utf-8", errors="ignore")
+                # Heuristic paragraph parsing handles adhoc copy/paste exports.
+                records = self._parse_text(text, source_name=file_name or Path(path).name)
+            print(
+                f"[ApprovedQAParser] Finished parse for {file_name or path}; produced {len(records)} record(s)."
+            )
+            return records
         finally:
             if cleanup:
                 try:
@@ -285,6 +326,9 @@ class ApprovedQAParser:
         """
         # Collect successfully serialized entries.
         payload: List[Dict[str, object]] = []
+        print(
+            f"[ApprovedQAParser] Converting {len(records)} record(s) into API payload(s)."
+        )
         for record in records:
             try:
                 # Ignore malformed records silently.
@@ -292,7 +336,13 @@ class ApprovedQAParser:
                     record.to_responsive_payload()
                 )
             except ValueError:
+                print(
+                    "[ApprovedQAParser] Skipping record during serialization because it raised ValueError."
+                )
                 continue
+        print(
+            f"[ApprovedQAParser] Generated {len(payload)} payload(s) ready for upload."
+        )
         return payload
 
     # ── DOCX parsing ------------------------------------------------------
@@ -312,6 +362,15 @@ class ApprovedQAParser:
             )
         # Load the DOCX structure once so we can walk paragraphs and tables without re-reading disk.
         doc = _DOCX_DOCUMENT(path)
+        print(f"[ApprovedQAParser] _parse_docx: analyzing {path}.")
+        blocks = list(self._iter_docx_blocks(doc))
+        block_texts = [self._block_text(block) for block in blocks]
+        llm_question_indices = self._llm_detect_questions(blocks, block_texts)
+        print(
+            "[ApprovedQAParser] DOCX inspection summary: "
+            f"{len(blocks)} block(s), {len(llm_question_indices)} LLM-flagged question candidate(s)."
+        )
+
         # Collect normalized records in document order to preserve context.
         records: List[QARecord] = []
 
@@ -337,6 +396,10 @@ class ApprovedQAParser:
                 answer_text = "\n".join(pending_lines).strip()
                 if answer_text:
                     # Persist the paragraph-mode Q/A so transitions to tables/headings don't drop it.
+                    print(
+                        "[ApprovedQAParser] Finalizing paragraph answer "
+                        f"(question={pending_question!r}, section={pending_meta.get('section')!r})."
+                    )
                     records.append(
                         self._build_record(
                             question=pending_question,
@@ -354,22 +417,27 @@ class ApprovedQAParser:
 
         # Track headings for metadata so we can attribute each QA pair to its section later.
         current_section: Optional[str] = None
-        for block in self._iter_docx_blocks(doc):
-            if block["type"] == "heading":
+        for idx, block in enumerate(blocks):
+            block_type = block["type"]
+            text = block_texts[idx]
+            if block_type == "heading":
                 # Headings are a natural divider. Finish whatever answer we were building
                 # so the next question starts fresh within the new section.
                 # Remember the section title.
-                current_section = block["text"]
+                current_section = text
+                print(f"[ApprovedQAParser] Entering heading: {current_section}")
                 # Prevent bleed-over between sections.
                 flush_pending()
                 continue
 
-            if block["type"] == "paragraph":
-                text = block["text"]
+            if block_type == "paragraph":
                 if not text:
                     # Skip empty paragraphs; they convey no info.
                     continue
-                if self._looks_like_question(text):
+                looks_like_question = self._looks_like_question(text)
+                if idx in llm_question_indices:
+                    looks_like_question = True
+                if looks_like_question:
                     # This line looks like a question prompt. Close the previous pair (if any)
                     # and start collecting lines for this new question.
                     flush_pending()
@@ -378,14 +446,21 @@ class ApprovedQAParser:
                         "section": current_section,
                         "source": Path(path).name,
                     }
+                    print(
+                        "[ApprovedQAParser] Detected paragraph question "
+                        f"(section={current_section!r}): {pending_question!r}"
+                    )
                     pending_lines = []
                 elif pending_question:
                     # Just a regular sentence that belongs to the current answer.
                     pending_lines.append(text)
                 continue
 
-            if block["type"] == "table":
+            if block_type == "table":
                 # Tables usually list a question in one column and an answer in another.
+                print(
+                    f"[ApprovedQAParser] Processing table block (section={current_section or 'n/a'})."
+                )
                 flush_pending()
                 table_records = self._parse_docx_table(
                     block["table"], section=current_section, source=Path(path).name
@@ -407,9 +482,13 @@ class ApprovedQAParser:
             Dict[str, object]: Description of each block, e.g. {"type": "paragraph"}.
         """
         if _DOCX_CTP is None or _DOCX_CTTBL is None or _DOCX_PARAGRAPH is None:
+            print(
+                "[ApprovedQAParser] _iter_docx_blocks: missing python-docx helpers; no blocks yielded."
+            )
             return
         # Walk the raw XML body to preserve order.
         parent = doc.element.body
+        print("[ApprovedQAParser] _iter_docx_blocks: traversing document body.")
         for child in parent.iterchildren():
             if isinstance(child, _DOCX_CTP):
                 # Turn each paragraph into a lightweight dict with its text and whether
@@ -425,9 +504,13 @@ class ApprovedQAParser:
                 # Guard against missing style info.
                 block_type = "heading" if style.startswith("heading") else "paragraph"
                 # Downstream logic inspects this.
+                print(
+                    f"[ApprovedQAParser] _iter_docx_blocks: emitting {block_type} text={text[:80]!r}."
+                )
                 yield {"type": block_type, "text": text}
             elif isinstance(child, _DOCX_CTTBL):
                 # Pass tables through untouched so we can inspect every cell later.
+                print("[ApprovedQAParser] _iter_docx_blocks: emitting table block.")
                 yield {
                     "type": "table",
                     "table": _DOCX_TABLE(child, doc) if _DOCX_TABLE else None,
@@ -456,6 +539,10 @@ class ApprovedQAParser:
         records: List[QARecord] = []
         # Keep note for fallback heuristics.
         column_count = len(table.columns)
+        print(
+            "[ApprovedQAParser] _parse_docx_table: "
+            f"section={section!r}, columns={column_count}, rows={len(table.rows)}."
+        )
         if not table.rows:
             # Empty table -> nothing to parse.
             return records
@@ -478,6 +565,7 @@ class ApprovedQAParser:
 
         if question_col is None or answer_col is None:
             # Without both columns we can't pair prompts with answers, so skip the table.
+            print("[ApprovedQAParser] _parse_docx_table: unable to identify question/answer columns; skipping table.")
             return records
 
         for row_idx, row in enumerate(table.rows):
@@ -494,6 +582,10 @@ class ApprovedQAParser:
             if not question or not answer:
                 # Ignore incomplete entries to avoid junk data.
                 continue
+            print(
+                "[ApprovedQAParser] Table row -> question/answer pair "
+                f"(section={section!r}, question={question[:50]!r})"
+            )
             records.append(
                 # Store each table row as an independent record so ordering matches the document.
                 self._build_record(
@@ -506,6 +598,101 @@ class ApprovedQAParser:
                 )
             )
         return records
+
+    def _block_text(self, block: Dict[str, object]) -> str:
+        """Return normalized text for a DOCX block (paragraph, heading, or table)."""
+        block_type = block.get("type")
+        if block_type == "table":
+            text = self._table_to_text(block.get("table"))
+            print(
+                f"[ApprovedQAParser] _block_text: converted table to text snippet {text[:80]!r}."
+            )
+            return text
+        text = str(block.get("text") or "").strip()
+        print(
+            f"[ApprovedQAParser] _block_text: normalized {block_type} text {text[:80]!r}."
+        )
+        return text
+
+    def _table_to_text(self, table: Optional[_DOCX_TABLE]) -> str:
+        """Flatten a DOCX table into a pipe-delimited string for LLM context."""
+        if table is None:
+            print("[ApprovedQAParser] _table_to_text: received None table.")
+            return ""
+        cell_texts: List[str] = []
+        try:
+            for row in table.rows:
+                for cell in row.cells:
+                    value = (cell.text or "").strip()
+                    if value:
+                        cell_texts.append(value)
+        except Exception:
+            return ""
+        flattened = " | ".join(cell_texts)
+        print(
+            f"[ApprovedQAParser] _table_to_text: flattened table with {len(cell_texts)} cells."
+        )
+        return flattened
+
+    def _llm_detect_questions(
+        self,
+        blocks: Sequence[Dict[str, object]],
+        block_texts: Sequence[str],
+    ) -> Set[int]:
+        """Use the shared DOCX detect prompt to flag question-like block indices."""
+        if not self.llm_client or not self._docx_detect_prompt:
+            print("[ApprovedQAParser] _llm_detect_questions: LLM detection disabled.")
+            return set()
+        detected: Set[int] = set()
+        serializable: List[Dict[str, object]] = []
+        for idx, (block, text) in enumerate(zip(blocks, block_texts)):
+            serializable.append(
+                {
+                    "index": idx,
+                    "type": block.get("type", "paragraph"),
+                    "text": (text or "")[: self._llm_block_char_limit],
+                }
+            )
+        chunk_size = self.llm_chunk_size
+        prompt_template = self._docx_detect_prompt
+        for start in range(0, len(serializable), chunk_size):
+            chunk = serializable[start : start + chunk_size]
+            if not chunk or not any(item["text"] for item in chunk):
+                continue
+            excerpt = json.dumps({"blocks": chunk}, ensure_ascii=False)
+            prompt = prompt_template.format(excerpt=excerpt)
+            try:
+                print(
+                    f"[ApprovedQAParser] _llm_detect_questions: sending chunk "
+                    f"{start // chunk_size + 1} containing {len(chunk)} block(s)."
+                )
+                completion = self.llm_client.get_completion(prompt, json_output=True)
+            except Exception:
+                print(
+                    "[ApprovedQAParser] _llm_detect_questions: LLM call failed; skipping chunk."
+                )
+                continue
+            content: Any
+            if isinstance(completion, tuple):
+                content = completion[0]
+            else:
+                content = completion
+            try:
+                payload = json.loads(content)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            questions = payload.get("questions", [])
+            if not isinstance(questions, list):
+                continue
+            for idx_val in questions:
+                try:
+                    detected.add(int(idx_val))
+                except (TypeError, ValueError):
+                    continue
+        print(
+            f"[ApprovedQAParser] _llm_detect_questions: detected {len(detected)} question index(es)."
+        )
+        return detected
 
     # ── Text parsing ------------------------------------------------------
 
@@ -521,6 +708,9 @@ class ApprovedQAParser:
             List[QARecord]: QA pairs detected via heuristic parsing.
         """
         # Parsed output in document order.
+        print(
+            f"[ApprovedQAParser] Parsing plain text source={source_name or 'n/a'} with {len(text.splitlines())} line(s)."
+        )
         records: List[QARecord] = []
         # Current question candidate.
         pending_question: Optional[str] = None
@@ -541,6 +731,10 @@ class ApprovedQAParser:
                 # Combine consecutive lines because plain text exports often wrap sentences.
                 answer_text = "\n".join(pending_lines).strip()
                 if answer_text:
+                    print(
+                        "[ApprovedQAParser] Finalizing text-mode QA "
+                        f"(question={pending_question!r}, source={source_name!r})."
+                    )
                     records.append(
                         self._build_record(
                             question=pending_question,
@@ -564,6 +758,9 @@ class ApprovedQAParser:
                 # Finish the previous QA pair before starting a new one.
                 flush()
                 pending_question = self._strip_question_prefix(line)
+                print(
+                    f"[ApprovedQAParser] Detected text question: {pending_question!r}"
+                )
                 pending_lines = []
             elif pending_question:
                 # Treat contiguous lines as the answer.
@@ -601,6 +798,9 @@ class ApprovedQAParser:
                     language_code=self.default_language,
                 )
             )
+        print(
+            f"[ApprovedQAParser] _build_answer_variants: created {len(variants)} variant(s)."
+        )
         return variants
 
     @staticmethod
@@ -626,7 +826,7 @@ class ApprovedQAParser:
         Returns:
             QARecord: Cleaned record with empty fields removed.
         """
-        return QARecord(
+        record = QARecord(
             question=question.strip(),
             answers=answers,
             alternate_questions=[a.strip() for a in alternate if a and str(a).strip()],
@@ -635,6 +835,11 @@ class ApprovedQAParser:
             # Drop empty metadata entries to keep payload tidy.
             metadata={k: v for k, v in (metadata or {}).items() if v is not None},
         )
+        print(
+            "[ApprovedQAParser] _build_record: constructed record "
+            f"question={record.question[:80]!r}, answers={len(record.answers)}."
+        )
+        return record
 
     @staticmethod
     def _materialize(
@@ -664,14 +869,22 @@ class ApprovedQAParser:
             if not path.exists():
                 raise FileNotFoundError(f"Approved QA source '{path}' does not exist.")
             # Already on disk; no cleanup required because caller controls lifecycle.
+            print(f"[ApprovedQAParser] _materialize: using existing path {path}.")
             return str(path), False
 
         if isinstance(source, bytes):
             # Raw bytes provided up front, usually from uploads.
             data = source
+            print(
+                f"[ApprovedQAParser] _materialize: received bytes input ({len(data)} bytes)."
+            )
         elif hasattr(source, "read"):
             # Pull the entire stream into memory so we can write a temp file.
             data = source.read()
+            print(
+                "[ApprovedQAParser] _materialize: read data from stream "
+                f"({len(data)} bytes)."
+            )
         else:
             raise TypeError("ApprovedQAParser expects a path, bytes, or binary stream.")
         if not data:
@@ -684,6 +897,9 @@ class ApprovedQAParser:
             # Keep path for the caller to consume.
             temp_path = tmp.name
         # Signal that caller must delete the temp file to avoid leaking disk.
+        print(
+            f"[ApprovedQAParser] _materialize: wrote {len(data)} bytes to temp file {temp_path}."
+        )
         return temp_path, True
 
     @staticmethod
@@ -697,41 +913,51 @@ class ApprovedQAParser:
             bool: True if the text appears to be a question, False otherwise.
         """
         cleaned = (text or "").strip()
+        reason = ""
         if not cleaned:
             # Empty strings can't encode questions and just add noise.
-            return False
+            reason = "empty string"
+            result = False
+        elif _quick_question_candidate(cleaned):
+            reason = "quick heuristic"
+            result = True
+        else:
+            # Normalize enumeration cruft ("1.1", "(a)") before scanning for cues.
+            normalized = _strip_enum_prefix(cleaned)
+            lower_norm = normalized.lower()
 
-        # Run the fast screen first so obvious prompts short-circuit quickly.
-        if _quick_question_candidate(cleaned):
-            return True
-
-        # Normalize enumeration cruft ("1.1", "(a)") before scanning for cues.
-        normalized = _strip_enum_prefix(cleaned)
-        lower_norm = normalized.lower()
-
-        # Slot-finder style cue phrases at the beginning or anywhere in the text.
-        if any(lower_norm.startswith(phrase) for phrase in QUESTION_PHRASES):
-            return True
-        if any(phrase in lower_norm for phrase in QUESTION_PHRASES):
-            return True
-
-        # Explicit "Question:" or "Prompt:" labels should always count.
-        lowered_clean = cleaned.lower()
-        if QUESTION_PREFIX_RE.match(cleaned) or lowered_clean.startswith(
-            ("prompt:", "rfp question:")
-        ):
-            return True
-
-        # Numbered outlines that also include cues are likely prompts even sans question mark.
-        if ENUM_PREFIX_RE.match(cleaned) and any(
-            phrase in lower_norm for phrase in QUESTION_PHRASES
-        ):
-            return True
-
-        # Fall back to spaCy heuristics (imperatives, interrogatives, etc.).
-        if _spacy_is_question(cleaned):
-            return True
-        return False
+            # Slot-finder style cue phrases at the beginning or anywhere in the text.
+            if any(lower_norm.startswith(phrase) for phrase in QUESTION_PHRASES):
+                reason = "leading cue phrase"
+                result = True
+            elif any(phrase in lower_norm for phrase in QUESTION_PHRASES):
+                reason = "contains cue phrase"
+                result = True
+            else:
+                # Explicit "Question:" or "Prompt:" labels should always count.
+                lowered_clean = cleaned.lower()
+                if QUESTION_PREFIX_RE.match(cleaned) or lowered_clean.startswith(
+                    ("prompt:", "rfp question:")
+                ):
+                    reason = "explicit prefix"
+                    result = True
+                elif ENUM_PREFIX_RE.match(cleaned) and any(
+                    phrase in lower_norm for phrase in QUESTION_PHRASES
+                ):
+                    # Numbered outlines that also include cues are likely prompts even sans question mark.
+                    reason = "enumerated cue"
+                    result = True
+                elif _spacy_is_question(cleaned):
+                    # Fall back to spaCy heuristics (imperatives, interrogatives, etc.).
+                    reason = "spaCy heuristic"
+                    result = True
+                else:
+                    reason = "heuristics failed"
+                    result = False
+        print(
+            f"[ApprovedQAParser] _looks_like_question: {result} (reason={reason}) text={cleaned[:80]!r}"
+        )
+        return result
 
     @staticmethod
     def _strip_question_prefix(text: str) -> str:
@@ -746,6 +972,9 @@ class ApprovedQAParser:
         cleaned = text.strip()
         cleaned = QUESTION_PREFIX_RE.sub("", cleaned).strip()
         cleaned = NUMBERED_PREFIX_RE.sub("", cleaned).strip()
+        print(
+            f"[ApprovedQAParser] _strip_question_prefix: original={text[:80]!r}, cleaned={cleaned[:80]!r}"
+        )
         # Return the bare prompt without numbering cruft to keep canonical questions consistent.
         return cleaned
 
@@ -761,6 +990,7 @@ def _spacy_is_question(text: str) -> bool:
     """
     if _NLP is None:
         # spaCy unavailable; stick to regex heuristics so we do not raise at runtime.
+        print("[ApprovedQAParser] _spacy_is_question: spaCy unavailable; returning False.")
         return False
     # Run the lightweight pipeline on the candidate text.
     doc = _NLP(text)
@@ -773,18 +1003,23 @@ def _spacy_is_question(text: str) -> bool:
         if not sent_text:
             continue
         if sent_text.endswith("?"):
+            print("[ApprovedQAParser] _spacy_is_question: detected question mark.")
             return True
         if any(tok.lower_ in QUESTION_WORDS for tok in sent):
             # Look for interrogative pronouns to catch sentences lacking question marks.
+            print("[ApprovedQAParser] _spacy_is_question: detected interrogative pronoun.")
             return True
         root = sent.root
         if "Imp" in root.morph.get("Mood"):
             # Imperatives like "Describe" usually indicate prompts.
+            print("[ApprovedQAParser] _spacy_is_question: imperative mood detected.")
             return True
         first = sent[0]
         if root.tag_ == "VB" and first is root:
             # Plain verb-first sentences (commands) imply a question even without punctuation.
+            print("[ApprovedQAParser] _spacy_is_question: verb-first sentence detected.")
             return True
+    print("[ApprovedQAParser] _spacy_is_question: no interrogative cues found.")
     return False
 
 
@@ -799,14 +1034,27 @@ def _quick_question_candidate(text: str) -> bool:
     """
     # Normalize incoming text because blank lines and surrounding spaces are common.
     raw = (text or "").strip()
+    reason = ""
     if not raw:
-        return False
-    # Lowercase once so phrase checks are case-insensitive.
-    lower = raw.lower()
-    if "?" in raw:
-        return True
-    # Reuse slot_finder keywords so we stay consistent with upstream heuristics.
-    return any(phrase in lower for phrase in QUESTION_PHRASES)
+        result = False
+        reason = "empty"
+    else:
+        # Lowercase once so phrase checks are case-insensitive.
+        lower = raw.lower()
+        if "?" in raw:
+            result = True
+            reason = "contains ?"
+        elif any(phrase in lower for phrase in QUESTION_PHRASES):
+            # Reuse slot_finder keywords so we stay consistent with upstream heuristics.
+            result = True
+            reason = "keyword match"
+        else:
+            result = False
+            reason = "no cues"
+    print(
+        f"[ApprovedQAParser] _quick_question_candidate: {result} (reason={reason}) text={raw[:80]!r}"
+    )
+    return result
 
 
 def _strip_enum_prefix(text: str) -> str:
@@ -819,10 +1067,15 @@ def _strip_enum_prefix(text: str) -> str:
         str: Text with at most one leading outline token removed.
     """
     if not text:
+        print("[ApprovedQAParser] _strip_enum_prefix: received empty text.")
         return ""
     # Remove only a single prefix so nested identifiers (e.g., "1.a)") retain structure.
     stripped_once = ENUM_PREFIX_RE.sub("", text, count=1)
-    return stripped_once.strip()
+    cleaned = stripped_once.strip()
+    print(
+        f"[ApprovedQAParser] _strip_enum_prefix: original={text[:40]!r}, cleaned={cleaned[:40]!r}"
+    )
+    return cleaned
 
 
 # Re-export public API so external modules can import the parser without digging through modules.
