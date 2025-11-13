@@ -71,27 +71,6 @@ ENUM_PREFIX_RE = re.compile(
     r"(?:\([A-Za-z0-9]+\))"               # (a)  (A)  (i)  (1)
     r")\s+",
 )
-# Common request cues reused from slot_finder so imperative prompts get caught.
-QUESTION_PHRASES = (
-    "please describe",
-    "please provide",
-    "explain",
-    "detail",
-    "outline",
-    "how do you",
-    "how will you",
-    "what is your",
-    "what are your",
-    "do you",
-    "can you",
-    "does your",
-    "have you",
-    "who",
-    "when",
-    "where",
-    "why",
-    "which",
-)
 # Core interrogative anchors to help spaCy decide whether imperative sentences are question-like.
 QUESTION_WORDS = {
     "who",
@@ -111,7 +90,6 @@ PSEUDO_HEADING_NUMBERED_TITLE_RE = re.compile(
 )
 QUESTION_COL_HEADER_RE = re.compile(r"^q(uestion)?\b", re.IGNORECASE)
 ANSWER_COL_HEADER_RE = re.compile(r"^a(nswer)?\b", re.IGNORECASE)
-ENUM_PREFIX_CUE_WORD_LIMIT = 15
 
 
 def _default_llm_client() -> Optional[object]:
@@ -997,71 +975,39 @@ class ApprovedQAParser:
             bool: True if the text appears to be a question, False otherwise.
         """
         cleaned = (text or "").strip()
-        reason = ""
         if not cleaned:
-            reason = "empty string"
-            result = False
             print(
-                f"[ApprovedQAParser] _looks_like_question: {result} (reason={reason}) text={cleaned[:80]!r}"
-            )
-            return result
-
-        if _quick_question_candidate(cleaned):
-            reason = "quick heuristic"
-            print(
-                f"[ApprovedQAParser] _looks_like_question: True (reason={reason}) text={cleaned[:80]!r}"
-            )
-            return True
-
-        is_enum_prefix = bool(ENUM_PREFIX_RE.match(cleaned))
-        normalized = _strip_enum_prefix(cleaned).strip()
-        lower_norm = normalized.lower()
-
-        if is_enum_prefix:
-            word_count = len(normalized.split())
-            if "?" in normalized:
-                reason = "enumerated question mark"
-                print(
-                    f"[ApprovedQAParser] _looks_like_question: True (reason={reason}) text={cleaned[:80]!r}"
-                )
-                return True
-            if lower_norm and any(
-                phrase in lower_norm for phrase in QUESTION_PHRASES
-            ) and word_count <= ENUM_PREFIX_CUE_WORD_LIMIT:
-                reason = f"enumerated cue <= {ENUM_PREFIX_CUE_WORD_LIMIT} words"
-                print(
-                    f"[ApprovedQAParser] _looks_like_question: True (reason={reason}) text={cleaned[:80]!r}"
-                )
-                return True
-            reason = "enumerated without cues"
-            print(
-                f"[ApprovedQAParser] _looks_like_question: False (reason={reason}) text={cleaned[:80]!r}"
+                "[ApprovedQAParser] _looks_like_question: False (reason=empty string)."
             )
             return False
 
-        if any(lower_norm.startswith(phrase) for phrase in QUESTION_PHRASES):
-            reason = "leading cue phrase"
-            result = True
-        elif any(phrase in lower_norm for phrase in QUESTION_PHRASES):
-            reason = "contains cue phrase"
-            result = True
-        else:
-            lowered_clean = cleaned.lower()
-            if QUESTION_PREFIX_RE.match(cleaned) or lowered_clean.startswith(
-                ("prompt:", "rfp question:")
-            ):
-                reason = "explicit prefix"
-                result = True
-            elif _spacy_is_question(cleaned):
-                reason = "spaCy heuristic"
-                result = True
-            else:
-                reason = "heuristics failed"
-                result = False
+        if _quick_question_candidate(cleaned):
+            print(
+                f"[ApprovedQAParser] _looks_like_question: True (reason=quick heuristic) "
+                f"text={cleaned[:80]!r}"
+            )
+            return True
+
+        normalized = _strip_enum_prefix(cleaned).strip()
+        if normalized and _starts_with_question_word(normalized):
+            print(
+                f"[ApprovedQAParser] _looks_like_question: True (reason=question word) "
+                f"text={cleaned[:80]!r}"
+            )
+            return True
+
+        if _spacy_is_question(normalized):
+            print(
+                f"[ApprovedQAParser] _looks_like_question: True (reason=spaCy question word) "
+                f"text={cleaned[:80]!r}"
+            )
+            return True
+
         print(
-            f"[ApprovedQAParser] _looks_like_question: {result} (reason={reason}) text={cleaned[:80]!r}"
+            f"[ApprovedQAParser] _looks_like_question: False (reason=heuristics failed) "
+            f"text={cleaned[:80]!r}"
         )
-        return result
+        return False
 
     @staticmethod
     def _strip_question_prefix(text: str) -> str:
@@ -1149,18 +1095,9 @@ def _spacy_is_question(text: str) -> bool:
             print("[ApprovedQAParser] _spacy_is_question: detected question mark.")
             return True
         if any(tok.lower_ in QUESTION_WORDS for tok in sent):
-            # Look for interrogative pronouns to catch sentences lacking question marks.
-            print("[ApprovedQAParser] _spacy_is_question: detected interrogative pronoun.")
-            return True
-        root = sent.root
-        if "Imp" in root.morph.get("Mood"):
-            # Imperatives like "Describe" usually indicate prompts.
-            print("[ApprovedQAParser] _spacy_is_question: imperative mood detected.")
-            return True
-        first = sent[0]
-        if root.tag_ == "VB" and first is root:
-            # Plain verb-first sentences (commands) imply a question even without punctuation.
-            print("[ApprovedQAParser] _spacy_is_question: verb-first sentence detected.")
+            print(
+                "[ApprovedQAParser] _spacy_is_question: detected interrogative pronoun."
+            )
             return True
     print("[ApprovedQAParser] _spacy_is_question: no interrogative cues found.")
     return False
@@ -1177,23 +1114,25 @@ def _quick_question_candidate(text: str) -> bool:
     """
     # Normalize incoming text because blank lines and surrounding spaces are common.
     raw = (text or "").strip()
-    reason = ""
     if not raw:
-        result = False
-        reason = "empty"
+        print(
+            "[ApprovedQAParser] _quick_question_candidate: False (reason=empty text)."
+        )
+        return False
+    reason = "no syntactic cues"
+    result = False
+    lowered = raw.lower()
+    if "?" in raw:
+        result = True
+        reason = "contains ?"
+    elif QUESTION_PREFIX_RE.match(raw) or lowered.startswith(("prompt:", "rfp question:")):
+        result = True
+        reason = "explicit prefix"
     else:
-        # Lowercase once so phrase checks are case-insensitive.
-        lower = raw.lower()
-        if "?" in raw:
+        normalized = _strip_enum_prefix(raw)
+        if _starts_with_question_word(normalized):
             result = True
-            reason = "contains ?"
-        elif any(phrase in lower for phrase in QUESTION_PHRASES):
-            # Reuse slot_finder keywords so we stay consistent with upstream heuristics.
-            result = True
-            reason = "keyword match"
-        else:
-            result = False
-            reason = "no cues"
+            reason = "question word"
     print(
         f"[ApprovedQAParser] _quick_question_candidate: {result} (reason={reason}) text={raw[:80]!r}"
     )
@@ -1227,6 +1166,22 @@ def _strip_enum_prefix(text: str) -> str:
         f"original={original[:40]!r}, cleaned={cleaned[:40]!r}"
     )
     return cleaned
+
+
+def _starts_with_question_word(text: str) -> bool:
+    """Return True when the first lexical token is an interrogative word."""
+    if not text:
+        return False
+    match = re.match(r"^[^A-Za-z0-9]*([A-Za-z']+)", text)
+    if not match:
+        return False
+    first = match.group(1).lower()
+    result = first in QUESTION_WORDS
+    if result:
+        print(
+            f"[ApprovedQAParser] _starts_with_question_word: detected {first!r} in {text[:80]!r}."
+        )
+    return result
 
 
 def _normalize_section_name(section: Optional[str]) -> Optional[str]:
