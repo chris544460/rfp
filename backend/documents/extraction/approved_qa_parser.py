@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 # Manage filesystem cleanup because parsing may create extra temp files.
-import json
 import os
+import json
 # Strip prefixes with regexes so heuristic detection stays fast and expressive.
 import re
 # Materialize in-memory documents as temp files so python-docx can open them.
@@ -48,6 +48,12 @@ try:  # pragma: no cover - optional dependency
     from backend.prompts import read_prompt as _read_prompt
 except ModuleNotFoundError:  # pragma: no cover
     _read_prompt = None  # type: ignore[assignment]
+
+# Optional default LLM client so question detection can leverage the same infra as slot_finder.
+try:  # pragma: no cover - optional dependency
+    from backend.llm.completions_client import CompletionsClient as _COMPLETIONS_CLIENT
+except ModuleNotFoundError:  # pragma: no cover
+    _COMPLETIONS_CLIENT = None  # type: ignore[assignment]
 
 # Match literal "Question 3:" style intros so we can normalize noisy prompts.
 QUESTION_PREFIX_RE = re.compile(
@@ -96,6 +102,60 @@ QUESTION_WORDS = {
     "how",
     "which",
 }
+
+PSEUDO_HEADING_SECTION_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*)?\s*section\s+\d+", re.IGNORECASE
+)
+PSEUDO_HEADING_NUMBERED_TITLE_RE = re.compile(
+    r"^\s*\d+(?:\.\d+)+\s+[A-Z]", re.IGNORECASE
+)
+QUESTION_COL_HEADER_RE = re.compile(r"^q(uestion)?\b", re.IGNORECASE)
+ANSWER_COL_HEADER_RE = re.compile(r"^a(nswer)?\b", re.IGNORECASE)
+ENUM_PREFIX_CUE_WORD_LIMIT = 15
+
+
+def _default_llm_client() -> Optional[object]:
+    """Instantiate the shared CompletionsClient so LLM detection is on by default."""
+    if _COMPLETIONS_CLIENT is None:
+        print(
+            "[ApprovedQAParser] Default LLM client unavailable (CompletionsClient import failed)."
+        )
+        return None
+    model = (
+        os.environ.get("APPROVED_QA_PARSER_LLM_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or "gpt-5-nano"
+    )
+    try:
+        print(
+            f"[ApprovedQAParser] Default LLM client enabled using model {model!r}."
+        )
+        return _COMPLETIONS_CLIENT(model=model)
+    except Exception as exc:  # pragma: no cover - depends on local env
+        print(
+            "[ApprovedQAParser] Failed to initialize default LLM client; "
+            f"falling back to heuristics: {exc}"
+        )
+        return None
+
+
+def _looks_like_heading_candidate(text: str) -> bool:
+    """Return True when a paragraph is likely a heading despite lacking style."""
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if PSEUDO_HEADING_SECTION_RE.match(stripped):
+        return True
+    if (
+        PSEUDO_HEADING_NUMBERED_TITLE_RE.match(stripped)
+        and "?" not in stripped
+        and not _quick_question_candidate(stripped)
+    ):
+        return True
+    return False
+
 
 if _SPACY is not None:  # pragma: no cover - exercised via runtime
     try:
@@ -237,7 +297,8 @@ class ApprovedQAParser:
             default_language (str): ISO language code applied to new answer variants.
             llm_client (Optional[object]): Client implementing get_completion used to
                 classify ambiguous DOCX blocks with an LLM. When omitted, the parser
-                falls back to heuristics only.
+                now instantiates backend.llm.CompletionsClient automatically (when
+                available) so LLM detection runs by default.
             llm_chunk_size (int): Number of DOCX blocks to include per LLM prompt.
         """
         # Provide a predictable label even if callers pass blanks.
@@ -254,8 +315,17 @@ class ApprovedQAParser:
             f"default_language={self.default_language!r})."
         )
         # Optional LLM plumbing mirrors slot_finder's question-detection stack.
-        self.llm_client = llm_client
+        if llm_client is not None:
+            print("[ApprovedQAParser] Using caller-provided LLM client.")
+            self.llm_client = llm_client
+        else:
+            self.llm_client = _default_llm_client()
+        if self.llm_client is None:
+            print(
+                "[ApprovedQAParser] Default LLM client unavailable; falling back to heuristics."
+            )
         self.llm_chunk_size = max(1, int(llm_chunk_size))
+        self.enable_llm_detection = True
         self._docx_detect_prompt = (
             (_read_prompt("docx_detect_questions") if _read_prompt else "")
         ).strip()
@@ -300,6 +370,7 @@ class ApprovedQAParser:
                 text = Path(path).read_text(encoding="utf-8", errors="ignore")
                 # Heuristic paragraph parsing handles adhoc copy/paste exports.
                 records = self._parse_text(text, source_name=file_name or Path(path).name)
+            records = self._dedupe_records(records)
             print(
                 f"[ApprovedQAParser] Finished parse for {file_name or path}; produced {len(records)} record(s)."
             )
@@ -503,6 +574,8 @@ class ApprovedQAParser:
                 )
                 # Guard against missing style info.
                 block_type = "heading" if style.startswith("heading") else "paragraph"
+                if block_type == "paragraph" and _looks_like_heading_candidate(text):
+                    block_type = "heading"
                 # Downstream logic inspects this.
                 print(
                     f"[ApprovedQAParser] _iter_docx_blocks: emitting {block_type} text={text[:80]!r}."
@@ -559,6 +632,10 @@ class ApprovedQAParser:
                     question_col = idx
                 if "answer" in text and answer_col is None:
                     answer_col = idx
+                if question_col is None and QUESTION_COL_HEADER_RE.match(text):
+                    question_col = idx
+                if answer_col is None and ANSWER_COL_HEADER_RE.match(text):
+                    answer_col = idx
             if question_col is None or answer_col is None:
                 # Default to the first two columns so even unlabeled tables still produce output.
                 question_col, answer_col = 0, 1 if column_count > 1 else (None, None)
@@ -570,7 +647,9 @@ class ApprovedQAParser:
 
         for row_idx, row in enumerate(table.rows):
             if row_idx == 0 and (
-                "question" in heading_text[question_col]
+                QUESTION_COL_HEADER_RE.match(heading_text[question_col])
+                or ANSWER_COL_HEADER_RE.match(heading_text[answer_col])
+                or "question" in heading_text[question_col]
                 or "answer" in heading_text[answer_col]
             ):
                 # Skip header row when it clearly labels columns.
@@ -640,7 +719,11 @@ class ApprovedQAParser:
         block_texts: Sequence[str],
     ) -> Set[int]:
         """Use the shared DOCX detect prompt to flag question-like block indices."""
-        if not self.llm_client or not self._docx_detect_prompt:
+        if (
+            not self.enable_llm_detection
+            or not self.llm_client
+            or not self._docx_detect_prompt
+        ):
             print("[ApprovedQAParser] _llm_detect_questions: LLM detection disabled.")
             return set()
         detected: Set[int] = set()
@@ -833,7 +916,7 @@ class ApprovedQAParser:
             tags=[t.strip() for t in tags if t and str(t).strip()],
             source=source,
             # Drop empty metadata entries to keep payload tidy.
-            metadata={k: v for k, v in (metadata or {}).items() if v is not None},
+            metadata=self._normalize_metadata(metadata),
         )
         print(
             "[ApprovedQAParser] _build_record: constructed record "
@@ -915,45 +998,65 @@ class ApprovedQAParser:
         cleaned = (text or "").strip()
         reason = ""
         if not cleaned:
-            # Empty strings can't encode questions and just add noise.
             reason = "empty string"
             result = False
-        elif _quick_question_candidate(cleaned):
+            print(
+                f"[ApprovedQAParser] _looks_like_question: {result} (reason={reason}) text={cleaned[:80]!r}"
+            )
+            return result
+
+        if _quick_question_candidate(cleaned):
             reason = "quick heuristic"
+            print(
+                f"[ApprovedQAParser] _looks_like_question: True (reason={reason}) text={cleaned[:80]!r}"
+            )
+            return True
+
+        is_enum_prefix = bool(ENUM_PREFIX_RE.match(cleaned))
+        normalized = _strip_enum_prefix(cleaned).strip()
+        lower_norm = normalized.lower()
+
+        if is_enum_prefix:
+            word_count = len(normalized.split())
+            if "?" in normalized:
+                reason = "enumerated question mark"
+                print(
+                    f"[ApprovedQAParser] _looks_like_question: True (reason={reason}) text={cleaned[:80]!r}"
+                )
+                return True
+            if lower_norm and any(
+                phrase in lower_norm for phrase in QUESTION_PHRASES
+            ) and word_count <= ENUM_PREFIX_CUE_WORD_LIMIT:
+                reason = f"enumerated cue <= {ENUM_PREFIX_CUE_WORD_LIMIT} words"
+                print(
+                    f"[ApprovedQAParser] _looks_like_question: True (reason={reason}) text={cleaned[:80]!r}"
+                )
+                return True
+            reason = "enumerated without cues"
+            print(
+                f"[ApprovedQAParser] _looks_like_question: False (reason={reason}) text={cleaned[:80]!r}"
+            )
+            return False
+
+        if any(lower_norm.startswith(phrase) for phrase in QUESTION_PHRASES):
+            reason = "leading cue phrase"
+            result = True
+        elif any(phrase in lower_norm for phrase in QUESTION_PHRASES):
+            reason = "contains cue phrase"
             result = True
         else:
-            # Normalize enumeration cruft ("1.1", "(a)") before scanning for cues.
-            normalized = _strip_enum_prefix(cleaned)
-            lower_norm = normalized.lower()
-
-            # Slot-finder style cue phrases at the beginning or anywhere in the text.
-            if any(lower_norm.startswith(phrase) for phrase in QUESTION_PHRASES):
-                reason = "leading cue phrase"
+            lowered_clean = cleaned.lower()
+            if QUESTION_PREFIX_RE.match(cleaned) or lowered_clean.startswith(
+                ("prompt:", "rfp question:")
+            ):
+                reason = "explicit prefix"
                 result = True
-            elif any(phrase in lower_norm for phrase in QUESTION_PHRASES):
-                reason = "contains cue phrase"
+            elif _spacy_is_question(cleaned):
+                reason = "spaCy heuristic"
                 result = True
             else:
-                # Explicit "Question:" or "Prompt:" labels should always count.
-                lowered_clean = cleaned.lower()
-                if QUESTION_PREFIX_RE.match(cleaned) or lowered_clean.startswith(
-                    ("prompt:", "rfp question:")
-                ):
-                    reason = "explicit prefix"
-                    result = True
-                elif ENUM_PREFIX_RE.match(cleaned) and any(
-                    phrase in lower_norm for phrase in QUESTION_PHRASES
-                ):
-                    # Numbered outlines that also include cues are likely prompts even sans question mark.
-                    reason = "enumerated cue"
-                    result = True
-                elif _spacy_is_question(cleaned):
-                    # Fall back to spaCy heuristics (imperatives, interrogatives, etc.).
-                    reason = "spaCy heuristic"
-                    result = True
-                else:
-                    reason = "heuristics failed"
-                    result = False
+                reason = "heuristics failed"
+                result = False
         print(
             f"[ApprovedQAParser] _looks_like_question: {result} (reason={reason}) text={cleaned[:80]!r}"
         )
@@ -972,6 +1075,7 @@ class ApprovedQAParser:
         cleaned = text.strip()
         cleaned = QUESTION_PREFIX_RE.sub("", cleaned).strip()
         cleaned = NUMBERED_PREFIX_RE.sub("", cleaned).strip()
+        cleaned = _strip_enum_prefix(cleaned)
         print(
             f"[ApprovedQAParser] _strip_question_prefix: original={text[:80]!r}, cleaned={cleaned[:80]!r}"
         )
@@ -1069,13 +1173,39 @@ def _strip_enum_prefix(text: str) -> str:
     if not text:
         print("[ApprovedQAParser] _strip_enum_prefix: received empty text.")
         return ""
-    # Remove only a single prefix so nested identifiers (e.g., "1.a)") retain structure.
-    stripped_once = ENUM_PREFIX_RE.sub("", text, count=1)
-    cleaned = stripped_once.strip()
+    original = text
+    cleaned = text
+    iterations = 0
+    while True:
+        stripped_once = ENUM_PREFIX_RE.sub("", cleaned, count=1)
+        if stripped_once == cleaned:
+            break
+        cleaned = stripped_once.strip()
+        iterations += 1
+    cleaned = cleaned.strip()
     print(
-        f"[ApprovedQAParser] _strip_enum_prefix: original={text[:40]!r}, cleaned={cleaned[:40]!r}"
+        f"[ApprovedQAParser] _strip_enum_prefix: removed {iterations} prefix(es); "
+        f"original={original[:40]!r}, cleaned={cleaned[:40]!r}"
     )
     return cleaned
+
+
+def _normalize_section_name(section: Optional[str]) -> Optional[str]:
+    """Collapse section strings into a canonical lowercase token."""
+    if not section:
+        return None
+    cleaned = re.sub(r"\s+", " ", section).strip()
+    if not cleaned:
+        return None
+    numeric = re.match(r"(\d+(?:\.\d+)*)", cleaned)
+    if numeric:
+        normalized = numeric.group(1).lower()
+    else:
+        normalized = cleaned.lower()
+    print(
+        f"[ApprovedQAParser] _normalize_section_name: original={section[:80]!r}, normalized={normalized!r}"
+    )
+    return normalized
 
 
 # Re-export public API so external modules can import the parser without digging through modules.
@@ -1088,3 +1218,36 @@ __all__ = ["ApprovedQAParser", "QARecord", "AnswerVariant"]
 #     records = parser.parse("path/to/approved_document.docx")
 #     payload = parser.to_responsive_payload(records)
 #     print(f"Parsed {len(records)} QA pairs; first entry: {payload[0] if payload else 'N/A'}")
+    @staticmethod
+    def _normalize_metadata(metadata: Optional[Dict[str, object]]) -> Dict[str, object]:
+        """Normalize metadata values (e.g., section names) and drop empty entries."""
+        cleaned: Dict[str, object] = {}
+        for key, value in (metadata or {}).items():
+            if value is None:
+                continue
+            if key == "section" and isinstance(value, str):
+                normalized_section = _normalize_section_name(value)
+                if normalized_section:
+                    cleaned[key] = normalized_section
+                continue
+            cleaned[key] = value
+        return cleaned
+
+
+    def _dedupe_records(self, records: Sequence[QARecord]) -> List[QARecord]:
+        """Remove duplicate questions while preserving order."""
+        seen: Set[str] = set()
+        deduped: List[QARecord] = []
+        for record in records:
+            normalized_key = re.sub(r"\s+", " ", record.question or "").strip().lower()
+            if not normalized_key:
+                deduped.append(record)
+                continue
+            if normalized_key in seen:
+                print(
+                    f"[ApprovedQAParser] Dedupe: dropping duplicate question {record.question[:80]!r}."
+                )
+                continue
+            seen.add(normalized_key)
+            deduped.append(record)
+        return deduped
