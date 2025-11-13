@@ -202,20 +202,37 @@ class DocxQuestionAnalyzer:
         model: str = "gpt-5-nano",
         use_llm_classifier: bool = False,
         classifier_model: Optional[str] = None,
+        llm_backfill: bool = True,
     ):
         self.treat_docx_as_text = treat_docx_as_text
         self.model = model
+        self._classifier_model_name = classifier_model or model
         self._block_classifier = (
-            LLMBlockClassifier(model=classifier_model or model)
+            LLMBlockClassifier(model=self._classifier_model_name)
             if use_llm_classifier
             else None
         )
+        self._llm_backfill = llm_backfill
         self._extractor = QuestionExtractor(llm_client=self._build_llm())
 
     def _build_llm(self) -> Optional[CompletionsClient]:
         if not self.treat_docx_as_text:
             return None
         return CompletionsClient(model=self.model)
+
+    def _ensure_block_classifier(self) -> Optional[LLMBlockClassifier]:
+        if self._block_classifier is not None:
+            return self._block_classifier
+        if not self._llm_backfill:
+            return None
+        try:
+            self._block_classifier = LLMBlockClassifier(
+                model=self._classifier_model_name
+            )
+        except Exception:
+            self._llm_backfill = False
+            return None
+        return self._block_classifier
 
     def extract_from_path(self, docx_path: Path) -> ExtractionResult:
         path = self._validate_path(docx_path)
@@ -307,6 +324,7 @@ class DocxQuestionAnalyzer:
                 distance_from_question += 1
             text = block.text.strip()
             slot_hits = slot_map.get(block.index, [])
+            usable_slot_hits = self._filter_slot_hits(slot_hits)
             heuristic_question = self._looks_like_question(text)
 
             if not text:
@@ -320,7 +338,7 @@ class DocxQuestionAnalyzer:
             heur_label, heur_reason, question_candidate = self._heuristic_label(
                 block=block,
                 text=text,
-                slot_hits=slot_hits,
+                slot_hits=usable_slot_hits,
                 heuristic_question=heuristic_question,
                 active_question=active_question,
                 offset=distance_from_question,
@@ -329,8 +347,11 @@ class DocxQuestionAnalyzer:
 
             final_label = heur_label
             final_reason = heur_reason
-            if self._block_classifier:
-                llm_result = self._block_classifier.classify(
+            classifier = self._block_classifier
+            if classifier is None and self._llm_backfill and heur_label == "none":
+                classifier = self._ensure_block_classifier()
+            if classifier is not None:
+                llm_result = classifier.classify(
                     block_index=block.index,
                     text=text,
                     previous_question=active_question,
@@ -367,6 +388,17 @@ class DocxQuestionAnalyzer:
                 # 'none' keeps current context until blank reset
                 pass
         return classifications
+
+    @staticmethod
+    def _filter_slot_hits(slots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        filtered: List[Dict[str, Any]] = []
+        for slot in slots:
+            meta = slot.get("meta") or {}
+            detector = str(meta.get("detector") or "").strip().lower()
+            if detector == "para_blank_after":
+                continue
+            filtered.append(slot)
+        return filtered
 
     def _heuristic_label(
         self,
@@ -761,6 +793,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print only the question→answer dictionary output.",
     )
+    parser.add_argument(
+        "--disable-llm-backfill",
+        action="store_true",
+        help="Skip the automatic LLM fallback when heuristics return 'none'.",
+    )
     return parser.parse_args()
 
 
@@ -774,8 +811,10 @@ def _consume_args_or_defaults(
     use_llm_classifier: Optional[bool],
     classifier_model: Optional[str],
     qa_only: Optional[bool],
+    llm_backfill: Optional[bool],
 ) -> Dict[str, Any]:
     if docx_path is not None:
+        backfill = True if llm_backfill is None else bool(llm_backfill)
         return {
             "docx_path": Path(docx_path),
             "treat_docx_as_text": bool(treat_docx_as_text),
@@ -785,6 +824,7 @@ def _consume_args_or_defaults(
             "use_llm_classifier": bool(use_llm_classifier),
             "classifier_model": classifier_model or model or "gpt-5-nano",
             "qa_only": bool(qa_only),
+            "llm_backfill": backfill,
             "cli_mode": False,
         }
     args = _parse_args()
@@ -797,6 +837,7 @@ def _consume_args_or_defaults(
         "use_llm_classifier": args.use_llm_classifier,
         "classifier_model": args.classifier_model or args.model,
         "qa_only": args.qa_only,
+        "llm_backfill": not args.disable_llm_backfill,
         "cli_mode": True,
     }
 
@@ -811,6 +852,7 @@ def main(
     use_llm_classifier: Optional[bool] = None,
     classifier_model: Optional[str] = None,
     qa_only: Optional[bool] = None,
+    llm_backfill: Optional[bool] = None,
 ) -> ExtractionResult:
     """
     Primary entry point so other modules can call `main(Path("foo.docx"))`
@@ -825,6 +867,7 @@ def main(
         use_llm_classifier=use_llm_classifier,
         classifier_model=classifier_model,
         qa_only=qa_only,
+        llm_backfill=llm_backfill,
     )
 
     analyzer = DocxQuestionAnalyzer(
@@ -832,6 +875,7 @@ def main(
         model=cfg["model"],
         use_llm_classifier=cfg["use_llm_classifier"],
         classifier_model=cfg["classifier_model"],
+        llm_backfill=cfg["llm_backfill"],
     )
     result = analyzer.extract_from_path(cfg["docx_path"])
 
@@ -853,6 +897,7 @@ def extract_question_answer_pairs(
     model: str = "gpt-5-nano",
     use_llm_classifier: bool = False,
     classifier_model: Optional[str] = None,
+    llm_backfill: bool = True,
 ) -> Dict[str, List[str]]:
     """
     Convenience helper for pure-module usage. Example::
@@ -868,6 +913,7 @@ def extract_question_answer_pairs(
         model=model,
         use_llm_classifier=use_llm_classifier,
         classifier_model=classifier_model,
+        llm_backfill=llm_backfill,
     )
     return result.question_answer_dict()
 
