@@ -22,7 +22,7 @@ import argparse
 import json
 import re
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -70,12 +70,23 @@ class BlockClassification:
 
 
 @dataclass
+class QuestionAnswerBundle:
+    """Aggregated mapping between a question and its associated answers."""
+
+    question: str
+    question_block: int
+    question_reason: str
+    answers: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class ExtractionResult:
     """Structured response for downstream consumers."""
 
     questions: List[Dict[str, Any]]
     details: Dict[str, Any]
     classifications: List[BlockClassification]
+    qa_bundles: List[QuestionAnswerBundle]
 
 
 class DocxQuestionAnalyzer:
@@ -96,10 +107,12 @@ class DocxQuestionAnalyzer:
         questions = self._run_question_extraction(path)
         blocks = self._load_blocks(path)
         classifications = self._classify_blocks(blocks, questions)
+        qa_bundles = self._bundle_questions_and_answers(classifications)
         return ExtractionResult(
             questions=questions,
             details=self._extractor.last_details,
             classifications=classifications,
+            qa_bundles=qa_bundles,
         )
 
     def _run_question_extraction(self, path: Path) -> List[Dict[str, Any]]:
@@ -238,6 +251,31 @@ class DocxQuestionAnalyzer:
                 )
             )
         return classifications
+
+    @staticmethod
+    def _bundle_questions_and_answers(
+        classifications: List[BlockClassification],
+    ) -> List[QuestionAnswerBundle]:
+        bundles: List[QuestionAnswerBundle] = []
+        active_bundle: Optional[QuestionAnswerBundle] = None
+        for entry in classifications:
+            if entry.classification == "question":
+                active_bundle = QuestionAnswerBundle(
+                    question=entry.text or "",
+                    question_block=entry.index,
+                    question_reason=entry.reason,
+                )
+                bundles.append(active_bundle)
+                continue
+            if entry.classification == "answer" and active_bundle:
+                active_bundle.answers.append(
+                    {
+                        "text": entry.text,
+                        "reason": entry.reason,
+                        "block": entry.index,
+                    }
+                )
+        return bundles
 
     def _map_slots_to_blocks(
         self,
@@ -417,6 +455,15 @@ class DocxQuestionCLI:
                         "questions": result.questions,
                         "details": result.details,
                         "classifications": [asdict(cls) for cls in result.classifications],
+                        "qa_bundles": [
+                            {
+                                "question": bundle.question,
+                                "question_block": bundle.question_block,
+                                "question_reason": bundle.question_reason,
+                                "answers": bundle.answers,
+                            }
+                            for bundle in result.qa_bundles
+                        ],
                     },
                     indent=2,
                 )
@@ -456,6 +503,24 @@ class DocxQuestionCLI:
                 f"[{label:<7}] Block {entry.index} ({entry.block_type}){question_ref}: {text}"
             )
             print(f"          Reason: {entry.reason}")
+
+        print("\nQuestion → Answer map:")
+        if not result.qa_bundles:
+            print("  (no questions identified)")
+        else:
+            for bundle in result.qa_bundles:
+                print(
+                    f"? Block {bundle.question_block}: {bundle.question} "
+                    f"(reason: {bundle.question_reason})"
+                )
+                if not bundle.answers:
+                    print("    ↳ No answers captured for this question.")
+                    continue
+                for answer in bundle.answers:
+                    print(
+                        f"    ↳ Answer block {answer['block']}: {answer['text']} "
+                        f"(reason: {answer['reason']})"
+                    )
 
     @staticmethod
     def _format_question(entry: Dict[str, Any]) -> str:
