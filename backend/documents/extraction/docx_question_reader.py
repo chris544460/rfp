@@ -2,7 +2,10 @@
 docx_question_reader.py
 
 Object-oriented helper that mirrors the backend QuestionExtractor logic so DOCX
-files can be inspected programmatically or via a simple CLI entry point.
+files can be inspected programmatically or via a simple CLI entry point. In
+addition to reporting the detected questions, this module now classifies every
+block of text as a question, an answer to the most recent question, or neither,
+and explains why each classification was made.
 
 Examples:
     python backend/documents/extraction/docx_question_reader.py path/to/file.docx
@@ -17,12 +20,53 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+import re
+from collections import defaultdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
+from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+
+from backend.documents.docx.slot_finder import QUESTION_PHRASES, _expand_doc_blocks
 from backend.documents.extraction.question_extractor import QuestionExtractor
 from backend.llm.completions_client import CompletionsClient
+
+ANSWER_PREFIXES = (
+    "answer:",
+    "response:",
+    "our answer",
+    "our response",
+    "yes,",
+    "no,",
+    "we ",
+    "our ",
+    "the firm",
+    "the company",
+)
+
+
+@dataclass
+class BlockRecord:
+    """Lightweight representation of a DOCX block for classification."""
+
+    index: int
+    block_type: Literal["paragraph", "table"]
+    text: str
+
+
+@dataclass
+class BlockClassification:
+    """Classification details for a single block of text."""
+
+    index: int
+    block_type: str
+    classification: Literal["question", "answer", "none"]
+    text: str
+    reason: str
+    question_reference: Optional[str] = None
 
 
 @dataclass
@@ -31,10 +75,11 @@ class ExtractionResult:
 
     questions: List[Dict[str, Any]]
     details: Dict[str, Any]
+    classifications: List[BlockClassification]
 
 
 class DocxQuestionAnalyzer:
-    """Core service that loads a DOCX and returns its detected questions."""
+    """Core service that loads a DOCX and returns question/answer classifications."""
 
     def __init__(self, *, treat_docx_as_text: bool = False, model: str = "gpt-5-nano"):
         self.treat_docx_as_text = treat_docx_as_text
@@ -48,15 +93,299 @@ class DocxQuestionAnalyzer:
 
     def extract_from_path(self, docx_path: Path) -> ExtractionResult:
         path = self._validate_path(docx_path)
+        questions = self._run_question_extraction(path)
+        blocks = self._load_blocks(path)
+        classifications = self._classify_blocks(blocks, questions)
+        return ExtractionResult(
+            questions=questions,
+            details=self._extractor.last_details,
+            classifications=classifications,
+        )
+
+    def _run_question_extraction(self, path: Path) -> List[Dict[str, Any]]:
         with path.open("rb") as stream:
-            payload = self._extractor.extract(
+            return self._extractor.extract(
                 stream,
                 treat_docx_as_text=self.treat_docx_as_text,
             )
-        return ExtractionResult(
-            questions=payload,
-            details=self._extractor.last_details,
+
+    def _load_blocks(self, path: Path) -> List[BlockRecord]:
+        doc = Document(str(path))
+        raw_blocks = _expand_doc_blocks(doc)
+        records: List[BlockRecord] = []
+        for idx, block in enumerate(raw_blocks):
+            block_type: Literal["paragraph", "table"] = (
+                "table" if isinstance(block, Table) else "paragraph"
+            )
+            text = self._extract_block_text(block)
+            records.append(BlockRecord(index=idx, block_type=block_type, text=text))
+        return records
+
+    @staticmethod
+    def _extract_block_text(block: Paragraph | Table) -> str:
+        if isinstance(block, Paragraph):
+            return (block.text or "").strip()
+        lines: List[str] = []
+        try:
+            for row in block.rows:
+                cells = [
+                    (cell.text or "").strip()
+                    for cell in row.cells
+                    if cell.text and cell.text.strip()
+                ]
+                if cells:
+                    lines.append(" | ".join(cells))
+        except Exception:
+            return ""
+        return "\n".join(lines).strip()
+
+    def _classify_blocks(
+        self,
+        blocks: List[BlockRecord],
+        question_payload: List[Dict[str, Any]],
+    ) -> List[BlockClassification]:
+        slot_map = self._map_slots_to_blocks(blocks, question_payload)
+        classifications: List[BlockClassification] = []
+        active_question: Optional[str] = None
+        distance_from_question: Optional[int] = None
+        trailing_blank_blocks = 0
+
+        for block in blocks:
+            text = block.text.strip()
+            slot_hits = slot_map.get(block.index, [])
+
+            if slot_hits:
+                question_text = self._slot_question_text(slot_hits, text)
+                reason = self._question_reason(slot_hits, block.index)
+                classifications.append(
+                    BlockClassification(
+                        index=block.index,
+                        block_type=block.block_type,
+                        classification="question",
+                        text=text,
+                        reason=reason,
+                        question_reference=question_text,
+                    )
+                )
+                active_question = question_text
+                distance_from_question = 0
+                trailing_blank_blocks = 0
+                continue
+
+            heuristic_question = self._looks_like_question(text)
+            if heuristic_question and not slot_map:
+                reason = "Heuristic question phrasing detected in text-extraction mode."
+                classifications.append(
+                    BlockClassification(
+                        index=block.index,
+                        block_type=block.block_type,
+                        classification="question",
+                        text=text,
+                        reason=reason,
+                        question_reference=text or None,
+                    )
+                )
+                active_question = text or None
+                distance_from_question = 0
+                trailing_blank_blocks = 0
+                continue
+
+            if active_question is not None:
+                distance_from_question = (distance_from_question or 0) + 1
+            else:
+                distance_from_question = None
+
+            if not text:
+                trailing_blank_blocks += 1
+            else:
+                trailing_blank_blocks = 0
+            if trailing_blank_blocks >= 2:
+                active_question = None
+                distance_from_question = None
+
+            answer_reason = self._answer_reason(
+                block=block,
+                text=text,
+                active_question=active_question,
+                offset=distance_from_question,
+            )
+            if answer_reason:
+                classifications.append(
+                    BlockClassification(
+                        index=block.index,
+                        block_type=block.block_type,
+                        classification="answer",
+                        text=text,
+                        reason=answer_reason,
+                        question_reference=active_question,
+                    )
+                )
+                continue
+
+            none_reason = self._none_reason(
+                text=text,
+                has_question_context=active_question is not None,
+                heuristic_question=heuristic_question,
+            )
+            classifications.append(
+                BlockClassification(
+                    index=block.index,
+                    block_type=block.block_type,
+                    classification="none",
+                    text=text,
+                    reason=none_reason,
+                    question_reference=active_question,
+                )
+            )
+        return classifications
+
+    def _map_slots_to_blocks(
+        self,
+        blocks: List[BlockRecord],
+        question_payload: List[Dict[str, Any]],
+    ) -> Dict[int, List[Dict[str, Any]]]:
+        slot_map: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        unmatched: List[Dict[str, Any]] = []
+
+        for slot in question_payload:
+            meta = slot.get("meta") or {}
+            q_block = meta.get("q_block")
+            if q_block is not None:
+                slot_map[q_block].append(slot)
+            else:
+                unmatched.append(slot)
+
+        if not unmatched:
+            return slot_map
+
+        normalized_blocks: Dict[str, List[int]] = defaultdict(list)
+        for block in blocks:
+            normalized = self._normalize_for_match(block.text)
+            if normalized:
+                normalized_blocks[normalized].append(block.index)
+
+        for slot in unmatched:
+            normalized_question = self._normalize_for_match(
+                slot.get("question") or slot.get("question_text") or ""
+            )
+            if not normalized_question:
+                continue
+            candidates = normalized_blocks.get(normalized_question)
+            if not candidates:
+                continue
+            block_index = candidates.pop(0)
+            if not candidates:
+                normalized_blocks.pop(normalized_question, None)
+            slot_map[block_index].append(slot)
+
+        return slot_map
+
+    @staticmethod
+    def _slot_question_text(slots: List[Dict[str, Any]], fallback: str) -> str:
+        for slot in slots:
+            text = (
+                slot.get("question")
+                or slot.get("question_text")
+                or slot.get("question_label")
+            )
+            if text:
+                return text.strip()
+        return fallback
+
+    @staticmethod
+    def _question_reason(slots: List[Dict[str, Any]], block_index: int) -> str:
+        detectors = sorted(
+            {
+                (slot.get("meta") or {}).get("detector", "unknown")
+                for slot in slots
+                if slot.get("meta")
+            }
         )
+        detector_fragment = f"detectors: {', '.join(detectors)}" if detectors else "slot metadata"
+        return f"Identified as question at block {block_index} via {detector_fragment}."
+
+    def _answer_reason(
+        self,
+        *,
+        block: BlockRecord,
+        text: str,
+        active_question: Optional[str],
+        offset: Optional[int],
+    ) -> Optional[str]:
+        if (
+            active_question is None
+            or not text
+            or offset is None
+            or offset > 8
+            or self._looks_like_question(text)
+        ):
+            return None
+
+        signals: List[str] = []
+        if self._looks_like_answer(text):
+            signals.append("answer-like phrasing detected")
+        if block.block_type == "table":
+            signals.append("table block contains populated cells")
+        if len(text.split()) >= 6:
+            signals.append("multi-word content immediately after the question")
+
+        if not signals:
+            return None
+
+        signal_str = "; ".join(signals)
+        return (
+            f"Linked to previous question '{active_question}' "
+            f"(offset {offset}) because {signal_str}."
+        )
+
+    @staticmethod
+    def _none_reason(
+        *,
+        text: str,
+        has_question_context: bool,
+        heuristic_question: bool,
+    ) -> str:
+        fragments = ["No question slot match"]
+        if has_question_context:
+            fragments.append("inside question context but lacked answer signals")
+        else:
+            fragments.append("outside any active question context")
+        if not text:
+            fragments.append("block is empty")
+        elif heuristic_question:
+            fragments.append("question-like phrasing already accounted for elsewhere")
+        return "; ".join(fragments) + "."
+
+    @staticmethod
+    def _normalize_for_match(text: str) -> str:
+        return " ".join(DocxQuestionAnalyzer._strip_leading_number(text).split()).lower()
+
+    @staticmethod
+    def _strip_leading_number(text: str) -> str:
+        return re.sub(r"^\s*\d+[\.\)]\s*", "", text or "")
+
+    @staticmethod
+    def _looks_like_question(text: str) -> bool:
+        clean = (text or "").strip()
+        if not clean:
+            return False
+        lower = clean.lower()
+        if clean.endswith("?"):
+            return True
+        if lower.startswith(("who", "what", "where", "when", "why", "how")):
+            return True
+        return any(phrase in lower for phrase in QUESTION_PHRASES)
+
+    @staticmethod
+    def _looks_like_answer(text: str) -> bool:
+        clean = (text or "").strip().lower()
+        if not clean:
+            return False
+        if clean.startswith(ANSWER_PREFIXES):
+            return True
+        if " we " in f" {clean} " or " our " in f" {clean} ":
+            return True
+        return len(clean.split()) >= 10
 
     @staticmethod
     def _validate_path(docx_path: Path) -> Path:
@@ -84,27 +413,49 @@ class DocxQuestionCLI:
         if self.output_json:
             print(
                 json.dumps(
-                    {"questions": result.questions, "details": result.details},
+                    {
+                        "questions": result.questions,
+                        "details": result.details,
+                        "classifications": [asdict(cls) for cls in result.classifications],
+                    },
                     indent=2,
                 )
             )
             return
-        self._print_human_readable(result.questions)
+        self._print_human_readable(result)
 
-    def _print_human_readable(self, questions: List[Dict[str, Any]]) -> None:
-        if not questions:
+    def _print_human_readable(self, result: ExtractionResult) -> None:
+        if not result.questions:
             print("No questions were detected in the document.")
+        else:
+            print("Detected questions:")
+            for idx, entry in enumerate(result.questions, start=1):
+                print(f"{idx}. {self._format_question(entry)}")
+                if self.show_metadata:
+                    metadata = {
+                        key: value
+                        for key, value in entry.items()
+                        if key != "question"
+                    }
+                    if metadata:
+                        print(json.dumps(metadata, indent=2))
+
+        print("\nBlock classifications:")
+        if not result.classifications:
+            print("  (no blocks parsed)")
             return
-        for idx, entry in enumerate(questions, start=1):
-            print(f"{idx}. {self._format_question(entry)}")
-            if self.show_metadata:
-                metadata = {
-                    key: value
-                    for key, value in entry.items()
-                    if key != "question"
-                }
-                if metadata:
-                    print(json.dumps(metadata, indent=2))
+        for entry in result.classifications:
+            label = entry.classification.upper()
+            text = entry.text or "<blank>"
+            question_ref = (
+                f" (question: {entry.question_reference})"
+                if entry.question_reference and entry.classification != "question"
+                else ""
+            )
+            print(
+                f"[{label:<7}] Block {entry.index} ({entry.block_type}){question_ref}: {text}"
+            )
+            print(f"          Reason: {entry.reason}")
 
     @staticmethod
     def _format_question(entry: Dict[str, Any]) -> str:
@@ -124,7 +475,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Print the raw question payload as JSON (includes metadata).",
+        help="Print the raw question payload and classifications as JSON.",
     )
     parser.add_argument(
         "--show-metadata",
@@ -182,10 +533,10 @@ def main(
     model: Optional[str] = None,
     output_json: Optional[bool] = None,
     show_metadata: Optional[bool] = None,
-) -> List[Dict[str, Any]]:
+) -> ExtractionResult:
     """
     Primary entry point so other modules can call `main(Path("foo.docx"))`
-    and receive the extracted questions.
+    and receive the extracted questions along with block classifications.
     """
     cfg = _consume_args_or_defaults(
         docx_path,
@@ -208,7 +559,7 @@ def main(
         )
         renderer.render(result)
 
-    return result.questions
+    return result
 
 
 if __name__ == "__main__":
