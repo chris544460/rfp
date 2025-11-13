@@ -886,7 +886,7 @@ class ApprovedQAParser:
         )
         return variants
 
-    @staticmethod
+    @classmethod
     def _build_record(
         *,
         question: str,
@@ -916,7 +916,7 @@ class ApprovedQAParser:
             tags=[t.strip() for t in tags if t and str(t).strip()],
             source=source,
             # Drop empty metadata entries to keep payload tidy.
-            metadata=self._normalize_metadata(metadata),
+            metadata=cls._normalize_metadata(metadata),
         )
         print(
             "[ApprovedQAParser] _build_record: constructed record "
