@@ -19,6 +19,9 @@ Examples:
 
     result = main(Path("my.docx"))
     print(result.question_answer_dict())
+    # Or shorthand:
+    from backend.documents.extraction.docx_question_reader import extract_question_answer_pairs
+    qa_pairs = extract_question_answer_pairs("my.docx")
 
 Use the --treat-docx-as-text flag to force the fallback text-extraction path.
 That mode requires the custom CompletionsClient environment variables because
@@ -34,7 +37,7 @@ import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from docx import Document
 from docx.table import Table
@@ -841,6 +844,32 @@ def main(
         renderer.render(result)
 
     return result
+
+
+def extract_question_answer_pairs(
+    docx_path: Union[str, Path],
+    *,
+    treat_docx_as_text: bool = False,
+    model: str = "gpt-5-nano",
+    use_llm_classifier: bool = False,
+    classifier_model: Optional[str] = None,
+) -> Dict[str, List[str]]:
+    """
+    Convenience helper for pure-module usage. Example::
+
+        qa_pairs = extract_question_answer_pairs("rfp.docx")
+
+    Returns a mapping {question: [answers...]}.
+    """
+    path = Path(docx_path)
+    result = main(
+        path,
+        treat_docx_as_text=treat_docx_as_text,
+        model=model,
+        use_llm_classifier=use_llm_classifier,
+        classifier_model=classifier_model,
+    )
+    return result.question_answer_dict()
 
 
 if __name__ == "__main__":
