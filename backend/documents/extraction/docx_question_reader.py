@@ -12,6 +12,13 @@ Examples:
     python backend/documents/extraction/docx_question_reader.py file.docx --json
     python backend/documents/extraction/docx_question_reader.py file.docx --show-metadata
     python backend/documents/extraction/docx_question_reader.py file.docx --use-llm-classifier
+    python backend/documents/extraction/docx_question_reader.py file.docx --qa-only
+    # Programmatic usage
+    from pathlib import Path
+    from backend.documents.extraction.docx_question_reader import main
+
+    result = main(Path("my.docx"))
+    print(result.question_answer_dict())
 
 Use the --treat-docx-as-text flag to force the fallback text-extraction path.
 That mode requires the custom CompletionsClient environment variables because
@@ -107,6 +114,12 @@ class ExtractionResult:
     details: Dict[str, Any]
     classifications: List[BlockClassification]
     qa_bundles: List[QuestionAnswerBundle]
+
+    def question_answer_dict(self) -> Dict[str, List[str]]:
+        return {
+            bundle.question: [answer["text"] for answer in bundle.answers]
+            for bundle in self.qa_bundles
+        }
 
 
 class LLMBlockClassifier:
@@ -592,11 +605,16 @@ class DocxQuestionCLI:
         *,
         show_metadata: bool = False,
         output_json: bool = False,
+        qa_only: bool = False,
     ):
         self.show_metadata = show_metadata
         self.output_json = output_json
+        self.qa_only = qa_only
 
     def render(self, result: ExtractionResult) -> None:
+        if self.qa_only:
+            self._print_qa_only(result)
+            return
         if self.output_json:
             print(
                 json.dumps(
@@ -619,6 +637,22 @@ class DocxQuestionCLI:
             )
             return
         self._print_human_readable(result)
+
+    def _print_qa_only(self, result: ExtractionResult) -> None:
+        qa_dict = result.question_answer_dict()
+        if self.output_json:
+            print(json.dumps(qa_dict, indent=2))
+            return
+        if not qa_dict:
+            print("No question→answer pairs were found.")
+            return
+        for question, answers in qa_dict.items():
+            print(f"? {question}")
+            if not answers:
+                print("  ↳ (no answers)")
+                continue
+            for ans in answers:
+                print(f"  ↳ {ans}")
 
     def _print_human_readable(self, result: ExtractionResult) -> None:
         if not result.questions:
@@ -719,6 +753,11 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override model ID for the block classifier.",
     )
+    parser.add_argument(
+        "--qa-only",
+        action="store_true",
+        help="Print only the question→answer dictionary output.",
+    )
     return parser.parse_args()
 
 
@@ -731,6 +770,7 @@ def _consume_args_or_defaults(
     show_metadata: Optional[bool],
     use_llm_classifier: Optional[bool],
     classifier_model: Optional[str],
+    qa_only: Optional[bool],
 ) -> Dict[str, Any]:
     if docx_path is not None:
         return {
@@ -741,6 +781,7 @@ def _consume_args_or_defaults(
             "show_metadata": bool(show_metadata),
             "use_llm_classifier": bool(use_llm_classifier),
             "classifier_model": classifier_model or model or "gpt-5-nano",
+            "qa_only": bool(qa_only),
             "cli_mode": False,
         }
     args = _parse_args()
@@ -752,6 +793,7 @@ def _consume_args_or_defaults(
         "show_metadata": args.show_metadata,
         "use_llm_classifier": args.use_llm_classifier,
         "classifier_model": args.classifier_model or args.model,
+        "qa_only": args.qa_only,
         "cli_mode": True,
     }
 
@@ -765,6 +807,7 @@ def main(
     show_metadata: Optional[bool] = None,
     use_llm_classifier: Optional[bool] = None,
     classifier_model: Optional[str] = None,
+    qa_only: Optional[bool] = None,
 ) -> ExtractionResult:
     """
     Primary entry point so other modules can call `main(Path("foo.docx"))`
@@ -778,6 +821,7 @@ def main(
         show_metadata=show_metadata,
         use_llm_classifier=use_llm_classifier,
         classifier_model=classifier_model,
+        qa_only=qa_only,
     )
 
     analyzer = DocxQuestionAnalyzer(
@@ -792,6 +836,7 @@ def main(
         renderer = DocxQuestionCLI(
             show_metadata=cfg["show_metadata"],
             output_json=cfg["output_json"],
+            qa_only=cfg["qa_only"],
         )
         renderer.render(result)
 
