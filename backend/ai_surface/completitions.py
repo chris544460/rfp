@@ -160,7 +160,7 @@ class Completitions:
         if not texts:
             return []
 
-        url = f"{self.env}/api/ai-platform/toolkit/embedding/v1/embeddings:generate"
+        url = "https://dev.blackrock.com/api/ai-platform/toolkit/embedding/v1/embeddings:generate"
         payload = {"texts": list(texts), "modelId": model}
 
         for attempt in range(retries):
@@ -310,6 +310,21 @@ def _normalize_l2(vector: Sequence[float]) -> np.ndarray:
     if norm == 0:
         return arr
     return arr / norm
+
+
+def cosine_similarity(a, b) -> float:
+    """
+    Compute cosine similarity between two vectors.
+    Returns a float in [-1.0, 1.0]; for normalized vectors this is in [0.0, 1.0].
+    """
+    import math
+
+    if len(a) != len(b):
+        raise ValueError("Vectors must have the same length")
+    dot = sum(float(x) * float(y) for x, y in zip(a, b))
+    na = math.sqrt(sum(float(x) ** 2 for x in a))
+    nb = math.sqrt(sum(float(y) ** 2 for y in b))
+    return dot / (na * nb) if na and nb else 0.0
 
 
 __all__ = ["Completitions"]
