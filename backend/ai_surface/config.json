@@ -1,0 +1,6 @@
+{
+  "storageAccountUrl": "https://rfptool.blob.core.windows.net",
+  "aiSearchEndpoint": "https://search-gio.search.windows.net",
+  "indexName": "rfp-ai",
+  "embeddingModel": "text-embedding-ada-002"
+}
