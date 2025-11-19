@@ -261,10 +261,11 @@ def _quick_question_candidate(text: str) -> bool:
 _ENUM_PREFIX_RE = re.compile(
     r"^\s*(?:"
     r"(?:\(?\d+(?:\.\d+)*\)?[.)]?)|"     # 1   1.1   2.3.4   (1)   1)
-    r"(?:[A-Za-z][.)])|"                      # a)   A)   a.   A.
-    r"(?:\([A-Za-z0-9]+\))"                 # (a)  (A)  (i)  (1)
+    r"(?:[A-Za-z][.)])|"                 # a)   A)   a.   A.
+    r"(?:\([A-Za-z0-9]+\))"              # (a)  (A)  (i)  (1)
     r")\s+"
 )
+_Q_PREFIX_RE = re.compile(r"^\s*q\d+(?:[.:)\-])?", re.IGNORECASE)
 
 def strip_enum_prefix(text: str) -> str:
     """Remove a single leading enumeration token like '1.1 ', '(a) ', 'A) '."""
@@ -324,6 +325,10 @@ def _looks_like_question(text: str) -> bool:
 
     # Presence of a question mark anywhere is a strong signal
     if "?" in t_raw:
+        return True
+
+    q_prefix = _Q_PREFIX_RE.match(t_raw)
+    if q_prefix and t_raw[q_prefix.end():].strip():
         return True
 
     # Remove enumeration prefix (e.g. '1.1 ', '(a) ') before heuristic checks
